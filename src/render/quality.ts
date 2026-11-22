@@ -20,7 +20,7 @@ const TIERS: Record<QualityLevel, QualitySettings> = {
     antialias: true,
     shadows: true,
     shadowMapSize: 2048,
-    grassDensity: 0.6,
+    grassDensity: 0.5,
     postFX: true,
     detailDistance: 40,
     creatureDetail: 1,

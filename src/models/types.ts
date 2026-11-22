@@ -1,0 +1,263 @@
+// Public types of the creature framework (species authors read this file
+// together with src/models/README.md).
+
+import type * as THREE from 'three';
+import type { SpeciesDef } from '../core/types';
+import type { Prim, Vec3 } from './sdf/prims';
+import type { BoneSpec, Pose, RigDef, RigRuntime } from './rig/rig';
+
+export type { Prim, Vec3 } from './sdf/prims';
+export type { BoneSpec } from './rig/rig';
+
+// ---------------------------------------------------------------------------
+// Rig roles (semantic bone mapping)
+
+/** One leg: bone names from the body outward. */
+export interface LegSpec {
+  /** Optional shoulder-blade bone (rotates with the stride: big cats, bears). */
+  scap?: string;
+  /** Joint at shoulder / hip. */
+  upper: string;
+  /** Joint at elbow / knee (stifle). */
+  lower: string;
+  /** Joint at wrist (carpus) / ankle (hock). */
+  foot: string;
+  /** Optional joint at fetlock / toes (pastern+hoof or paw). */
+  toe?: string;
+  /** Ground-contact point at rest (model space, y = 0) under the hoof / paw. */
+  contact: Vec3;
+}
+
+export type LegId = 'FL' | 'FR' | 'HL' | 'HR';
+
+export interface RigRoles {
+  /** Skeleton root (pelvis / hips). */
+  root: string;
+  /** Spine chain from hips (exclusive) towards the chest (exclusive). */
+  spine?: string[];
+  chest?: string;
+  /** Neck chain from chest towards the head (exclusive). */
+  neck?: string[];
+  head?: string;
+  jaw?: string;
+  /** Tail chain from the base outward. */
+  tail?: string[];
+  /** Ears (left first). */
+  ears?: string[];
+  /** Four legs for quadrupeds; bipeds use HL / HR (and arms below). */
+  legs?: Partial<Record<LegId, LegSpec>>;
+  /** Biped arms / bird wings: [shoulder?, upper, lower, hand]. */
+  arms?: Partial<Record<'L' | 'R', { clavicle?: string; upper: string; lower: string; hand: string }>>;
+  /** Extra named chains (trunk, ...) for species-specific animation. */
+  chains?: Record<string, string[]>;
+  /** Model-space rest position of the mouth / muzzle tip (eat & drink reach the ground with it). */
+  muzzle?: Vec3;
+}
+
+// ---------------------------------------------------------------------------
+// Coat
+
+/**
+ * One surface sample handed to a coat function. Inputs are rest-pose model
+ * space. Write the outputs (colours are LINEAR RGB; `color.setHex(0xRRGGBB)`
+ * converts from sRGB automatically).
+ */
+export interface CoatSample {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly nx: number;
+  readonly ny: number;
+  readonly nz: number;
+  /** Part tag of the primitive the sample most belongs to. */
+  readonly part: string;
+  /** Bone of that primitive. */
+  readonly bone: string;
+  /** Axis parameter of that primitive (cones: 0 at `a` … 1 at `b`; others 0). */
+  readonly t: number;
+  /** Smooth membership 0..1 of a part tag (weights over all parts sum to 1). */
+  pw(part: string): number;
+  /** Smallest raw SDF distance (m) from the sample to any primitive tagged `part` (1e3 if none). */
+  pd(part: string): number;
+  /** Base coat colour (linear). */
+  readonly color: THREE.Color;
+  /** Pattern colour (stripes / patches), used where the pattern mask is on. */
+  readonly color2: THREE.Color;
+  /**
+   * Pattern scalar. With look.pattern 'stripes': stripes where fract(s) is
+   * within w/2 of an integer (so `s` = distance / stripe period). With
+   * 'field': colour2 where s > 0 (signed distance-like, metres). Evaluated
+   * per pixel, so stripes stay crisp on coarse meshes.
+   */
+  s: number;
+  /** Stripe duty (0 = no stripe … 1 = all stripe). Ignored for 'field'. */
+  w: number;
+  /** 0 = matte fur … 1 = wet / glossy (nose leather, eyes). */
+  gloss: number;
+  /** Fur strand length multiplier for the micro-normal (1 = look.grain; manes ≈ 3–4). */
+  fur: number;
+}
+
+export type CoatFn = (c: CoatSample) => void;
+
+// ---------------------------------------------------------------------------
+// Look (material)
+
+export interface LookSpec {
+  /** Micro-surface: fur strands, cracked hide, smooth skin or feathers. */
+  skin: 'fur' | 'hide' | 'smooth' | 'feather';
+  /** Per-pixel pattern mode (see CoatSample.s). Default 'none'. */
+  pattern?: 'none' | 'stripes' | 'field';
+  /** Base roughness (default 0.86). */
+  roughness?: number;
+  /** Soft rim / fuzz term strength 0..1 (default 0.35 for fur). */
+  sheen?: number;
+  /** Fur strand / wrinkle scale in metres (default 0.006). */
+  grain?: number;
+  /** Micro-normal strength 0..1 (default 0.5). */
+  bump?: number;
+  /** Albedo clump variation 0..1 (default 0.12). */
+  mottle?: number;
+}
+
+export interface EyeSpec {
+  bone: string;
+  /** Centre of the LEFT eye (x > 0) in model space; mirrored to the right. */
+  pos: Vec3;
+  radius: number;
+  /** sRGB hex (default very dark brown). */
+  color?: number;
+}
+
+export interface RegionOpts {
+  /** Cell size relative to the base cell (default: auto from the thinnest primitive). */
+  scale?: number;
+  /** Per-axis multiplier applied on top (e.g. [1, 2.2, 1] for long vertical legs). */
+  aniso?: Vec3;
+}
+
+// ---------------------------------------------------------------------------
+// Animation
+
+/** Per-frame animation context handed to drivers and action functions. */
+export interface AnimCtx {
+  readonly rig: RigRuntime;
+  readonly def: RigDef;
+  readonly roles: ResolvedRoles;
+  readonly design: CreatureDesign;
+  /** Seconds since creation plus a random per-instance offset. */
+  time: number;
+  dt: number;
+  /** Ground speed in MODEL units per second (world speed / root scale). */
+  speed: number;
+  actionTime: number;
+  swimming: boolean;
+  holding: string;
+  /** Yaw rate of the root object (rad/s, + = turning left / counter-clockwise from above). */
+  turnRate: number;
+  seed: number;
+  /** Per-instance random in [0,1). */
+  rand: number;
+  sex: 'M' | 'F';
+  growth: number;
+  /** Humans: 'guest' | 'keeper' | 'groundskeeper' | 'vet'; animals: ''. */
+  role: string;
+  /** The action currently requested (after alias resolution). */
+  action: string;
+}
+
+/** Bone indices resolved from RigRoles (-1 = missing). */
+export interface ResolvedRoles {
+  root: number;
+  spine: number[];
+  chest: number;
+  neck: number[];
+  head: number;
+  jaw: number;
+  tail: number[];
+  ears: number[];
+  legs: Partial<Record<LegId, ResolvedLeg>>;
+  arms: Partial<Record<'L' | 'R', { clavicle: number; upper: number; lower: number; hand: number }>>;
+  chains: Record<string, number[]>;
+  muzzle: THREE.Vector3 | null;
+}
+
+export interface ResolvedLeg {
+  scap: number;
+  upper: number;
+  lower: number;
+  foot: number;
+  toe: number;
+  contact: THREE.Vector3;
+}
+
+export type ActionFn<S> = (ctx: AnimCtx, state: S, pose: Pose) => void;
+
+/**
+ * An animation driver: per-instance state + one pose function per action.
+ * Action functions start from a reset (rest) pose and write local rotations /
+ * offsets; the framework crossfades between actions and applies the result.
+ */
+export interface AnimDriver<S> {
+  /** Create per-instance state (called once per model instance). */
+  init(ctx: AnimCtx): S;
+  /** Called once per frame before any action function (advance gait phase, timers…). */
+  pre?(ctx: AnimCtx, state: S): void;
+  actions: Record<string, ActionFn<S>>;
+  /** Called after blending with the final pose (additive layers: trunk swing, breathing). */
+  post?(ctx: AnimCtx, state: S, pose: Pose): void;
+  /** Map requested action names to implemented ones (e.g. { run: 'walk', sit: 'sleep' }). */
+  aliases?: Record<string, string>;
+  /** Action used for unknown names (default 'idle'). */
+  fallback?: string;
+  /** Crossfade time in seconds (default 0.4). */
+  fade?: number;
+  /** Per-action crossfade times (e.g. { sleep: 1.2 } for slow lying down). */
+  fades?: Record<string, number>;
+}
+
+/** Type-erased driver stored in a design (use `driver()` to create one). */
+export interface AnyDriver {
+  readonly __erased: true;
+}
+
+// ---------------------------------------------------------------------------
+// Design
+
+export interface CreatureDesign {
+  bones: BoneSpec[];
+  roles: RigRoles;
+  prims: Prim[];
+  /** Detail regions keyed by Prim.region. */
+  regions?: Record<string, RegionOpts>;
+  /** Grid resolution multiplier (default 1). */
+  resolution?: number;
+  coat: CoatFn;
+  look: LookSpec;
+  eyes?: EyeSpec[];
+  anim: AnyDriver;
+  /** Root scale of a newborn (growth 0), default 0.4. */
+  babyScale?: number;
+  /** Extra head scale of a newborn, default 1.3. */
+  babyHead?: number;
+  /** Override computed standing height (m). */
+  height?: number;
+  /** Override computed radius (m). */
+  radius?: number;
+}
+
+export interface DesignContext {
+  def: SpeciesDef;
+  sex: 'M' | 'F';
+  detail: 0 | 1 | 2;
+}
+
+/** What a species file exports (default export). */
+export interface SpeciesModel {
+  id: string;
+  /** Male and female use different meshes (e.g. lion mane). */
+  dimorphic?: boolean;
+  design(ctx: DesignContext): CreatureDesign;
+  /** Per-instance uniform scale (default: males 1.0, females 0.94, ±3% jitter). */
+  instanceScale?(sex: 'M' | 'F', rand: number): number;
+}
