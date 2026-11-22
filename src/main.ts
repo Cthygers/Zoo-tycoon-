@@ -207,7 +207,7 @@ async function boot() {
   resize();
 
   // Expose for debugging / automated screenshots.
-  (window as unknown as Record<string, unknown>).__game = { sim, ctx, props, creatures, views, events, save };
+  (window as unknown as Record<string, unknown>).__game = { sim, ctx, props, creatures, views, events, save, ui };
   (window as unknown as Record<string, unknown>).__ready = true;
 }
 
