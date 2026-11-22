@@ -1,0 +1,29 @@
+{
+  "name": "wildhaven-zoo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Wildhaven Zoo - an original 3D zoo-building management game for Android",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc --noEmit && vite build",
+    "build:nocheck": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "android:sync": "npm run build && npx cap sync android",
+    "android:apk": "npm run android:sync && cd android && ./gradlew assembleDebug"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.6.2",
+    "@capacitor/core": "8.6.2",
+    "three": "0.187.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.6.2",
+    "@types/three": "0.187.0",
+    "typescript": "5.9.3",
+    "vite": "8.3.8",
+    "vitest": "5.1.1"
+  }
+}
