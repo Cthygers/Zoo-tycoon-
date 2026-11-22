@@ -1,3 +1,4 @@
+import type * as THREE from 'three';
 // Wildhaven UI module — public API:
 //   createGameUI(root, deps)      → IGameUI (HUD, build dock, tools, panels, camera, input)
 //   showLoadingScreen(root)       → { setProgress, hide }
@@ -404,6 +405,15 @@ class GameUI implements GameUIHandle {
       this.affordAcc = 0;
       this.dock.refreshAffordability();
     }
+  }
+
+  get focus(): THREE.Vector3 {
+    return this.camera.target;
+  }
+
+  handleBack(): boolean {
+    // TODO(polish): close panels / cancel tools.
+    return false;
   }
 
   dispose(): void {

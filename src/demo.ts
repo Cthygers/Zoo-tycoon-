@@ -122,7 +122,9 @@ export function buildDemoZoo(sim: ISimulation, seed = 4242): DemoReport {
         { t: Terrain.Dirt, frac: 0.25, scale: 0.15 },
         { t: Terrain.Mud, frac: 0.08, scale: 0.3 },
       ],
+      pond: { cx: 19, cz: 22, rx: 4, rz: 3, deep: false },
       objects: [
+        { id: 'water_trough', n: 1 },
         { id: 'tree_acacia', n: 6 },
         { id: 'tree_baobab', n: 2 },
         { id: 'rock_boulder', n: 6 },
@@ -193,6 +195,8 @@ export function buildDemoZoo(sim: ISimulation, seed = 4242): DemoReport {
         { id: 'bush_fern', n: 6 },
         { id: 'climbing_frame', n: 1 },
         { id: 'log_fallen', n: 1 },
+        { id: 'water_trough', n: 1 },
+        { id: 'shelter_wood', n: 1 },
       ],
       animals: [{ species: 'gorilla', n: 4 }],
     },

@@ -118,6 +118,10 @@ export interface ISimulation {
   bulldoze(rect: TileRect, dryRun?: boolean): CommandResult;
   /** Remove specific fence edges (partial refund). */
   removeFences(edges: EdgeRef[], dryRun?: boolean): CommandResult;
+  /** Remove one placed object (partial refund). Fences and paths are untouched. */
+  removeObject(objectId: number, dryRun?: boolean): CommandResult;
+  /** Rename a habitat (trimmed, max ~32 chars). */
+  renameHabitat(habitatId: number, name: string): CommandResult;
   /** Adopt an animal at a world position; must be inside a habitat. */
   buyAnimal(speciesId: string, wx: number, wz: number, dryRun?: boolean): CommandResult;
   sellAnimal(animalId: number): CommandResult;
@@ -127,6 +131,10 @@ export interface ISimulation {
   setSpeed(speed: SimSpeed): void;
 
   // ---- queries
+  /** Daily wage of a staff role (also charged up front when hiring). */
+  staffWage(role: StaffRole): number;
+  /** Price to repaint one tile with this terrain type. */
+  terrainCost(terrain: Terrain): number;
   habitatReport(habitatId: number): HabitatReport | null;
   /** How well a habitat suits a species (for the adopt menu preview). */
   suitability(speciesId: string, habitatId: number): SpeciesSuitability;
@@ -220,6 +228,18 @@ export interface CreatureModel {
 }
 
 export interface ICreatureFactory {
+  /**
+   * Scene-level group the factory may use for batched / instanced crowd
+   * rendering (main.ts adds it to the scene). May stay empty.
+   */
+  readonly root: THREE.Object3D;
+  /**
+   * Called once per frame after all CreatureModel.update calls: pick LODs from
+   * the camera distance, flush instance buffers, decide shadow casting.
+   */
+  update(camera: THREE.Camera): void;
+  /** Apply a new quality tier to models created from now on (and LOD distances). */
+  setQuality(quality: QualitySettings): void;
   /** Build (and cache) the meshes for these species up front. */
   preload(speciesIds: string[], onProgress?: (fraction: number) => void): Promise<void>;
   createAnimal(speciesId: string, opts: { seed: number; sex: 'M' | 'F'; growth: number }): CreatureModel;
@@ -244,8 +264,22 @@ export interface IPropsLayer {
   /** Ray-cast placed objects; returns the PlacedObject id or null. */
   pickObject(raycaster: THREE.Raycaster): number | null;
   setHighlight(objectId: number | null): void;
+  /** Apply a new quality tier (detail distances, shadows, LOD, light count). */
+  setQuality(quality: QualitySettings): void;
+  /**
+   * Generate textures / templates for every prop type ahead of time so the
+   * first placement of each type does not hitch. Called during the loading screen.
+   */
+  prewarm(onProgress?: (fraction: number) => void): Promise<void>;
   dispose(): void;
 }
+
+/**
+ * Ownership of models returned by createObjectModel / createFenceSegmentModel:
+ * geometry is shared with the layer's templates and must NOT be disposed;
+ * the clone's own materials are listed in `object.userData.ownedMaterials`
+ * (THREE.Material[]) and the caller disposes exactly those when done.
+ */
 
 // ===========================================================================
 // Entity views (src/views)
@@ -263,6 +297,27 @@ export interface IEntityViews {
 }
 
 // ===========================================================================
+// Audio (src/audio)
+// ===========================================================================
+
+export interface IAudio {
+  /**
+   * Per frame: ambient beds (birds, wind, crowd murmur scaled by nearby guests,
+   * night insects), positional animal calls near the camera focus.
+   */
+  update(dt: number, camera: THREE.Camera, focus: THREE.Vector3): void;
+  /** Short UI / feedback sounds. */
+  play(cue: 'tap' | 'build' | 'bulldoze' | 'cash' | 'error' | 'select' | 'open' | 'close' | 'celebrate'): void;
+  setEnabled(on: boolean): void;
+  readonly enabled: boolean;
+  /** Must be called from a user gesture on mobile to unlock the AudioContext. */
+  resume(): void;
+  /** Pause everything (app backgrounded). */
+  suspend(): void;
+  dispose(): void;
+}
+
+// ===========================================================================
 // UI (src/ui)
 // ===========================================================================
 
@@ -272,6 +327,7 @@ export interface UIDeps {
   props: IPropsLayer;
   creatures: ICreatureFactory;
   views: IEntityViews;
+  audio: IAudio;
   /** Persist the game (main.ts provides). */
   save(): void;
   /** Start a new game (main.ts provides). */
@@ -281,5 +337,12 @@ export interface UIDeps {
 export interface IGameUI {
   /** Per-frame UI refresh + camera update. */
   update(dt: number): void;
+  /** Ground point the camera orbits (for audio / focus). */
+  readonly focus: THREE.Vector3;
+  /**
+   * Android back button: close the top-most panel / cancel the active tool.
+   * Returns false when nothing was open (main then offers to exit the app).
+   */
+  handleBack(): boolean;
   dispose(): void;
 }

@@ -1,3 +1,4 @@
+import * as THREE from 'three';
 // Creature factory: procedural animals and people (implements ICreatureFactory).
 //
 //   import { createCreatureFactory } from './models';
@@ -22,7 +23,9 @@ export type { CreatureDesign, SpeciesModel, CoatSample, AnimCtx, AnimDriver } fr
 const yieldToBrowser = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 export class CreatureFactory implements ICreatureFactory {
-  readonly quality: QualitySettings;
+  quality: QualitySettings;
+  /** TODO(polish): batched crowd rendering + LOD live here. */
+  readonly root = new THREE.Group();
   private readonly assets = new Map<string, RigAsset>();
   private readonly humans: HumanFactory;
 
@@ -85,6 +88,14 @@ export class CreatureFactory implements ICreatureFactory {
 
   createHuman(appearance: HumanAppearance, role: 'guest' | StaffRole, seed: number): CreatureModel {
     return this.humans.create(appearance, role, seed);
+  }
+
+  update(_camera: THREE.Camera): void {
+    // TODO(polish): LOD selection + instance buffer flush.
+  }
+
+  setQuality(quality: QualitySettings): void {
+    this.quality = quality;
   }
 
   /** Stats for debugging / the harness. */

@@ -20,6 +20,7 @@ binary art assets in the repo.
 | `src/props` | `IPropsLayer` | trees, plants, rocks, shelters, feeders, shops, amenities, fences, litter |
 | `src/views` | `IEntityViews` | binds sim entities to creature models each frame, picking, selection |
 | `src/ui` | `IGameUI` | mobile HUD, build menus, info panels, tools + ghost previews, touch camera |
+| `src/audio` | `IAudio` | procedural WebAudio ambience, animal calls, UI cues (no audio files) |
 | `src/main.ts` | — | loading screen, wiring, main loop, autosave, Android lifecycle |
 
 Modules communicate only through `src/core/contracts.ts`, the shared types in
@@ -37,6 +38,13 @@ Modules communicate only through `src/core/contracts.ts`, the shared types in
   `o.rot * π/2` about Y.
 * Fence edges: see header comment of `src/core/world.ts`.
 * Water surface is a flat plane at `WATER_LEVEL`; water tiles carve the ground below it.
+* People stand on `world.walkHeightAt(x, z)` (boardwalk decks at `DECK_Y` over water);
+  animals use `world.heightAt`. Swimming animals have their origin at `WATER_LEVEL`.
+* Models from `IPropsLayer.createObjectModel` / `createFenceSegmentModel` share geometry with
+  the layer: callers dispose only `object.userData.ownedMaterials`.
+* `CommandResult.cost` is negative for refunds; `reason` on a successful result is a warning.
+* Per frame order (main.ts): sim.update → ctx.setTimeOfDay → ui.update → views.update →
+  creatures.update(camera) → props.update → audio.update → ctx.update → ctx.render.
 
 ## Art direction — "realistic"
 
@@ -63,6 +71,12 @@ The game must look as close to a modern realistic zoo sim as possible on a phone
 * Three quality tiers (`low`/`medium`/`high`, see `QualitySettings`) — honour them.
 
 ## Verifying your work
+
+* Full game: `npx vite --port <port> --strictPort`, then
+  `node scripts/gameshots.cjs "http://localhost:<port>/index.html?demo=1&time=11:00&q=low" /tmp/.../x '[{"name":"a","x":44,"z":95,"d":45,"yaw":200,"pitch":35}]'`
+  (`?demo` builds a showcase zoo; views can target `"species":"zebra"`, set `"time":"21:30"`,
+  run `"eval":"js"`; it prints draw calls / triangles per shot). `window.__game` exposes
+  `{sim, ctx, props, creatures, views, ui, audio, events}`.
 
 * `npx tsc --noEmit` — typecheck (only your files' errors are yours while other modules are WIP).
 * `npx vitest run` — unit tests in `tests/`.

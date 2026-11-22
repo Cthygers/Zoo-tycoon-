@@ -25,6 +25,8 @@ export const WATER_LEVEL = -0.32;
 export const SHALLOW_DEPTH = 0.9;
 /** Depth of ground under a fully deep-water tile corner. */
 export const DEEP_DEPTH = 2.0;
+/** Y of the walking surface of boardwalk decks built over water. */
+export const DECK_Y = WATER_LEVEL + 0.25;
 
 /** Entrance gate tile (centre of the south edge). Path starts here. */
 export const ENTRANCE_TILE = { x: Math.floor(MAP_W / 2), z: MAP_H - 1 };
@@ -40,3 +42,7 @@ export const START_MONEY = 60000;
 export const DEFAULT_ADMISSION = 20;
 
 export const SAVE_KEY = 'wildhaven-save-v1';
+/** localStorage key for the chosen graphics quality tier. */
+export const QUALITY_KEY = 'wildhaven-quality';
+/** localStorage key for the sound on/off setting ('1' | '0'). */
+export const SOUND_KEY = 'wildhaven-sound';

@@ -31,7 +31,8 @@ import { FENCES_BY_ID } from '../data/fences';
 import { OBJECTS_BY_ID } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
 import { AnimalSystem } from './animals';
-import { Commands } from './commands';
+import { Commands, TERRAIN_COST_LAND, TERRAIN_COST_WATER } from './commands';
+import { STAFF_SALARY } from './names';
 import { buildHabitatTiles, evaluateSpecies, type HabitatPopulation, type HabitatTiles, type SpeciesEval } from './habitat';
 import { GuestSystem } from './guests';
 import { N_TILES, PathNav, TileSearch } from './nav';
@@ -559,7 +560,30 @@ export class Simulation implements ISimulation {
   }
   removeFences(edges: EdgeRef[], dryRun = false): CommandResult {
     return this.cmd.removeFences(edges, dryRun);
+  }  removeObject(objectId: number, dryRun = false): CommandResult {
+    // TODO(polish): dedicated command that leaves fences/paths alone.
+    const o = this.world.objects.get(objectId);
+    if (!o) return { ok: false, cost: 0, reason: 'Nothing to remove' };
+    const fp = this.world.footprint(o);
+    let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+    for (const t of fp) {
+      x0 = Math.min(x0, t.x); z0 = Math.min(z0, t.z); x1 = Math.max(x1, t.x); z1 = Math.max(z1, t.z);
+    }
+    return this.cmd.bulldoze({ x0, z0, x1, z1 }, dryRun);
   }
+  renameHabitat(habitatId: number, name: string): CommandResult {
+    const n = name.trim().slice(0, 32);
+    if (!n || !this.world.habitats.has(habitatId)) return { ok: false, cost: 0, reason: 'Invalid name' };
+    this.world.renameHabitat(habitatId, n);
+    return { ok: true, cost: 0 };
+  }
+  staffWage(role: StaffRole): number {
+    return STAFF_SALARY[role] ?? 0;
+  }
+  terrainCost(terrain: Terrain): number {
+    return terrain === Terrain.Water || terrain === Terrain.DeepWater ? TERRAIN_COST_WATER : TERRAIN_COST_LAND;
+  }
+
   buyAnimal(speciesId: string, wx: number, wz: number, dryRun = false): CommandResult {
     return this.cmd.buyAnimal(speciesId, wx, wz, dryRun);
   }

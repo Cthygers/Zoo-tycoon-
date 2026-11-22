@@ -13,6 +13,7 @@ import {
   type ISimulation,
 } from '../core/contracts';
 import type { SelectionRef } from '../core/types';
+import { WATER_LEVEL } from '../core/constants';
 
 type Kind = 'animal' | 'guest' | 'staff';
 
@@ -174,7 +175,9 @@ export function createEntityViews(
       heading = a.heading;
       anim.action = a.action;
       anim.speed = a.speed;
-      anim.swimming = a.action === 'swim';
+      // The sim puts swimmers' origin at the water surface; the model sinks itself.
+      anim.swimming =
+        a.action === 'swim' || (a.y <= WATER_LEVEL + 1e-3 && sim.world.heightAt(a.x, a.z) < WATER_LEVEL - 0.05);
       anim.actionTime = a.actionTime;
       if (Math.abs(a.growth - v.growth) > 0.01) {
         v.growth = a.growth;

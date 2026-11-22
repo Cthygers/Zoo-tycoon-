@@ -12,6 +12,7 @@
 //    world position (cx*TILE, cz*TILE).
 
 import {
+  DECK_Y,
   DEEP_DEPTH,
   ENTRANCE_TILE,
   MAP_H,
@@ -41,6 +42,8 @@ export interface WorldSave {
   objects: PlacedObject[];
   nextObjectId: number;
   habitatNames: Record<string, string>;
+  /** Run-length encoded habitatOf ([id, count, id, count, ...]) so habitat ids survive save/load. */
+  habitatRle?: number[];
 }
 
 export class World {
@@ -177,6 +180,18 @@ export class World {
   }
 
   /** Ground height at a world position (bilinear over tile corners). Outside the map returns edge height. */
+  /**
+   * Height of the surface people walk on: the ground, or the deck of a
+   * boardwalk built over water. Use this for guests / staff, heightAt for animals.
+   */
+  walkHeightAt(wx: number, wz: number): number {
+    const g = this.heightAt(wx, wz);
+    const tx = Math.floor(wx / TILE),
+      tz = Math.floor(wz / TILE);
+    if (this.inBounds(tx, tz) && this.path[this.idx(tx, tz)] === PathType.Boardwalk) return Math.max(g, DECK_Y);
+    return g;
+  }
+
   heightAt(wx: number, wz: number): number {
     const fx = clamp(wx / TILE, 0, MAP_W - 1e-4);
     const fz = clamp(wz / TILE, 0, MAP_H - 1e-4);
@@ -666,7 +681,10 @@ export class World {
       vFence: Array.from(this.vFence),
       objects: Array.from(this.objects.values()),
       nextObjectId: this.nextObjectId,
-      habitatNames: Object.fromEntries(this.habitatNames),
+      habitatNames: Object.fromEntries(
+        Array.from(this.habitatNames).filter(([id]) => this.habitats.has(id)),
+      ),
+      habitatRle: rleEncode(this.habitatOf),
     };
   }
 
@@ -684,13 +702,40 @@ export class World {
       for (const t of this.footprint(o)) if (this.inBounds(t.x, t.z)) this.objectGrid[this.idx(t.x, t.z)] = o.id;
     }
     this.nextObjectId = s.nextObjectId;
-    this.habitatNames = new Map(Object.entries(s.habitatNames).map(([k, v]) => [Number(k), v]));
-    this.nextHabitatId = Math.max(1, ...Array.from(this.habitatNames.keys()).map((k) => k + 1));
+    this.habitatNames = new Map(Object.entries(s.habitatNames ?? {}).map(([k, v]) => [Number(k), v]));
     this.recomputeHeights({ x0: 0, z0: 0, x1: MAP_W - 1, z1: MAP_H - 1 });
     this.habitatOf.fill(0);
+    // Seed the previous labelling so recomputeHabitats' overlap vote keeps the saved ids.
+    if (s.habitatRle) rleDecode(s.habitatRle, this.habitatOf);
+    let maxId = 0;
+    for (const k of this.habitatNames.keys()) maxId = Math.max(maxId, k);
+    for (let i = 0; i < this.habitatOf.length; i++) maxId = Math.max(maxId, this.habitatOf[i]);
+    this.nextHabitatId = maxId + 1;
     this.habitats = new Map();
     this.recomputeHabitats();
     this.revision++;
     this.events.emit('worldReset', {});
+  }
+}
+
+function rleEncode(a: Int32Array): number[] {
+  const out: number[] = [];
+  let i = 0;
+  while (i < a.length) {
+    const v = a[i];
+    let n = 1;
+    while (i + n < a.length && a[i + n] === v) n++;
+    out.push(v, n);
+    i += n;
+  }
+  return out;
+}
+
+function rleDecode(rle: number[], out: Int32Array): void {
+  let p = 0;
+  for (let k = 0; k + 1 < rle.length; k += 2) {
+    const v = rle[k] | 0,
+      n = rle[k + 1] | 0;
+    for (let j = 0; j < n && p < out.length; j++) out[p++] = v;
   }
 }

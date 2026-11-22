@@ -571,12 +571,12 @@ export class PropsLayer implements IPropsLayer {
 
   private buildVariant(defId: string, spec: PropSpec, variant: number): THREE.Object3D {
     try {
-      const o = spec.build(variant);
+      const o = spec.build(variant, this.quality);
       if (o) return o;
     } catch (err) {
       console.error(`[props] builder for "${defId}" failed`, err);
     }
-    return placeholderSpec(OBJECTS_BY_ID[defId]).build(0);
+    return placeholderSpec(OBJECTS_BY_ID[defId]).build(0, this.quality);
   }
 
   private template(defId: string, variant: number): Template {
@@ -997,6 +997,15 @@ export class PropsLayer implements IPropsLayer {
       uniques: this.uniques.length,
       fenceMeshes: this.fences.meshes().filter((m) => m.count > 0).length,
     };
+  }
+
+  setQuality(_quality: QualitySettings): void {
+    // TODO(polish): re-tier detail distances, shadows, LOD and lights.
+  }
+
+  async prewarm(onProgress?: (fraction: number) => void): Promise<void> {
+    // TODO(polish): build every template ahead of time.
+    onProgress?.(1);
   }
 
   dispose(): void {

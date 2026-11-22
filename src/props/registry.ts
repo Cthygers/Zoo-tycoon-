@@ -2,6 +2,7 @@
 // src/props/structures; the props layer (src/props/layer.ts) instances them.
 
 import type * as THREE from 'three';
+import type { QualitySettings } from '../core/contracts';
 
 /**
  * Material userData conventions understood by the props layer:
@@ -17,7 +18,12 @@ export interface PropSpec {
    * geometries/materials may be shared between variants. Keep each variant to
    * a handful of meshes (merge geometry per material) so instancing stays cheap.
    */
-  build(variant: number): THREE.Object3D;
+  build(variant: number, quality: QualitySettings): THREE.Object3D;
+  /**
+   * Optional cheaper version for distant instances (e.g. a tree with a
+   * simplified crown or a camera-facing impostor). Same origin / scale.
+   */
+  buildLod?(variant: number, quality: QualitySettings): THREE.Object3D;
   /** Number of distinct variants; an instance uses seed % variants. */
   variants: number;
   /** Per-instance random yaw / uniform scale jitter (natural props). */
