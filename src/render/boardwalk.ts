@@ -1,7 +1,10 @@
 // Timber deck for boardwalk path tiles that cross water: individual planks at
 // DECK_Y (core/constants; ramping up to meet the bank), stringers, posts down to
 // the lake bed and a simple post-and-rail handrail along open water edges.
-// Boardwalk tiles on dry land are drawn by the ground shader.
+// Boardwalk tiles on dry land are drawn by the ground shader, except where the
+// bank drops below DECK_Y: there the deck carries on flat over the bank until
+// it meets the slope, exactly where guests walk (World.walkHeightAt =
+// max(ground, DECK_Y)), and the ground shader paints no planks under it.
 
 import * as THREE from 'three';
 import { DECK_Y, MAP_H, MAP_W, TILE } from '../core/constants';
@@ -135,6 +138,70 @@ export class BoardwalkDecks {
     return w.inBounds(x, z) && w.path[w.idx(x, z)] !== PathType.None;
   }
 
+  /** Planks run across the walking direction: along Z when the boardwalk runs along X. */
+  private alongX(x: number, z: number): boolean {
+    return (this.isBoardwalk(x - 1, z) || this.isBoardwalk(x + 1, z)) && !this.isBoardwalk(x, z - 1) && !this.isBoardwalk(x, z + 1);
+  }
+
+  /**
+   * Boardwalk on a land tile: flat deck at DECK_Y over the part of the bank
+   * below it (planks whose ground dips under the deck, stringers while there
+   * is room under them, posts where they end in the air). Nothing on banks
+   * that stay above DECK_Y.
+   */
+  private bankDeck(b: BoxBuilder, x: number, z: number, posts: Set<number>): void {
+    const w = this.world;
+    const x0 = x * TILE,
+      z0 = z * TILE;
+    const alongX = this.alongX(x, z);
+    // ground at (along, across) fractions of the tile; along = walking direction
+    const ground = (fa: number, fc: number) => (alongX ? w.heightAt(x0 + fa * TILE, z0 + fc * TILE) : w.heightAt(x0 + fc * TILE, z0 + fa * TILE));
+    const X = new THREE.Vector3(1, 0, 0),
+      Y = new THREE.Vector3(0, 1, 0),
+      Z = new THREE.Vector3(0, 0, 1);
+    const c = new THREE.Vector3();
+    const at = (fa: number, fc: number, y: number) => (alongX ? c.set(x0 + fa * TILE, y, z0 + fc * TILE) : c.set(x0 + fc * TILE, y, z0 + fa * TILE));
+    const pw = (TILE / PLANKS) * 0.46;
+    for (let p = 0; p < PLANKS; p++) {
+      const f = (p + 0.5) / PLANKS;
+      if (Math.min(ground(f, 0), ground(f, 0.5), ground(f, 1)) > DECK_Y - 0.005) continue;
+      const tint = 0.78 + 0.32 * hashFloat(x * 31 + p, z * 17, 5);
+      const uOff = hashFloat(x, z * 13 + p, 9) * 2;
+      at(f, 0.5, DECK_Y - PLANK_T / 2);
+      if (alongX) b.box(c, Z, Y, X, TILE / 2, PLANK_T / 2, pw, tint, uOff);
+      else b.box(c, X, Y, Z, TILE / 2, PLANK_T / 2, pw, tint, uOff);
+    }
+    // stringers: one run per side over the stretch with room beneath (normally from the water edge up the bank)
+    const SAMPLES = 16;
+    const stringerTop = DECK_Y - PLANK_T;
+    for (const s of [0.2, 0.8]) {
+      let lo = -1,
+        hi = -1;
+      for (let i = 0; i <= SAMPLES; i++) {
+        if (ground(i / SAMPLES, s) >= stringerTop - 0.16) continue;
+        if (lo < 0) lo = i;
+        hi = i;
+      }
+      if (lo < 0) continue;
+      const a0 = Math.max(0, (lo - 0.5) / SAMPLES),
+        a1 = Math.min(1, (hi + 0.5) / SAMPLES);
+      at((a0 + a1) / 2, s, stringerTop - 0.08);
+      if (alongX) b.box(c, X, Y, Z, ((a1 - a0) * TILE) / 2, 0.08, 0.045, 0.6, 0);
+      else b.box(c, Z, Y, X, ((a1 - a0) * TILE) / 2, 0.08, 0.045, 0.6, 0);
+      // posts at the stringer's ends (shared with the deck tile at the water edge)
+      for (const fa of [a0, a1]) {
+        at(fa, s, 0);
+        const key = Math.round(c.x * 10) * 100000 + Math.round(c.z * 10);
+        const top = stringerTop - 0.12;
+        const bottom = ground(fa, s) - 0.25;
+        if (posts.has(key) || top - bottom < 0.3) continue;
+        posts.add(key);
+        at(fa, s, (top + bottom) / 2);
+        b.box(c, X, Y, Z, 0.06, (top - bottom) / 2, 0.06, 0.5, 0);
+      }
+    }
+  }
+
   /** Deck height at a tile corner: on the water line, ramping up to meet higher banks. */
   private cornerDeck(cx: number, cz: number): number {
     return Math.max(DECK_Y, this.world.heightAt(cx * TILE, cz * TILE) + 0.06);
@@ -150,8 +217,12 @@ export class BoardwalkDecks {
     const w = this.world;
     for (let z = 0; z < MAP_H; z++)
       for (let x = 0; x < MAP_W; x++) {
+        if (this.isBoardwalk(x, z) && !this.isDeck(x, z)) {
+          this.bankDeck(b, x, z, posts);
+          continue;
+        }
         if (!this.isDeck(x, z)) continue;
-        const alongX = (this.isBoardwalk(x - 1, z) || this.isBoardwalk(x + 1, z)) && !this.isBoardwalk(x, z - 1) && !this.isBoardwalk(x, z + 1);
+        const alongX = this.alongX(x, z);
         const h00 = this.cornerDeck(x, z),
           h10 = this.cornerDeck(x + 1, z),
           h01 = this.cornerDeck(x, z + 1),

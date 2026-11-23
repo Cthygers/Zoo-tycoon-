@@ -2,15 +2,15 @@
 // catalogues), charge, mutate and report. Every command supports dryRun for
 // ghost previews: nothing changes and the result carries cost / validity.
 
-import { ENTRANCE_PLAZA, ENTRANCE_TILE, MAP_H, MAP_W, TILE } from '../core/constants';
+import { ENTRANCE_PLAZA, ENTRANCE_TILE, MAP_H, MAP_W, MINUTES_PER_DAY, TILE } from '../core/constants';
 import type { TileRect } from '../core/events';
 import { fmtMoney } from '../core/format';
 import { PathType, Terrain, isWater, type AnimalState, type CommandResult, type Habitat, type PlacedObject, type SpeciesDef, type StaffRole } from '../core/types';
 import type { EdgeRef, EnclosureProblem } from '../core/world';
-import { FENCES_BY_ID, PATHS_BY_TYPE } from '../data/fences';
+import { FENCES_BY_ID, PATHS_BY_TYPE, fenceAdvice } from '../data/fences';
 import { OBJECTS_BY_ID, rotatedSize } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
-import { evaluateSpecies, weakestFenceName } from './habitat';
+import { evaluateSpecies } from './habitat';
 import { STAFF_SALARY, STAFF_TITLE } from './names';
 
 /** Price to repaint one tile with `terrain` (0 for unknown terrain). */
@@ -36,6 +36,17 @@ export const TERRAIN_COST: readonly number[] = [
   18, // DeepWater
 ];
 export const REFUND_FRACTION = 0.4;
+/**
+ * Game minutes after building something during which removing it refunds the full price:
+ * enough to undo a mis-tap (20 s at 1x, any time while paused), too short to profit from it.
+ */
+export const FULL_REFUND_MINUTES = 60;
+
+/** Running totals of a removal: what is paid back, and what those things cost to build. */
+interface RefundTally {
+  refund: number;
+  price: number;
+}
 
 /** Most important first: what keeps a fenced-off area from becoming a habitat. */
 const PROBLEM_ORDER: readonly EnclosureProblem[] = ['path', 'mapEdge', 'tooBig'];
@@ -57,7 +68,19 @@ export class Commands {
   private scratchGone = new Uint8Array(MAP_W * MAP_H);
   private scratchQueue = new Int32Array(MAP_W * MAP_H);
 
+  /** Game time (minutes) each object / fence edge / path tile was built, for full refunds of recent builds. */
+  private builtObjects = new Map<number, number>();
+  private builtFences = new Map<number, number>();
+  private builtPaths = new Map<number, number>();
+
   constructor(private sim: Simulation) {}
+
+  /** Forget what was built recently (new game / loaded save: ids and times start over). */
+  resetBuildLog() {
+    this.builtObjects.clear();
+    this.builtFences.clear();
+    this.builtPaths.clear();
+  }
 
   // ------------------------------------------------------------ helpers
   private result(
@@ -67,10 +90,12 @@ export class Commands {
     dryRun: boolean,
     at?: { x: number; z: number },
     warning?: string,
+    extra?: Partial<CommandResult>,
   ): CommandResult {
     cost ||= 0; // a zero refund is 0, not -0
     const r: CommandResult = reason ? { ok, cost, reason } : { ok, cost };
     if (ok && warning) r.warning = warning;
+    if (ok && extra) Object.assign(r, extra);
     if (!dryRun) {
       this.sim.events.emit('commandResult', at ? { ...r, x: at.x, z: at.z } : { ...r });
       if (!ok && reason) this.toastFail(reason, at);
@@ -80,16 +105,44 @@ export class Commands {
     return r;
   }
 
+  private now(): number {
+    return this.sim.day * MINUTES_PER_DAY + this.sim.minuteOfDay;
+  }
+
+  private logBuild(log: Map<number, number>, key: number) {
+    const now = this.now();
+    log.set(key, now);
+    if (log.size > 512) for (const [k, t] of log) if (now - t > FULL_REFUND_MINUTES) log.delete(k);
+  }
+
+  /** Add one removed item to the tally: its full price if built in the last game hour, else REFUND_FRACTION of it. */
+  private addRefund(acc: RefundTally, price: number, log: Map<number, number>, key: number) {
+    const t = log.get(key);
+    const recent = t !== undefined && this.now() - t >= 0 && this.now() - t <= FULL_REFUND_MINUTES;
+    acc.price += price;
+    acc.refund += Math.round(price * (recent ? 1 : REFUND_FRACTION));
+  }
+
   /** Refund for removing an object; the scenery the map started with was free. */
-  private objectRefund(o: PlacedObject): number {
-    if (o.id <= this.sim.starterObjectMaxId) return 0;
-    return Math.round((OBJECTS_BY_ID[o.defId]?.cost ?? 0) * REFUND_FRACTION);
+  private objectRefund(o: PlacedObject, acc: RefundTally) {
+    if (o.id <= this.sim.starterObjectMaxId) return;
+    this.addRefund(acc, OBJECTS_BY_ID[o.defId]?.cost ?? 0, this.builtObjects, o.id);
   }
 
   /** Refund for removing a path tile; the starter paths were free. */
-  private pathRefund(x: number, z: number, p: PathType): number {
-    if (this.sim.starterPath[this.sim.world.idx(x, z)]) return 0;
-    return Math.round((PATHS_BY_TYPE[p]?.costPerTile ?? 0) * REFUND_FRACTION);
+  private pathRefund(x: number, z: number, p: PathType, acc: RefundTally) {
+    const i = this.sim.world.idx(x, z);
+    if (this.sim.starterPath[i]) return;
+    this.addRefund(acc, PATHS_BY_TYPE[p]?.costPerTile ?? 0, this.builtPaths, i);
+  }
+
+  private fenceRefund(e: EdgeRef, fenceId: number, acc: RefundTally) {
+    this.addRefund(acc, FENCES_BY_ID[fenceId]?.costPerSegment ?? 0, this.builtFences, this.edgeKey(e));
+  }
+
+  /** The refund share a removal reports (nothing when what it removes was free). */
+  private refundShare(acc: RefundTally): Partial<CommandResult> {
+    return acc.price > 0 ? { refundFraction: Math.round((acc.refund / acc.price) * 100) / 100 } : {};
   }
 
   /** Unique number for an edge (h edges first, then v edges). */
@@ -177,6 +230,7 @@ export class Commands {
     const todo: { x: number; z: number }[] = [];
     const clear = new Set<number>();
     let firstReason = '';
+    let resurfaced = 0;
     for (const t of tiles) {
       if (!w.inBounds(t.x, t.z)) {
         firstReason ||= 'Out of bounds';
@@ -200,6 +254,8 @@ export class Commands {
         firstReason ||= why;
         continue;
       }
+      // another path type already here: it is re-surfaced (and paid for) like a new tile
+      if (w.path[i]) resurfaced++;
       todo.push(t);
     }
     const at = tiles.length ? { x: (tiles[0].x + 0.5) * TILE, z: (tiles[0].z + 0.5) * TILE } : undefined;
@@ -207,16 +263,19 @@ export class Commands {
     const cost = todo.length * def.costPerTile;
     if (!this.sim.canAfford(cost)) return this.result(false, cost, this.noMoney(cost), dryRun, at);
     const note = clear.size ? `Clears ${clear.size} tree${clear.size > 1 ? 's' : ''}/plant${clear.size > 1 ? 's' : ''} in the way` : undefined;
-    if (dryRun) return this.result(true, cost, note, true, at);
+    const extra = resurfaced ? { resurfaced: { tiles: resurfaced, cost: resurfaced * def.costPerTile } } : undefined;
+    if (dryRun) return this.result(true, cost, note, true, at, undefined, extra);
     for (const id of clear) w.removeObject(id);
     for (const t of todo) {
+      const i = w.idx(t.x, t.z);
       w.setPath(t.x, t.z, type);
-      this.sim.starterPath[w.idx(t.x, t.z)] = 0; // bought now
+      this.sim.starterPath[i] = 0; // bought now
+      this.logBuild(this.builtPaths, i);
     }
     // viewing tiles next to habitats depend on paths
     w.refreshHabitatStats();
     this.sim.spend('construction', cost);
-    return this.result(true, cost, undefined, false, at);
+    return this.result(true, cost, undefined, false, at, undefined, extra);
   }
 
   // ------------------------------------------------------------- fences
@@ -244,7 +303,7 @@ export class Commands {
     const seen = new Set<number>();
     const todo: EdgeRef[] = [];
     let price = 0;
-    let refund = 0; // for the fences being replaced
+    const replaced: RefundTally = { refund: 0, price: 0 }; // the fences being replaced
     let firstReason = '';
     for (const e of edges) {
       if (!w.edgeInBounds(e)) continue;
@@ -259,9 +318,10 @@ export class Commands {
         continue;
       }
       price += def.costPerSegment;
-      if (cur) refund += Math.round((FENCES_BY_ID[cur]?.costPerSegment ?? 0) * REFUND_FRACTION);
+      if (cur) this.fenceRefund(e, cur, replaced);
       todo.push(e);
     }
+    const refund = replaced.refund;
     const cost = price - refund;
     const at = edges.length ? this.edgeCentre(edges[Math.floor(edges.length / 2)]) : undefined;
     if (!todo.length) return this.result(false, 0, firstReason || 'Fence already there', dryRun, at);
@@ -269,7 +329,10 @@ export class Commands {
     // an outline (e.g. a dragged rectangle) with segments that can't be built won't close
     const broken = !!firstReason && this.isClosedOutline(edges);
     if (dryRun) return this.result(true, cost, firstReason ? `Some segments skipped: ${firstReason}` : undefined, true, at, this.enclosureWarning(todo, todo, broken));
-    for (const e of todo) w.setFence(e, fenceId, false);
+    for (const e of todo) {
+      w.setFence(e, fenceId, false);
+      this.logBuild(this.builtFences, this.edgeKey(e));
+    }
     w.recomputeHabitats();
     this.sim.spend('construction', price);
     this.sim.earn('other', refund);
@@ -385,7 +448,7 @@ export class Commands {
     const w = this.sim.world;
     const seen = new Set<number>();
     const todo: EdgeRef[] = [];
-    let refund = 0;
+    const acc: RefundTally = { refund: 0, price: 0 };
     for (const e of edges) {
       if (!w.edgeInBounds(e)) continue;
       const k = this.edgeKey(e);
@@ -393,18 +456,22 @@ export class Commands {
       seen.add(k);
       const cur = w.getFence(e);
       if (!cur) continue;
-      refund += Math.round((FENCES_BY_ID[cur]?.costPerSegment ?? 0) * REFUND_FRACTION);
+      this.fenceRefund(e, cur, acc);
       todo.push(e);
     }
+    const refund = acc.refund;
     const at = edges.length ? this.edgeCentre(edges[0]) : undefined;
     if (!todo.length) return this.result(false, 0, 'No fence to remove', dryRun, at);
     const warning = this.openingWarning(todo);
-    if (dryRun) return this.result(true, -refund, undefined, true, at, warning);
-    for (const e of todo) w.setFence(e, 0, false);
+    if (dryRun) return this.result(true, -refund, undefined, true, at, warning, this.refundShare(acc));
+    for (const e of todo) {
+      w.setFence(e, 0, false);
+      this.builtFences.delete(this.edgeKey(e));
+    }
     w.recomputeHabitats();
     this.sim.earn('other', refund);
     this.sim.markPopulationDirty();
-    return this.result(true, -refund, undefined, false, at, warning);
+    return this.result(true, -refund, undefined, false, at, warning, this.refundShare(acc));
   }
 
   // ------------------------------------------------------------ objects
@@ -419,6 +486,7 @@ export class Commands {
     if (!this.sim.canAfford(def.cost)) return this.result(false, def.cost, this.noMoney(def.cost), dryRun, at);
     if (dryRun) return this.result(true, def.cost, undefined, true, at);
     const o = w.addObject(defId, tx, tz, spot.rot, this.sim.rng.int(0, 0x7fffffff));
+    this.logBuild(this.builtObjects, o.id);
     this.sim.spend('construction', def.cost);
     const c = w.objectCenter(o);
     return this.result(true, def.cost, undefined, false, { x: c.x, z: c.z });
@@ -523,14 +591,17 @@ export class Commands {
     const c = w.objectCenter(o);
     const at = { x: c.x, z: c.z };
     if (o.defId === 'entrance_gate') return this.result(false, 0, 'The entrance cannot be removed', dryRun, at);
-    const refund = this.objectRefund(o);
-    if (dryRun) return this.result(true, -refund, undefined, true, at);
+    const acc: RefundTally = { refund: 0, price: 0 };
+    this.objectRefund(o, acc);
+    const refund = acc.refund;
+    if (dryRun) return this.result(true, -refund, undefined, true, at, undefined, this.refundShare(acc));
     // guests queueing at / sitting on / walking to it change their plans first
     sim.guestSys.releaseObject(objectId);
     w.removeObject(objectId); // emits objectRemoved + habitatsChanged (habitat stats refreshed)
+    this.builtObjects.delete(objectId);
     sim.earn('other', refund);
     sim.markPopulationDirty();
-    return this.result(true, -refund, undefined, false, at);
+    return this.result(true, -refund, undefined, false, at, undefined, this.refundShare(acc));
   }
 
   /** Rename a habitat: control characters stripped, whitespace collapsed, max MAX_HABITAT_NAME chars. */
@@ -553,7 +624,7 @@ export class Commands {
     const w = this.sim.world;
     const r = w.clampRect(rect);
     const at = this.rectCentre(r);
-    let refund = 0;
+    const acc: RefundTally = { refund: 0, price: 0 };
     const objs = new Set<number>();
     let protectedHit = false;
     for (let z = r.z0; z <= r.z1; z++)
@@ -565,7 +636,7 @@ export class Commands {
           continue;
         }
         objs.add(o.id);
-        refund += this.objectRefund(o);
+        this.objectRefund(o, acc);
       }
     const paths: { x: number; z: number }[] = [];
     for (let z = r.z0; z <= r.z1; z++)
@@ -577,7 +648,7 @@ export class Commands {
           continue;
         }
         paths.push({ x, z });
-        refund += this.pathRefund(x, z, p);
+        this.pathRefund(x, z, p, acc);
       }
     const fences: EdgeRef[] = [];
     for (let z = r.z0; z <= r.z1 + 1; z++)
@@ -586,7 +657,7 @@ export class Commands {
         const f = w.getFence(e);
         if (f) {
           fences.push(e);
-          refund += Math.round((FENCES_BY_ID[f]?.costPerSegment ?? 0) * REFUND_FRACTION);
+          this.fenceRefund(e, f, acc);
         }
       }
     for (let z = r.z0; z <= r.z1; z++)
@@ -595,7 +666,7 @@ export class Commands {
         const f = w.getFence(e);
         if (f) {
           fences.push(e);
-          refund += Math.round((FENCES_BY_ID[f]?.costPerSegment ?? 0) * REFUND_FRACTION);
+          this.fenceRefund(e, f, acc);
         }
       }
     const trash: number[] = [];
@@ -612,19 +683,28 @@ export class Commands {
       cut ? `Cuts ${cut} path tile${cut > 1 ? 's' : ''} off from the entrance — guests can’t get there` : undefined,
     ].filter(Boolean);
     const warning = warnings.length ? warnings.join('; ') : undefined;
-    if (dryRun) return this.result(true, -refund, undefined, true, at, warning);
+    const refund = acc.refund;
+    if (dryRun) return this.result(true, -refund, undefined, true, at, warning, this.refundShare(acc));
     for (const id of objs) this.sim.guestSys.releaseObject(id);
-    for (const id of objs) w.removeObject(id);
-    for (const p of paths) {
-      w.setPath(p.x, p.z, PathType.None);
-      this.sim.starterPath[w.idx(p.x, p.z)] = 0;
+    for (const id of objs) {
+      w.removeObject(id);
+      this.builtObjects.delete(id);
     }
-    for (const e of fences) w.setFence(e, 0, false);
+    for (const p of paths) {
+      const i = w.idx(p.x, p.z);
+      w.setPath(p.x, p.z, PathType.None);
+      this.sim.starterPath[i] = 0;
+      this.builtPaths.delete(i);
+    }
+    for (const e of fences) {
+      w.setFence(e, 0, false);
+      this.builtFences.delete(this.edgeKey(e));
+    }
     if (fences.length || paths.length) w.recomputeHabitats();
     for (const id of trash) this.sim.removeLitter(id);
     this.sim.earn('other', refund);
     this.sim.markPopulationDirty();
-    return this.result(true, -refund, undefined, false, at, warning);
+    return this.result(true, -refund, undefined, false, at, warning, this.refundShare(acc));
   }
 
   /**
@@ -682,11 +762,23 @@ export class Commands {
     if (spot.why) return this.result(false, sp.cost, spot.why, dryRun, at);
     if (!sim.canAfford(sp.cost)) return this.result(false, sp.cost, this.noMoney(sp.cost), dryRun, at);
     if (dryRun) return this.result(true, sp.cost, undefined, true, at, spot.warning);
-    const a = sim.animalSys.create(speciesId, wx, wz, { adult: true });
+    const a = sim.animalSys.create(speciesId, wx, wz, { adult: true, sex: this.adoptSex(sp, w.habitatOf[w.idx(Math.floor(wx / TILE), Math.floor(wz / TILE))]) });
     sim.spend('animalPurchases', sp.cost);
     sim.events.emit('animalAdded', { id: a.id });
     sim.markPopulationDirty();
     return this.result(true, sp.cost, undefined, false, at, spot.warning);
+  }
+
+  /** Zoos pair animals up: a newcomer is of the sex its species is short of in that habitat. */
+  private adoptSex(sp: SpeciesDef, habId: number): 'M' | 'F' | undefined {
+    let males = 0,
+      females = 0;
+    for (const b of this.sim.animals.values()) {
+      if (b.speciesId !== sp.id || b.habitatId !== habId || b.escaped) continue;
+      if (b.sex === 'M') males++;
+      else females++;
+    }
+    return males < females ? 'M' : females < males ? 'F' : undefined;
   }
 
   /**
@@ -707,12 +799,17 @@ export class Commands {
     if (w.isTileSolid(t.x, t.z)) return { why: 'Something is in the way — pick an open spot' };
     if (w.getTerrain(t.x, t.z) === Terrain.DeepWater && !sp.swims) return { why: `${sp.name}s can’t swim — place it on land` };
     const warn: string[] = [];
-    if (hab.minFenceStrength < sp.danger) warn.push(`the fence is too weak for a ${sp.name} (use ${weakestFenceName(sp.danger)})`);
+    const weakFence = hab.minFenceStrength < sp.danger;
+    if (weakFence) warn.push(`the fence is too weak for a ${sp.name} — use ${fenceAdvice(sp.danger)}`);
     // an animal moved within its own habitat is already part of the population
     const adding = !mover || mover.habitatId !== hab.id;
     const ev = evaluateSpecies(w, hab, sp, sim.population(hab.id), sim.keeperCount(), adding);
     if (ev.compat < 0.5) warn.push(ev.issues.find((i) => i.includes('predators')) ?? 'it does not get along with the other animals here');
-    else if (ev.score < 0.45) warn.push(`this habitat suits it poorly (${Math.round(ev.score * 100)}%): ${ev.issues[0] ?? ''}`);
+    else if (ev.score < 0.45) {
+      // the fence advice is already given above: name the next problem instead of repeating it
+      const issue = ev.issues.find((i) => !(weakFence && i.startsWith('Fence too weak')));
+      warn.push(`this habitat suits it poorly (${Math.round(ev.score * 100)}%)${issue ? `: ${issue}` : ''}`);
+    }
     else if (adding && ev.space < 0.95) {
       const crowded = ev.issues.find((i) => i.startsWith('Too crowded'));
       warn.push(`it would be too crowded here${crowded ? ` ${crowded.slice('Too crowded '.length)}` : ''}`);
@@ -781,14 +878,26 @@ export class Commands {
     return this.result(true, 0, undefined, false, { x: s.x, z: s.z });
   }
 
+  /** Wage owed to a staff member for the part of today worked so far (paid on dismissal). */
+  staffSettlement(staffId: number): number {
+    const s = this.sim.staff.get(staffId);
+    if (!s) return 0;
+    // payShare is the part of today they are paid for (from hiring, or from midnight)
+    const left = (MINUTES_PER_DAY - this.sim.minuteOfDay) / MINUTES_PER_DAY;
+    return Math.round(s.salary * Math.max(0, s.payShare - left));
+  }
+
+  /** Dismiss a staff member, paying the wage for the part of today they worked. */
   fireStaff(staffId: number): CommandResult {
     const sim = this.sim;
     const s = sim.staff.get(staffId);
     if (!s) return this.result(false, 0, 'No such staff member', false);
+    const owed = this.staffSettlement(staffId);
+    sim.spend('salaries', owed);
     sim.staff.delete(staffId);
     sim.events.emit('staffRemoved', { id: staffId });
     sim.markPopulationDirty();
-    sim.notify(null, `${s.name} has left the zoo.`, 'info');
-    return this.result(true, 0, undefined, false, { x: s.x, z: s.z });
+    sim.notify(null, owed > 0 ? `${s.name} has left the zoo (paid ${fmtMoney(owed)} for today).` : `${s.name} has left the zoo.`, 'info');
+    return this.result(true, owed, undefined, false, { x: s.x, z: s.z });
   }
 }

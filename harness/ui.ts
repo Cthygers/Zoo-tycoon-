@@ -18,6 +18,12 @@ import { buildCatalog } from '../src/ui/catalog';
 import { ThumbnailService } from '../src/ui/thumbs';
 import { MockAudio, MockCreatures, MockProps, MockRenderContext, MockSim, MockViews } from './ui-mock';
 
+/** The harness keeps nothing, but answers like the game's save (UIDeps.save) so Save now can be tried. */
+const harnessSave = () => {
+  console.log('[harness] save');
+  return 'saved' as const;
+};
+
 const params = new URLSearchParams(location.search);
 const screen = params.get('screen') ?? 'game';
 const real = params.get('real') === '1';
@@ -55,7 +61,7 @@ async function makeDeps(): Promise<UIDeps> {
     const views = createEntityViews(sim, ctx, creatures, props);
     const audio = createAudio(sim, events);
     events.emit('worldReset', {});
-    return { sim, ctx, props, creatures, views, audio, save: () => console.log('[harness] save'), newGame: () => sim.newGame() };
+    return { sim, ctx, props, creatures, views, audio, save: harnessSave, newGame: () => sim.newGame() };
   }
   const sim = new MockSim(events);
   const ctx = new MockRenderContext(gameEl, sim.world, events, q);
@@ -64,7 +70,7 @@ async function makeDeps(): Promise<UIDeps> {
   const views = new MockViews(sim, ctx, creatures);
   const audio = new MockAudio();
   w.__cues = audio.cues;
-  return { sim, ctx, props, creatures, views, audio, save: () => console.log('[harness] save'), newGame: () => sim.newGame() };
+  return { sim, ctx, props, creatures, views, audio, save: harnessSave, newGame: () => sim.newGame() };
 }
 
 function ndcOf(deps: UIDeps, x: number, z: number): { x: number; y: number } {

@@ -9,11 +9,12 @@
 //     'hide', which read as reptile scales up close,
 //   * an optional growth-dependent juvenile tint (chick down). Growth comes
 //     from the instance's look texel in the batched renderer (`USE_BATCHING`)
-//     and is 1 (adult) for standalone meshes.
+//     and is 1 (adult) for standalone meshes,
+//   * for the standalone highlight material, the selection rim (crHighlight).
 
 import * as THREE from 'three';
 import type { LookSpec } from '../types';
-import { NOISE_GLSL } from './shaderChunks';
+import { HIGHLIGHT_FN_GLSL, NOISE_GLSL } from './shaderChunks';
 
 const SKIN_IDS: Record<LookSpec['skin'], number> = { fur: 0, hide: 1, smooth: 2, feather: 3, wrinkled: 4 };
 const PATTERN_IDS = { none: 0, stripes: 1, field: 2 } as const;
@@ -38,10 +39,6 @@ export function createAnimalMaterial(o: AnimalMaterialOptions): THREE.MeshStanda
     roughness: look.roughness ?? (look.skin === 'smooth' ? 0.55 : thick ? 0.8 : 0.88),
     metalness: 0,
   });
-  if (o.highlight) {
-    mat.emissive.setRGB(1.0, 0.85, 0.35);
-    mat.emissiveIntensity = 0.25;
-  }
   const uniforms = {
     uGrain: { value: look.grain ?? (look.skin === 'hide' ? 0.035 : look.skin === 'wrinkled' ? 0.014 : 0.006) },
     uBump: { value: look.bump ?? 0.5 },
@@ -51,7 +48,10 @@ export function createAnimalMaterial(o: AnimalMaterialOptions): THREE.MeshStanda
     uJuvAmount: { value: look.juvenile?.amount ?? 0.85 },
     uJuvUntil: { value: Math.max(0.05, look.juvenile?.until ?? 0.65) },
     uJuvKeep: { value: look.juvenile?.keep ?? 0.35 },
+    /** Selection highlight amount of a standalone highlight material (pulsed by RiggedModel). */
+    uHighlight: { value: 0.25 },
   };
+  const hl = o.highlight ? 1 : 0;
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
     shader.vertexShader = shader.vertexShader
@@ -91,6 +91,7 @@ vCrGrowth = 1.0;
 #define CR_PATTERN ${pattern}
 #define CR_MICRO ${micro}
 #define CR_JUV ${juv}
+#define CR_HIGHLIGHT ${hl}
 uniform float uGrain;
 uniform float uBump;
 uniform float uSheen;
@@ -106,6 +107,10 @@ uniform float uJuvAmount;
 uniform float uJuvUntil;
 uniform float uJuvKeep;
 varying float vCrGrowth;
+#endif
+#if CR_HIGHLIGHT == 1
+uniform float uHighlight;
+${HIGHLIGHT_FN_GLSL}
 #endif
 ${NOISE_GLSL}
 #if CR_SKIN == 4
@@ -222,10 +227,13 @@ if (crFade > 0.001 && vPattern.z < 0.5) {
   rim = rim * rim * rim * rim;
   outgoingLight += uSheen * (1.0 - vPattern.z) * rim * (totalDiffuse * 0.9 + diffuseColor.rgb * 0.04);
 }
+#if CR_HIGHLIGHT == 1
+outgoingLight = crHighlightOf(outgoingLight, uHighlight);
+#endif
 #include <opaque_fragment>`,
       );
   };
-  mat.customProgramCacheKey = () => `creature-animal-${skin}-${pattern}-${micro}-${juv}`;
+  mat.customProgramCacheKey = () => `creature-animal-${skin}-${pattern}-${micro}-${juv}-${hl}`;
   mat.userData.creatureUniforms = uniforms;
   return mat;
 }

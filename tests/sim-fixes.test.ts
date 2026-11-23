@@ -112,9 +112,10 @@ describe('opened enclosures', () => {
     for (let i = 0; i < 600; i++) sim.update(0.1);
     const left = residents();
     expect(left.length).toBeGreaterThan(0);
+    // (both needs started at 0.3 and fall ~0.07 an hour: above 0.4 they have drunk and eaten)
     for (const a of left) {
-      expect(a.needs.thirst).toBeGreaterThan(0.5);
-      expect(a.needs.hunger).toBeGreaterThan(0.5);
+      expect(a.needs.thirst).toBeGreaterThan(0.4);
+      expect(a.needs.hunger).toBeGreaterThan(0.4);
     }
     expect(enc.food).toBeLessThan(fed); // they ate the keeper's food
 

@@ -24,6 +24,8 @@ import type {
   Objective,
   PathType,
   SelectionRef,
+  ServiceDayStats,
+  StaffDayStats,
   StaffRole,
   StaffState,
   Terrain,
@@ -44,6 +46,11 @@ export interface SpeciesSuitability {
   hasWater: boolean; // pond/trough reachable
   hasFood: boolean; // feeder present (or keeper can feed)
   issues: string[]; // human readable problems, e.g. "Needs more sand"
+}
+
+export interface SuitabilityOptions {
+  /** The animal being moved (Move tool): counted as a newcomer only if it lives in another habitat. */
+  animalId?: number;
 }
 
 export interface HabitatReport {
@@ -139,6 +146,7 @@ export interface ISimulation {
    */
   moveObject(objectId: number, tx: number, tz: number, rot: number, dryRun?: boolean): CommandResult;
   hireStaff(role: StaffRole, wx: number, wz: number, dryRun?: boolean): CommandResult;
+  /** Dismiss a staff member; `cost` is the wage paid for the part of today they worked. */
   fireStaff(staffId: number): CommandResult;
   setAdmission(price: number): void;
   setSpeed(speed: SimSpeed): void;
@@ -146,11 +154,19 @@ export interface ISimulation {
   // ---- queries
   /** Daily wage of a staff role, paid at day end (on the hiring day only for the hours left). */
   staffWage(role: StaffRole): number;
+  /** Wage a staff member has earned so far today: what dismissing them now costs. */
+  staffSettlement(staffId: number): number;
+  /** Today's sales / visits and current line of a shop or restroom (null for other objects). */
+  serviceStats(objectId: number): ServiceDayStats | null;
+  /** What a staff member has done today (null if no such staff member). */
+  staffStats(staffId: number): StaffDayStats | null;
   /** Price to repaint one tile with this terrain type. */
   terrainCost(terrain: Terrain): number;
   habitatReport(habitatId: number): HabitatReport | null;
-  /** How well a habitat suits a species (for the adopt menu preview). */
-  suitability(speciesId: string, habitatId: number): SpeciesSuitability;
+  /** How far along an expecting animal is ("Expecting · day 3 of 4"); null when it is not. */
+  pregnancy(animalId: number): { day: number; of: number } | null;
+  /** How well a habitat suits a species with one more of it there (adopt / move preview). */
+  suitability(speciesId: string, habitatId: number, opts?: SuitabilityOptions): SpeciesSuitability;
 
   // ---- persistence
   serialize(): SimSave;
@@ -365,8 +381,8 @@ export interface UIDeps {
   creatures: ICreatureFactory;
   views: IEntityViews;
   audio: IAudio;
-  /** Persist the game (main.ts provides). */
-  save(): void;
+  /** Persist the game: 'saved', or why not ('showcase' zoo; 'kept' = an unreadable old save is being kept; 'failed' = main already told the player). */
+  save(): 'saved' | 'showcase' | 'kept' | 'failed';
   /** Start a new game (main.ts provides). */
   newGame(): void;
 }

@@ -20,7 +20,7 @@
 // 4 noise + 2 layer (albedo, detail); transitions add 2.
 
 import * as THREE from 'three';
-import { MAP_H, MAP_W, TILE, WATER_LEVEL } from '../core/constants';
+import { DECK_Y, MAP_H, MAP_W, TILE, WATER_ABSORPTION, WATER_LEVEL } from '../core/constants';
 import { GROUND_LAYERS, LAYER_SIZE_M, type GroundTextureSet } from './textures';
 
 export interface GroundMaterialOptions {
@@ -67,6 +67,7 @@ const int MAPW = ${MAP_W};
 const int MAPH = ${MAP_H};
 const float TILE_M = ${TILE.toFixed(1)};
 const float WATER_Y = ${WATER_LEVEL.toFixed(3)};
+const float DECK_Y = ${DECK_Y.toFixed(3)};
 const float MAP_WM = ${(MAP_W * TILE).toFixed(1)};
 const float MAP_HM = ${(MAP_H * TILE).toFixed(1)};
 
@@ -290,6 +291,8 @@ const MAIN = /* glsl */ `
     if (pth == 1) en *= 0.35;
     float dist = pathEdgeDist(f, oL, oR, oD, oU, inset, 0.18) + en;
     float pm = smoothstep(-tileAA, tileAA, dist);
+    // boardwalk planks stop where the bank drops under the deck (render/boardwalk.ts)
+    if (pth == 3) pm *= smoothstep(DECK_Y - 0.06, DECK_Y - 0.01, vWPos.y);
     if (pm > 0.0) {
       int layer = pth == 1 ? 8 : (pth == 2 ? 9 : 10);
       vec2 pxz = vWPos.xz;
@@ -334,7 +337,7 @@ const MAIN = /* glsl */ `
     float wd = max(-wy, 0.0);
     float vy = max(normalize(cameraPosition - vWPos).y, 0.25);
     float path = wd / vy + wd * 0.4;
-    gAlb *= mix(vec3(1.0), exp(-path * vec3(0.5, 0.19, 0.14)), underwater);
+    gAlb *= mix(vec3(1.0), exp(-path * vec3(${WATER_ABSORPTION.join(', ')})), underwater);
   }
   diffuseColor.rgb = gAlb;
 `;

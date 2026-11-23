@@ -273,6 +273,17 @@ const CSS = /* css */ `
 .wh-thumb img.swatch { object-fit: cover; filter: none; border-radius: 9px; }
 .wh-thumb .wh-ico { width: 30px; height: 30px; color: var(--wh-faint); }
 .wh-thumb-biome { position: absolute; left: 4px; top: 4px; font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; padding: 1px 5px; border-radius: 6px; background: rgba(0,0,0,.45); color: var(--wh-sand); }
+.wh-fstats {
+  position: absolute; left: 2px; right: 2px; bottom: 2px; display: flex; align-items: center; justify-content: space-between; gap: 2px;
+  padding: 2px 3px; border-radius: 7px; background: rgba(0,0,0,.55); font-size: 9.5px; font-weight: 700; line-height: 1; color: var(--wh-sand);
+}
+.wh-fstats .wh-ico { width: 10px; height: 10px; flex: none; margin-right: 1px; }
+.wh-fbars, .wh-fview { display: inline-flex; align-items: flex-end; gap: 1px; white-space: nowrap; }
+.wh-fview { align-items: center; }
+.wh-fview.poor { color: #f2cd7c; }
+.wh-fbars i { width: 2.5px; border-radius: 1px; background: rgba(255,255,255,.22); }
+.wh-fbars i:nth-of-type(1) { height: 4px; } .wh-fbars i:nth-of-type(2) { height: 6px; } .wh-fbars i:nth-of-type(3) { height: 8px; } .wh-fbars i:nth-of-type(4) { height: 10px; }
+.wh-fbars i.on { background: var(--wh-leaf-2); }
 .wh-card-name { font-size: 11.5px; font-weight: 600; text-align: center; line-height: 1.15; height: 2.3em; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .wh-card-price { font-size: 11.5px; font-weight: 700; color: var(--wh-sand); }
 .wh-card.wide { width: 148px; }
@@ -419,6 +430,7 @@ const CSS = /* css */ `
 .wh-kv-item { background: rgba(255,255,255,.045); border-radius: 11px; padding: 7px 10px; min-width: 0; }
 .wh-kv-k { font-size: 11px; color: var(--wh-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wh-kv-v { font-size: 14.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wh-kv-v.wrap { white-space: normal; font-size: 13.5px; line-height: 1.3; }
 .wh-kv-v.bad { color: #ffab90; } .wh-kv-v.good { color: var(--wh-leaf-2); } .wh-kv-v.warn { color: var(--wh-amber); }
 .wh-meters { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 14px; }
 .wh-meters.one { grid-template-columns: 1fr; }

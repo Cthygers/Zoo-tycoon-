@@ -210,7 +210,8 @@ describe('guests watching an exhibit (PT-9)', () => {
     }
     // before: up to 12 watchers within 3 m of one another and 10 people by the Kopje wall, 15 overlapping pairs
     expect(watchers / samples).toBeGreaterThan(10);
-    expect(worstCluster).toBeLessThanOrEqual(9);
+    // (10 since round 5: parties no longer loop at the plaza's ice cream kiosk, so more of them watch the Kopje)
+    expect(worstCluster).toBeLessThanOrEqual(10);
     expect(worstKopje).toBeLessThanOrEqual(7);
     expect(overlaps).toBeLessThanOrEqual(6);
   }, 60_000);
@@ -220,17 +221,19 @@ describe('end-of-day summary (PT-10)', () => {
   const day = (over: Partial<LedgerEntry>): LedgerEntry => ({ ...emptyLedger(1), ...over });
 
   it('separates one-off purchases from the running result and formats money like the rest of the game', () => {
-    // the playtest's opening day: mostly building and animals
-    const opening = daySummary(day({ income: 8791, expenses: 16767, construction: 5790, animalPurchases: 10500, salaries: 300, food: 120, upkeep: 57 }));
-    expect(opening.text).toBe('Day 1 closed: −$7,976 (building and animals $16,290; daily running +$8,314)');
+    // the playtest's opening day: mostly building and animals, plus goal rewards (PT2-3)
+    const opening = daySummary(
+      day({ income: 8791, admissions: 591, shopIncome: 200, other: 8000, expenses: 16767, construction: 5790, animalPurchases: 10500, salaries: 300, food: 120, upkeep: 57 }),
+    );
+    expect(opening.text).toBe('Day 1 closed: −$7,976 (building and animals $16,290; daily running +$314; rewards & refunds +$8,000)');
     expect(opening.kind).toBe('info');
-    const losing = daySummary(day({ income: 900, expenses: 2400, construction: 600, salaries: 1500, upkeep: 300 }));
+    const losing = daySummary(day({ income: 900, admissions: 900, expenses: 2400, construction: 600, salaries: 1500, upkeep: 300 }));
     expect(losing.text).toBe('Day 1 closed: −$1,500 (building $600; daily running −$900)');
     expect(losing.kind).toBe('warn');
-    const ordinary = daySummary(day({ day: 3, income: 2211, expenses: 2000, salaries: 1500, upkeep: 500 }));
+    const ordinary = daySummary(day({ day: 3, income: 2211, admissions: 2211, expenses: 2000, salaries: 1500, upkeep: 500 }));
     expect(ordinary.text).toBe('Day 3 closed: +$211 (income $2,211, running costs $2,000)');
     expect(ordinary.kind).toBe('info');
-    expect(daySummary(day({ income: 100, expenses: 408, upkeep: 408 })).kind).toBe('warn');
+    expect(daySummary(day({ income: 100, admissions: 100, expenses: 408, upkeep: 408 })).kind).toBe('warn');
   });
 
   it('is what the player sees when a day ends', () => {

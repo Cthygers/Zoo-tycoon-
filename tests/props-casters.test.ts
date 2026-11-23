@@ -1,6 +1,7 @@
 // Low-tier shadow casters: every caster material is one more shadow-pass draw.
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
+import { SHADOW_ONLY_LAYER } from '../src/core/constants';
 import { EventBus } from '../src/core/events';
 import { World } from '../src/core/world';
 import type { QualitySettings } from '../src/core/contracts';
@@ -55,6 +56,13 @@ describe('shadow-only caster batch (batched back-end)', () => {
     const casters = meshes('prop-shadow-casters');
     expect(casters.length).toBe(1);
     expect(casters[0].castShadow).toBe(true);
+    // only the sun's shadow camera sees it (render/context.ts enables the layer there)
+    const main = new THREE.Layers();
+    const sunShadow = new THREE.Layers();
+    sunShadow.enable(SHADOW_ONLY_LAYER);
+    expect(casters[0].layers.test(main)).toBe(false);
+    expect(casters[0].layers.test(sunShadow)).toBe(true);
+    expect(meshes('prop-multibatch').every((m) => m.layers.test(main))).toBe(true);
     expect(meshes('prop-multibatch').length).toBeGreaterThan(1); // several materials …
     expect(meshes('prop-multibatch').some((m) => m.castShadow)).toBe(false); // … one shadow draw
     world.removeObject(shelter.id);

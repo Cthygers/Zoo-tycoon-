@@ -3,7 +3,8 @@
 
 import type { ISimulation } from '../core/contracts';
 import type { Tool } from '../core/types';
-import { BIOME_NAME, toolKey, type Category, type CategoryId, type CatalogItem } from './catalog';
+import { FENCES_BY_ID, POOR_VIEW } from '../data/fences';
+import { BIOME_NAME, fenceStatsText, toolKey, type Category, type CategoryId, type CatalogItem } from './catalog';
 import { button, el, fmtMoney, iconEl, setText, swallowPointer, toggleClass } from './dom';
 import { icon } from './icons';
 import { cue } from './sound';
@@ -46,6 +47,17 @@ const TOOL_HINT: Record<string, string> = {
   bulldoze: 'Drag over things to clear them',
   bulldozeFence: 'Tap a fence run, or drag along fences',
 };
+
+/** Card overlay: strength (shield + 4 bars) and how much of the animals guests see (eye + %). */
+function fenceStats(f: { strength: number; visibility: number }): HTMLElement {
+  const bars = [1, 2, 3, 4].map((i) => `<i${i <= f.strength ? ' class="on"' : ''}></i>`).join('');
+  const view = `${Math.round(f.visibility * 100)}%`;
+  return el('span', {
+    class: 'wh-fstats',
+    attrs: { title: fenceStatsText(f) },
+    html: `<span class="wh-fbars" aria-label="Strength ${f.strength} of 4">${icon('shield')}${bars}</span><span class="wh-fview${f.visibility < POOR_VIEW ? ' poor' : ''}" aria-label="${view} view">${icon('eye')}${view}</span>`,
+  });
+}
 
 export class Dock {
   readonly root: HTMLElement;
@@ -225,6 +237,7 @@ export class Dock {
     const thumb = el('div', 'wh-thumb');
     thumb.append(iconEl(item.icon));
     if (item.biome && item.thumb.kind === 'animal') thumb.append(el('span', { class: 'wh-thumb-biome', text: BIOME_NAME[item.biome] }));
+    if (item.fence) thumb.append(fenceStats(item.fence));
     const price = el('div', 'wh-card-price');
     const p = item.price();
     price.textContent = p > 0 ? `${fmtMoney(p)}${item.priceSuffix}` : item.tool.kind === 'bulldoze' ? 'Refund' : '';
@@ -333,6 +346,9 @@ export class Dock {
         const line = button(`wh-btn-ghost ${this.fenceMode === 'line' ? 'on' : ''}`, 'line', null, () => this.setFenceMode('line'), 'Straight line');
         this.tbOpts.append(rect, line);
         hint = this.fenceMode === 'rect' ? TOOL_HINT.fenceRect : TOOL_HINT.fenceLine;
+        // the chosen fence's strength and view come first: they are what the choice is about
+        const def = FENCES_BY_ID[t.fenceId];
+        if (def) hint = `${fenceStatsText(def)} · ${hint}`;
         break;
       }
       case 'path': {
@@ -412,7 +428,9 @@ export class Dock {
     let sub = p.note ?? '';
     let kind: 'bad' | 'warn' | '' = p.noteKind ?? '';
     if (!sub) {
-      sub = refund ? 'Refund on removal' : this.tool.kind === 'staff' ? 'Wage paid at day end (first day pro rata)' : `Tap ${p.verb} to confirm`;
+      if (refund) sub = p.refundFraction === 1 ? 'Full refund — just built' : 'Refund on removal';
+      else if (this.tool.kind === 'staff') sub = 'Wage paid at day end (first day pro rata)';
+      else sub = `Tap ${p.verb} to confirm`;
       kind = '';
     }
     setText(this.cfSub, sub);

@@ -4,7 +4,7 @@
 
 import { GAME_MINUTES_PER_SECOND, MAP_H, MAP_W, TILE, WATER_LEVEL } from '../core/constants';
 import { fmtMoney } from '../core/format';
-import { Terrain, type ObjectDef, type PlacedObject, type SpeciesDef } from '../core/types';
+import { Terrain, type AnimalState, type ObjectDef, type PlacedObject, type SpeciesDef } from '../core/types';
 import { OBJECTS_BY_ID, rotatedSize } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
 import type { OpenEnclosure } from './enclosures';
@@ -26,6 +26,8 @@ const WET_DEPTH = 0.05;
 /** Seconds without progress before a moving animal re-plans its route, and before it gives up. */
 const STUCK_REPLAN = 1.2;
 const STUCK_GIVE_UP = 3;
+/** Hourly chance that a happy, settled female with a mate and room conceives (~75% a day). */
+const CONCEIVE_PER_HOUR = 0.06;
 
 function wrapAngle(a: number): number {
   a = (a + Math.PI) % TWO_PI;
@@ -188,7 +190,7 @@ export class AnimalSystem {
     const a: AnimalSim = {
       id,
       speciesId,
-      name: animalName(rng),
+      name: animalName(rng, this.livingNames()),
       sex: opts.sex ?? (rng.chance(0.5) ? 'M' : 'F'),
       ageDays: adult ? Math.round(rng.range(0.22, 0.42) * sp.lifespanDays) : 0,
       growth,
@@ -228,7 +230,7 @@ export class AnimalSystem {
       stuck: 0,
       bestDist: -1,
       mother: opts.mother ?? 0,
-      breedCooldown: adult ? rng.range(1, 4) : sp.maturityDays,
+      breedCooldown: adult ? rng.range(0.5, 2) : sp.maturityDays, // newcomers settle in first
       sick: false,
       dungIn: rng.range(3, 12),
       stress: 0,
@@ -246,6 +248,12 @@ export class AnimalSystem {
     this.placeY(a, sp);
     sim.animals.set(id, a);
     return a;
+  }
+
+  private livingNames(): Set<string> {
+    const names = new Set<string>();
+    for (const a of this.sim.animals.values()) names.add(a.name);
+    return names;
   }
 
   remove(id: number) {
@@ -433,6 +441,18 @@ export class AnimalSystem {
             a.habitatId = null;
             this.sim.markPopulationDirty();
           }
+        } else if (a.home && a.homeTile >= 0 && w.habitatOf[a.homeTile] === a.home) {
+          // the tile it just left is still fenced in: it was squeezed over an intact fence,
+          // which is not an escape, so put it back
+          this.tileCentre(a.homeTile, this.tc);
+          a.x = this.tc.x;
+          a.z = this.tc.z;
+          a.moving = false;
+          a.route.length = 0;
+          this.setCtx(a, sp);
+          if (!this.enterable(a.homeTile)) this.unstick(a, sp, a.homeTile);
+          this.placeY(a, sp);
+          return;
         } else {
           const from = this.sim.enclosures.find(a.home);
           this.becomeLoose(
@@ -696,10 +716,12 @@ export class AnimalSystem {
           sim.notify(`sick:${a.id}`, `${a.name} the ${sp.name} is sick${vets ? ' — a vet is on the way' : '. Hire a vet!'}`, 'warn', { x: a.x, z: a.z }, 120);
         }
       }
-      // breeding (females drive it)
+      // breeding (females drive it): a happy pair with room conceives within a day or so
       if (a.sex === 'F' && a.growth >= 1 && a.pregnantDays === 0 && a.breedCooldown <= 0 && a.happiness > 0.62 && a.health > 0.6) {
-        if (this.canBreed(a, sp) && rng.chance(0.012)) {
+        if (this.canBreed(a, sp) && rng.chance(CONCEIVE_PER_HOUR)) {
           a.pregnantDays = 0.001;
+          const due = Math.max(1, Math.round(sp.gestationDays));
+          sim.notify(null, `${a.name} the ${sp.name} is expecting! The baby is due in about ${due} day${due === 1 ? '' : 's'}.`, 'good', { x: a.x, z: a.z });
         }
       }
       // escape attempts through a fence that is too weak
@@ -740,20 +762,32 @@ export class AnimalSystem {
     const sim = this.sim;
     const hid = a.habitatId!;
     const pop = sim.population(hid);
-    const count = pop.count.get(sp.id) ?? 0;
-    if (count >= sp.groupMax) return false;
     const e = sim.evalFor(hid, sp.id);
     if (!e || e.space < 0.9 || e.compat < 0.9) return false;
+    // babies on the way count too, so the group doesn't outgrow its limit
+    let count = pop.count.get(sp.id) ?? 0;
+    let mate = false;
     for (const b of sim.animals.values()) {
-      if (b.sex === 'M' && b.speciesId === sp.id && b.habitatId === hid && !b.escaped && b.growth >= 1 && b.health > 0.5) return true;
+      if (b.speciesId !== sp.id || b.habitatId !== hid || b.escaped) continue;
+      if (b.pregnantDays > 0) count++;
+      if (b.sex === 'M' && b.growth >= 1 && b.health > 0.5) mate = true;
     }
-    return false;
+    return mate && count < sp.groupMax;
+  }
+
+  /** How far along a pregnancy is: day `day` (1-based) of `of`, or null when not expecting. */
+  pregnancy(a: AnimalState): { day: number; of: number } | null {
+    const sp = SPECIES_BY_ID[a.speciesId];
+    if (!sp || a.pregnantDays <= 0) return null;
+    const of = Math.max(1, Math.round(sp.gestationDays));
+    return { day: Math.min(of, Math.floor(a.pregnantDays) + 1), of };
   }
 
   private giveBirth(mother: AnimalSim, sp: SpeciesDef) {
     const sim = this.sim;
     mother.pregnantDays = 0;
-    mother.breedCooldown = Math.max(2, sp.gestationDays * 1.5);
+    // she rears the baby until it is about half grown before breeding again
+    mother.breedCooldown = Math.max(4, sp.maturityDays / 2);
     const baby = this.create(sp.id, mother.x, mother.z, { growth: BIRTH_GROWTH, mother: mother.id });
     baby.heading = mother.heading;
     baby.needs.hunger = 0.9;
@@ -1523,6 +1557,7 @@ export class AnimalSystem {
           cands.push(ni);
         }
     }
+    let tight: { x: number; z: number; face: number } | null = null;
     for (let k = 0; k < 4 && cands.length; k++) {
       const pick = Math.floor(rng.float() * cands.length);
       const t = cands[pick];
@@ -1535,10 +1570,25 @@ export class AnimalSystem {
       const step = nearOnly ? 0 : this.distToSolid(o, def, this.tc.x, this.tc.z, dx / d, dz / d) - halfLength(sp, a.growth) - MUZZLE_GAP;
       const tx = this.tc.x + (dx / d) * step,
         tz = this.tc.z + (dz / d) * step;
+      const face = nearOnly ? rng.range(-Math.PI, Math.PI) : Math.atan2(dx, dz);
+      // skip gaps too narrow for the body (e.g. an elephant between a shelter and the fence):
+      // a resting animal turns about, so it needs room both ways
+      const fits = nearOnly
+        ? this.bodyFits(sp, a.growth, 0, tx, tz) && this.bodyFits(sp, a.growth, Math.PI / 2, tx, tz)
+        : this.bodyFits(sp, a.growth, face, tx, tz);
+      if (!fits) {
+        // food and water must stay reachable: a tight spot is still better than none
+        if (!nearOnly) tight ??= { x: tx, z: tz, face };
+        continue;
+      }
       if (this.goTo(a, sp, tx, tz)) {
-        a.face = nearOnly ? rng.range(-Math.PI, Math.PI) : Math.atan2(dx, dz);
+        a.face = face;
         return true;
       }
+    }
+    if (tight && this.goTo(a, sp, tight.x, tight.z)) {
+      a.face = tight.face;
+      return true;
     }
     return false;
   }
@@ -1863,11 +1913,57 @@ export class AnimalSystem {
     a.z = c.z;
   }
 
-  /** Body centre moved out of solid objects, then clamped inside fences (fences win). */
+  /**
+   * Body centre moved out of solid objects, then clamped inside fences. Fences win: a push
+   * out of an object that would carry the centre over a fence or out of its zone (a big
+   * body squeezed between a shelter and the fence) is dropped, and only the clamp applies.
+   */
   private fitBody(sp: SpeciesDef, growth: number, h: number, x: number, z: number, out: { x: number; z: number }) {
     this.clearObjects(sp, growth, h, x, z, out);
+    if (!this.staysInZone(x, z, out.x, out.z)) {
+      out.x = x;
+      out.z = z;
+    }
     this.clampBody(sp, growth, h, out.x, out.z, out);
+    if (!this.staysInZone(x, z, out.x, out.z)) {
+      out.x = x;
+      out.z = z;
+    }
   }
+
+  /** Can a centre slide from (x0, z0) to (x1, z1) without crossing a fence or leaving its zone? */
+  private staysInZone(x0: number, z0: number, x1: number, z1: number): boolean {
+    let prev = this.tileOf(x0, z0);
+    if (this.tileOf(x1, z1) === prev) return true;
+    const w = this.sim.world;
+    if (prev < 0 || prev >= w.habitatOf.length) return true;
+    const zone = w.habitatOf[prev];
+    const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, z1 - z0) / 0.5));
+    for (let i = 1; i <= n; i++) {
+      const f = i / n;
+      const t = this.tileOf(x0 + (x1 - x0) * f, z0 + (z1 - z0) * f);
+      if (t === prev) continue;
+      if (t < 0 || t >= w.habitatOf.length || w.habitatOf[t] !== zone) return false;
+      const px = prev % MAP_W,
+        pz = (prev / MAP_W) | 0;
+      const tx = t % MAP_W,
+        tz = (t / MAP_W) | 0;
+      if (Math.abs(tx - px) > 1 || Math.abs(tz - pz) > 1 || !w.canStep(px, pz, tx, tz)) return false;
+      prev = t;
+    }
+    return true;
+  }
+
+  /** Does a body facing h fit at (x, z): clear of solid objects without being pushed over a fence? */
+  private bodyFits(sp: SpeciesDef, growth: number, h: number, x: number, z: number): boolean {
+    const c = this.fitTmp;
+    this.fitBody(sp, growth, h, x, z, c);
+    const fx = c.x,
+      fz = c.z;
+    this.clearObjects(sp, growth, h, fx, fz, c);
+    return Math.abs(c.x - fx) + Math.abs(c.z - fz) < 0.05;
+  }
+  private fitTmp = { x: 0, z: 0 };
 
   private box = { x0: 0, z0: 0, x1: 0, z1: 0 };
 

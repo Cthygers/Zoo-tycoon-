@@ -27,7 +27,7 @@ export const SPECIES: SpeciesDef[] = [
     runSpeed: 4.5,
     rig: 'quadruped',
     maturityDays: 24,
-    gestationDays: 20,
+    gestationDays: 9,
     lifespanDays: 420,
   },
   {
@@ -53,7 +53,7 @@ export const SPECIES: SpeciesDef[] = [
     runSpeed: 6.0,
     rig: 'quadruped',
     maturityDays: 20,
-    gestationDays: 16,
+    gestationDays: 8,
     lifespanDays: 300,
   },
   {
@@ -79,7 +79,7 @@ export const SPECIES: SpeciesDef[] = [
     runSpeed: 7.0,
     rig: 'quadruped',
     maturityDays: 12,
-    gestationDays: 12,
+    gestationDays: 4,
     lifespanDays: 220,
   },
   {
@@ -105,7 +105,7 @@ export const SPECIES: SpeciesDef[] = [
     runSpeed: 8.0,
     rig: 'quadruped',
     maturityDays: 14,
-    gestationDays: 10,
+    gestationDays: 4,
     lifespanDays: 220,
   },
   {
@@ -131,7 +131,7 @@ export const SPECIES: SpeciesDef[] = [
     runSpeed: 8.0,
     rig: 'quadruped',
     maturityDays: 14,
-    gestationDays: 10,
+    gestationDays: 4,
     lifespanDays: 220,
   },
   {
@@ -157,7 +157,7 @@ export const SPECIES: SpeciesDef[] = [
     runSpeed: 7.0,
     rig: 'quadruped',
     maturityDays: 16,
-    gestationDays: 12,
+    gestationDays: 5,
     lifespanDays: 260,
   },
   {
@@ -183,7 +183,7 @@ export const SPECIES: SpeciesDef[] = [
     runSpeed: 7.0,
     rig: 'quadruped',
     maturityDays: 16,
-    gestationDays: 12,
+    gestationDays: 5,
     lifespanDays: 260,
   },
   {
@@ -209,7 +209,7 @@ export const SPECIES: SpeciesDef[] = [
     runSpeed: 5.0,
     rig: 'quadruped',
     maturityDays: 18,
-    gestationDays: 14,
+    gestationDays: 6,
     lifespanDays: 300,
   },
   {
@@ -235,7 +235,7 @@ export const SPECIES: SpeciesDef[] = [
     runSpeed: 6.0,
     rig: 'quadruped',
     maturityDays: 20,
-    gestationDays: 18,
+    gestationDays: 8,
     lifespanDays: 330,
   },
   {
@@ -261,7 +261,7 @@ export const SPECIES: SpeciesDef[] = [
     runSpeed: 9.0,
     rig: 'quadruped',
     maturityDays: 8,
-    gestationDays: 8,
+    gestationDays: 3,
     lifespanDays: 160,
   },
   {
@@ -287,7 +287,7 @@ export const SPECIES: SpeciesDef[] = [
     runSpeed: 5.5,
     rig: 'quadruped',
     maturityDays: 14,
-    gestationDays: 14,
+    gestationDays: 6,
     lifespanDays: 260,
   },
   {
@@ -313,7 +313,7 @@ export const SPECIES: SpeciesDef[] = [
     runSpeed: 5.0,
     rig: 'primate',
     maturityDays: 20,
-    gestationDays: 16,
+    gestationDays: 7,
     lifespanDays: 330,
   },
   {
@@ -339,7 +339,7 @@ export const SPECIES: SpeciesDef[] = [
     runSpeed: 1.2,
     rig: 'penguin',
     maturityDays: 8,
-    gestationDays: 6,
+    gestationDays: 3,
     lifespanDays: 160,
   },
   {
@@ -365,7 +365,7 @@ export const SPECIES: SpeciesDef[] = [
     runSpeed: 3.0,
     rig: 'bird',
     maturityDays: 8,
-    gestationDays: 6,
+    gestationDays: 3,
     lifespanDays: 200,
   },
 ];

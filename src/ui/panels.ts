@@ -4,8 +4,8 @@
 
 import type { HabitatReport, ISimulation, SpeciesSuitability } from '../core/contracts';
 import { TILE } from '../core/constants';
-import { TERRAIN_COUNT, type AnimalAction, type GuestAction, type SelectionRef, type Terrain } from '../core/types';
-import { FENCES } from '../data/fences';
+import { TERRAIN_COUNT, type AnimalAction, type GuestAction, type Habitat, type SelectionRef, type SpeciesDef, type StaffDayStats, type StaffRole, type Terrain } from '../core/types';
+import { BLOCKED_VIEW, FENCES_BY_ID, fenceAdvice } from '../data/fences';
 import { OBJECTS_BY_ID, rotatedSize } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
 import { BIOME_NAME, STAFF_INFO, TERRAIN_INFO, type ThumbSpec } from './catalog';
@@ -58,9 +58,42 @@ const CATEGORY_NAME: Record<string, string> = {
   decoration: 'Decoration',
 };
 
-export function fenceNameForDanger(danger: number): string {
-  const f = FENCES.filter((x) => x.strength >= danger).sort((a, b) => a.costPerSegment - b.costPerSegment)[0];
-  return f ? f.name : FENCES[FENCES.length - 1].name;
+/**
+ * 'sit' as each species' rig draws it (src/models/species): the lion has a cat sit and the
+ * primate, penguin and bird rigs sit; tigers and bears rest sitting up or lying down; the other
+ * quadrupeds alias sit to lying down.
+ */
+const SITS_UP = new Set(['lion']);
+const SITS_OR_LIES = new Set(['tiger', 'grizzly', 'polarbear']);
+
+export function animalActionLabel(action: AnimalAction, sp: Pick<SpeciesDef, 'id' | 'rig'> | undefined): string {
+  if (action !== 'sit' || !sp) return ANIMAL_ACTION[action] ?? action;
+  if (sp.rig !== 'quadruped' || SITS_UP.has(sp.id)) return 'Sitting';
+  return SITS_OR_LIES.has(sp.id) ? 'Resting' : ANIMAL_ACTION.sit;
+}
+
+/** Short fence names for the habitat panel ("Stone / Glass"). */
+const FENCE_SHORT: Record<string, string> = { wood: 'Timber', chainlink: 'Chain-link', stone: 'Stone', glass: 'Glass', steel: 'Steel' };
+
+export function weakestFenceText(h: Pick<Habitat, 'minFenceStrength' | 'weakestFenceIds'>): string {
+  const names = h.weakestFenceIds.map((id) => FENCES_BY_ID[id]).filter(Boolean).map((f) => FENCE_SHORT[f.key] ?? f.name);
+  return `${h.minFenceStrength}/4${names.length ? ` · ${names.join(' / ')}` : ''}`;
+}
+
+/** Guest view of a habitat from its viewing paths: text and how it reads (good / warn). */
+export function guestViewText(viewable: boolean, quality: number): { text: string; kind: 'good' | 'warn' } {
+  if (!viewable) return { text: 'No path nearby', kind: 'warn' };
+  if (quality < BLOCKED_VIEW) return { text: 'Poor — walls block the view', kind: 'warn' };
+  return quality < 0.75 ? { text: 'Partial', kind: 'good' } : { text: 'Good', kind: 'good' };
+}
+
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** A staff member's work today, in their role's terms. */
+export function staffWorkText(role: StaffRole, w: StaffDayStats): string {
+  if (role === 'keeper') return `${plural(w.serviced, 'habitat')} fed · ${plural(w.cleaned, 'dung pile')} cleared`;
+  if (role === 'vet') return `${plural(w.treated, 'animal')} treated · ${w.recaptured} brought back`;
+  return `${plural(w.cleaned, 'piece')} of litter picked up`;
 }
 
 // ---------------------------------------------------------------------------
@@ -472,7 +505,7 @@ export class InfoPanel {
         happy.set(a.happiness);
         health.set(a.health);
         needs.forEach(([, key], i) => needMeters[i].set(a.needs[key]));
-        setText(kvAct.v, ANIMAL_ACTION[a.action] ?? a.action);
+        setText(kvAct.v, animalActionLabel(a.action, sp));
         setText(kvAge.v, ageText(a.ageDays, a.growth));
         const hab = a.habitatId ? sim.world.habitats.get(a.habitatId) : undefined;
         setText(kvHab.v, hab ? hab.name : 'None');
@@ -481,7 +514,8 @@ export class InfoPanel {
         move.disabled = a.escaped;
         const al: string[] = [];
         if (a.escaped) al.push(`<span class="wh-tag bad">${icon('warn')}Escaped!</span>`);
-        if (a.pregnantDays > 0) al.push(`<span class="wh-tag good">Expecting · day ${Math.floor(a.pregnantDays)}</span>`);
+        const preg = sim.pregnancy(a.id);
+        if (preg) al.push(`<span class="wh-tag good">Expecting · day ${preg.day} of ${preg.of}</span>`);
         if (a.health < 0.35) al.push('<span class="wh-tag bad">Needs a vet</span>');
         const html = al.join('');
         if (html !== lastAlert) {
@@ -555,12 +589,23 @@ export class InfoPanel {
     const kvTask = kvItem('Current task');
     const kvAct = kvItem('Doing');
     const kvSal = kvItem('Wage');
+    const kvToday = kvItem('Done today');
     kvTask.root.style.gridColumn = '1 / -1';
-    s.body.append(sect('Work', el('div', 'wh-kv', [kvTask.root, kvAct.root, kvSal.root])), el('p', { class: 'wh-note', text: info.description }));
+    kvToday.root.style.gridColumn = '1 / -1';
+    s.body.append(sect('Work', el('div', 'wh-kv', [kvTask.root, kvToday.root, kvAct.root, kvSal.root])), el('p', { class: 'wh-note', text: info.description }));
     const fire = button('wh-btn-danger', 'close', 'Dismiss', async () => {
       const st = sim.staff.get(id);
       if (!st) return;
-      const ok = await showDialog(this.host.uiRoot, { title: `Dismiss ${st.name}?`, text: `${st.name} will leave the zoo. You will no longer pay their ${fmtMoney(st.salary)}/day wage.`, ok: 'Dismiss', danger: true });
+      // today's work so far is paid on leaving
+      const owed = sim.staffSettlement(id);
+      const ok = await showDialog(this.host.uiRoot, {
+        title: `Dismiss ${st.name}?`,
+        text: owed > 0
+          ? `${st.name} is paid ${fmtMoney(owed)} for today's work and leaves the zoo. You will no longer pay their ${fmtMoney(st.salary)}/day wage.`
+          : `${st.name} will leave the zoo. You will no longer pay their ${fmtMoney(st.salary)}/day wage.`,
+        ok: owed > 0 ? `Pay ${fmtMoney(owed)} and dismiss` : 'Dismiss',
+        danger: true,
+      });
       if (ok && sim.staff.has(id)) {
         const r = sim.fireStaff(id);
         if (!r.ok) cue('error');
@@ -578,6 +623,8 @@ export class InfoPanel {
         kvTask.v.title = st.task;
         setText(kvAct.v, actName[st.action] ?? st.action);
         setText(kvSal.v, `${fmtMoney(st.salary)}/day`);
+        const work = sim.staffStats(id);
+        setText(kvToday.v, work ? staffWorkText(st.role, work) : '—');
         return true;
       },
     };
@@ -603,11 +650,17 @@ export class InfoPanel {
     add('Footprint', `${w * TILE} × ${d * TILE} m`);
     add('Upkeep', def.upkeep ? `${fmtMoney(def.upkeep)}/day` : 'None');
     add('Guest appeal', `${def.appeal}/10`);
-    add('Value', fmtMoney(def.cost));
+    add('Cost', fmtMoney(def.cost));
+    const removable = o.defId !== 'entrance_gate';
+    const resale = kvItem('If removed');
+    if (removable) items.push(resale.root);
     if (def.shop) add('Sells at', fmtMoney(def.shop.price));
     if (def.serves) add('Provides', def.serves === 'food' ? 'Food' : def.serves === 'water' ? 'Water' : def.serves === 'shelter' ? 'Shelter' : 'Play');
     const hab = sim.world.habitatAt(o.tx, o.tz);
     if (hab) add('In habitat', hab.name);
+    // shops and restrooms: how today is going (sales, line, guests who gave up)
+    const service = sim.serviceStats(id) ? { done: kvItem(def.shop ? 'Sold' : 'Visits'), line: kvItem('In line') } : null;
+    if (service) s.body.append(sect('Today', el('div', 'wh-kv', [service.done.root, service.line.root])));
     s.body.append(el('p', { class: 'wh-note', text: def.description }), sect('Details', el('div', 'wh-kv', items)));
     if (def.biomes?.length) s.body.append(sect('Looks natural in', el('div', 'wh-tags', def.biomes.map((b) => el('span', { class: 'wh-tag', text: BIOME_NAME[b] })))));
     const foot: HTMLElement[] = [
@@ -616,7 +669,7 @@ export class InfoPanel {
         this.host.focusOn(c.x, c.z, 22);
       }),
     ];
-    if (o.defId !== 'entrance_gate') {
+    if (removable) {
       foot.push(
         button('wh-btn-ghost', 'move', 'Move', () => this.host.startMove({ kind: 'object', id })),
         button('wh-btn-danger', 'trash', 'Remove', async () => {
@@ -627,9 +680,10 @@ export class InfoPanel {
             return;
           }
           const refund = Math.max(0, -dry.cost);
+          const back = refund ? `${dry.refundFraction === 1 ? 'Full refund — just built. ' : ''}You get ${fmtMoney(refund)} back. ` : '';
           const ok = await showDialog(this.host.uiRoot, {
             title: `Remove ${def.name}?`,
-            text: refund ? `You get ${fmtMoney(refund)} back. Fences and paths around it stay as they are.` : 'Fences and paths around it stay as they are.',
+            text: `${back}Fences and paths around it stay as they are.`,
             ok: 'Remove',
             danger: true,
           });
@@ -643,7 +697,27 @@ export class InfoPanel {
       );
     }
     s.setFoot(foot);
-    return { refresh: () => sim.world.objects.has(id) };
+    return {
+      refresh: () => {
+        if (!sim.world.objects.has(id)) return false;
+        if (removable) {
+          // the sim refunds in full for a short while after building (undoing a mis-tap)
+          const dry = sim.removeObject(id, true);
+          const refund = dry.ok ? Math.max(0, -dry.cost) : 0;
+          const full = refund > 0 && dry.refundFraction === 1;
+          setText(resale.v, full ? 'Full refund — just built' : refund ? `${fmtMoney(refund)} back` : 'No refund');
+          resale.v.className = `wh-kv-v${full ? ' good' : ''}`;
+          resale.root.style.gridColumn = full ? '1 / -1' : '';
+        }
+        const st = service && sim.serviceStats(id);
+        if (service && st) {
+          setText(service.done.v, def.shop ? `${st.sold} for ${fmtMoney(st.income)}` : String(st.visits));
+          setText(service.line.v, `${st.queue} now${st.gaveUp ? ` · ${st.gaveUp} gave up` : ''}`);
+          service.line.v.className = `wh-kv-v${st.gaveUp ? ' warn' : ''}`;
+        }
+        return true;
+      },
+    };
   }
 
   // ------------------------------------------------------------ habitat
@@ -703,6 +777,9 @@ export class InfoPanel {
     const kvAnimals = kvItem('Animals');
     const kvFence = kvItem('Weakest fence');
     const kvView = kvItem('Guest view');
+    // full width: mixed fence names and the view text need the room
+    kvFence.root.style.gridColumn = '1 / -1';
+    kvView.root.style.gridColumn = '1 / -1';
     const comp = compositionBar(new Array(TERRAIN_COUNT).fill(0));
     const residents = el('div', 'wh-list');
     const suitWrap = el('div');
@@ -740,12 +817,10 @@ export class InfoPanel {
         s.setSub(`Habitat · ${h.tiles.length} tiles · ${nAnimals} animal${nAnimals === 1 ? '' : 's'}`);
         setText(kvArea.v, `${h.tiles.length * TILE * TILE} m²`);
         setText(kvAnimals.v, String(nAnimals));
-        const fs = h.minFenceStrength;
-        const fdef = FENCES.find((f) => f.strength === fs);
-        setText(kvFence.v, `${fs}/4${fdef ? ` · ${fdef.name.split(' ')[0]}` : ''}`);
-        const viewable = rep ? rep.viewable : h.viewTiles.length > 0;
-        setText(kvView.v, viewable ? 'Visible' : 'No path nearby');
-        kvView.v.className = `wh-kv-v ${viewable ? 'good' : 'warn'}`;
+        setText(kvFence.v, weakestFenceText(h));
+        const view = guestViewText(rep ? rep.viewable : h.viewTiles.length > 0, h.viewQuality);
+        setText(kvView.v, view.text);
+        kvView.v.className = `wh-kv-v ${view.kind}`;
         if (rep) comp.set(rep.terrainFractions);
         else {
           const tot = Math.max(1, h.tiles.length);
@@ -838,7 +913,7 @@ export class SpeciesCard {
         .map((n) => `<span class="wh-tag">${escapeHtml(n!)}</span>`)
         .join('');
       const kv = (k: string, v: string, wide = false) =>
-        `<div class="wh-kv-item"${wide ? ' style="grid-column:1/-1"' : ''}><div class="wh-kv-k">${k}</div><div class="wh-kv-v">${escapeHtml(v)}</div></div>`;
+        `<div class="wh-kv-item"${wide ? ' style="grid-column:1/-1"' : ''}><div class="wh-kv-k">${k}</div><div class="wh-kv-v${wide ? ' wrap' : ''}">${escapeHtml(v)}</div></div>`;
       const facts = el('div', {
         class: 'wh-kv',
         html:
@@ -846,7 +921,7 @@ export class SpeciesCard {
           kv('Space each', `${sp.spacePerAnimal} tiles`) +
           kv('Guest appeal', `${sp.appeal}/10`) +
           kv('Cost', fmtMoney(sp.cost)) +
-          kv('Fence needed', `${fenceNameForDanger(sp.danger)} or stronger`, true),
+          kv(`Fence needed · strength ${sp.danger}/4 or more`, fenceAdvice(sp.danger), true),
       });
       this.suit = null;
       this.suitWrap.textContent = '';

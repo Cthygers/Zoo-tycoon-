@@ -26,9 +26,30 @@ const FIRST_NAMES_M = [
 ];
 const LAST_INITIALS = 'ABCDEFGHJKLMNOPRSTVWYZ';
 
-export function animalName(rng: SimRng): string {
-  return rng.pick(ANIMAL_NAMES);
+/** A name no living animal in the zoo has, so messages are never ambiguous; once all are used, "Tano II". */
+export function animalName(rng: SimRng, taken: ReadonlySet<string>): string {
+  const free = ANIMAL_NAMES.filter((n) => !taken.has(n));
+  if (free.length) return rng.pick(free);
+  const base = rng.pick(ANIMAL_NAMES);
+  for (let k = 2; ; k++) {
+    const name = `${base} ${roman(k)}`;
+    if (!taken.has(name)) return name;
+  }
 }
+
+/** Roman numeral for a name suffix (a zoo would need thousands of animals to pass XXXIX). */
+function roman(n: number): string {
+  let out = '';
+  for (const [v, s] of ROMAN) for (; n >= v; n -= v) out += s;
+  return out;
+}
+const ROMAN: [number, string][] = [
+  [10, 'X'],
+  [9, 'IX'],
+  [5, 'V'],
+  [4, 'IV'],
+  [1, 'I'],
+];
 
 export function personName(rng: SimRng, female: boolean): string {
   const first = rng.pick(female ? FIRST_NAMES_F : FIRST_NAMES_M);

@@ -425,9 +425,12 @@ class GameUI implements GameUIHandle {
     const t = this.camera.target;
     let best: Habitat | null = null;
     let bestKey = -Infinity;
+    // an animal being moved is not a newcomer in its own habitat
+    const mv = this.tools.moving;
+    const opts = mv?.kind === 'animal' ? { animalId: mv.id } : undefined;
     for (const h of sim.world.habitats.values()) {
       const c = habitatCentre(h);
-      const key = sim.suitability(speciesId, h.id).score - Math.hypot(c.x - t.x, c.z - t.z) / 1e4;
+      const key = sim.suitability(speciesId, h.id, opts).score - Math.hypot(c.x - t.x, c.z - t.z) / 1e4;
       if (key > bestKey) {
         bestKey = key;
         best = h;

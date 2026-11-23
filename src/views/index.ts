@@ -77,6 +77,14 @@ export function createEntityViews(
     opacity: 0.85,
     depthWrite: false,
     side: THREE.DoubleSide,
+    // normal colour blend that keeps the target's alpha: on high it carries
+    // the lamp-lit mark to the grade (render/post.ts)
+    blending: THREE.CustomBlending,
+    blendEquation: THREE.AddEquation,
+    blendSrc: THREE.SrcAlphaFactor,
+    blendDst: THREE.OneMinusSrcAlphaFactor,
+    blendSrcAlpha: THREE.ZeroFactor,
+    blendDstAlpha: THREE.OneFactor,
   });
   const ring = new THREE.Mesh(ringGeo, ringMat);
   ring.renderOrder = 5;

@@ -70,11 +70,21 @@ Look texels:
   `void main() {` line of the fragment shader intact (the patch hooks them).
   If the fragment shader declares `uniform mat3 normalMatrix;` it gets the
   per-instance rotation automatically.
-* **Under water**: `batchedAnimalMaterials` absorbs the light of fragments
-  below `WATER_LEVEL` per channel like the lake bed (render/groundMaterial.ts),
-  plus a depth fade, so wading legs and swimming bodies take the pond colour.
-  It hooks `#include <project_vertex>` and `#include <opaque_fragment>` (keep
-  them).
+* **Under water**: `batchedAnimalMaterials` makes fragments below
+  `WATER_LEVEL` look like the pond around them: no sun, sheen or specular past
+  the first few cm, dimmed sky light, and the murk of the view ray's water
+  column fading the coat into the wet lake bed (`LAKE_BED_WET_ALBEDO`), lit by
+  the light entering the water where the ray crosses the surface (the sun's
+  shadow is sampled there), all absorbed per channel like the bed
+  (`WATER_ABSORPTION`, core/constants.ts). The waterline blends over a few cm
+  under a darker wet band. It hooks `#include <project_vertex>` and
+  `#include <opaque_fragment>` (keep them) and declares the vertex stage's
+  `directionalShadowMatrix` in the fragment shader.
+* **Selection highlight**: `HIGHLIGHT_FN_GLSL` (a warm Fresnel rim and a ≤10 %
+  lift relative to the light on the creature), applied at `#include
+  <opaque_fragment>` by the batched animal and human materials and the
+  standalone animal highlight material. Never an emissive: absolute radiance
+  washes the coat out under the bright day exposure.
 * **New per-vertex attribute** (coat baker): nothing to do. LOD meshes copy
   every attribute of level 0 (`lod/simplify.ts`), BatchedMesh requires all
   levels of a variant to share the attribute set — they do.

@@ -45,3 +45,22 @@ vec3 cr_bump(vec3 surfPos, vec3 n, float h) {
   return normalize(abs(det) * n - grad);
 }
 `;
+
+/**
+ * `crHighlightOf(light, h)` (→ vec3) for the end of a standard material's
+ * fragment shader, e.g. at `#include <opaque_fragment>` (needs `irradiance`, `iblIrradiance`, `normal` and
+ * `geometryViewDir` from the lighting chunks). `h` is the pulsing highlight
+ * amount (0 … ~0.32, see RiggedModel.syncFrame): up to +10 % on the lit colour
+ * and a warm rim as bright as a white surface in the sky light, so the coat
+ * stays readable (the ground ring already marks the selection).
+ */
+export const HIGHLIGHT_FN_GLSL = /* glsl */ `
+vec3 crHighlight(vec3 light, float h, vec3 ambient, vec3 n, vec3 v) {
+  float k = clamp(h * 3.2, 0.0, 1.0);
+  float rim = 1.0 - saturate(dot(n, v));
+  rim *= rim * rim;
+  float sky = dot(ambient * RECIPROCAL_PI, vec3(0.2126, 0.7152, 0.0722));
+  return light * (1.0 + 0.1 * k) + vec3(1.0, 0.85, 0.35) * (rim * k * sky);
+}
+#define crHighlightOf(light, h) crHighlight(light, h, irradiance + iblIrradiance, normal, geometryViewDir)
+`;

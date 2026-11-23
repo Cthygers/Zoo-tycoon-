@@ -54,6 +54,8 @@ const BRISK = 1.2;
 const VISIT_AHEAD = 120;
 /** Visit time (sim seconds, ≈ 1 game hour) a new plan leaves spare for a stop on the way. */
 const PLAN_SLACK = 20;
+/** How far (sim seconds, ≈ 2 game hours) a party lets its visit run over to reach the exhibit it set out for. */
+const PLAN_GRACE = 40;
 /**
  * Relative arrival rate for each hour of the day: a morning rush after the gates
  * open, a lunchtime plateau, then fewer and fewer newcomers towards closing.
@@ -851,8 +853,9 @@ export class GuestSystem {
   private partyNeeds(g: GuestSim): PartyNeeds {
     const pn = this.pn;
     const n = g.needs;
-    pn.hunger = g.holding === 'food' ? 1 : n.hunger;
-    pn.thirst = g.holding === 'drink' ? 1 : n.thirst;
+    // someone still eating or drinking (an ice cream does both) is not sent back to the kiosk
+    pn.hunger = g.holding === 'food' || g.holding === 'icecream' ? 1 : n.hunger;
+    pn.thirst = g.holding === 'drink' || g.holding === 'icecream' ? 1 : n.thirst;
     pn.bladder = n.bladder;
     pn.energy = n.energy;
     pn.kids = 0;
@@ -860,8 +863,8 @@ export class GuestSystem {
       const f = this.sim.guests.get(id);
       if (!f) continue;
       const m = f.needs;
-      if (f.holding !== 'food') pn.hunger = Math.min(pn.hunger, m.hunger);
-      if (f.holding !== 'drink') pn.thirst = Math.min(pn.thirst, m.thirst);
+      if (f.holding !== 'food' && f.holding !== 'icecream') pn.hunger = Math.min(pn.hunger, m.hunger);
+      if (f.holding !== 'drink' && f.holding !== 'icecream') pn.thirst = Math.min(pn.thirst, m.thirst);
       pn.bladder = Math.min(pn.bladder, m.bladder);
       pn.energy = Math.min(pn.energy, m.energy);
       if (f.appearance.child) pn.kids++;
@@ -931,6 +934,7 @@ export class GuestSystem {
         g.avoidObj = p.obj;
         g.avoidUntil = sim.time + 40;
         this.counters.gaveUp++;
+        sim.serviceTally(p.obj).gaveUp++;
       }
       this.queues.leave(g);
       this.resumeWalking(g);
@@ -962,6 +966,7 @@ export class GuestSystem {
     const sim = this.sim;
     if (p.service === 'restroom') {
       this.counters.restroom++;
+      sim.serviceTally(p.obj).visits++;
       g.needs.bladder = 1;
       for (const id of g.party) {
         const f = sim.guests.get(id);
@@ -1027,6 +1032,10 @@ export class GuestSystem {
     }
     this.counters.served++;
     this.counters.items += bought;
+    const day = sim.serviceTally(p.obj);
+    day.visits++;
+    day.sold += bought;
+    day.income += earned;
     if (bought) {
       const c = sim.world.objectCenter(o);
       sim.earn('shopIncome', earned, { x: c.x, z: c.z });
@@ -1290,7 +1299,8 @@ export class GuestSystem {
     // allow for the walk back to the gate: from the far end of a big zoo that takes game hours
     const walk = this.walkOutTime(g) * 1.1;
     if (m + walk * GAME_MINUTES_PER_SECOND >= CLOSE_HOUR * 60 - 10) return 'The zoo closes soon — time to head back.';
-    if (g.visitLeft <= walk) return g.happiness > 0.6 ? 'What a lovely day at the zoo!' : 'Time to go home.';
+    const grace = g.plan && !g.viewed.includes(g.plan) ? PLAN_GRACE : 0; // still on the way to the exhibit it set out for
+    if (g.visitLeft + grace <= walk) return g.happiness > 0.6 ? 'What a lovely day at the zoo!' : 'Time to go home.';
     return null;
   }
 
@@ -1614,7 +1624,9 @@ export class GuestSystem {
    */
   private chooseHabitat(g: GuestSim): boolean {
     const sim = this.sim;
-    if (g.plan && this.worthSeeing(g, g.plan) && this.tripTime(g, g.plan) <= g.visitLeft) {
+    // a party on its way to a far exhibit sees it through once it still has time to get
+    // there, even if a snack or a look at other animals made it a longer day than planned
+    if (g.plan && this.worthSeeing(g, g.plan) && this.tripTime(g, g.plan) <= g.visitLeft + PLAN_GRACE) {
       this.setGoal(g, 'view', `hab:${g.plan}`, g.plan);
       return true;
     }

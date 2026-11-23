@@ -203,6 +203,39 @@ describe('Coach', () => {
     expect(host.openGoals).toHaveBeenCalled();
   });
 
+  it('points at the card from beside a tool bar over the drawer, never over the drawer title (800x360)', () => {
+    const { coach, host, setTool } = setup();
+    const bubble = coach.bubble as unknown as FakeEl;
+    // a real bubble wraps to the max-width it is given: 240 × 50 wide open, two text lines when narrower
+    Object.defineProperty(bubble, 'offsetWidth', { get: () => Math.min(240, parseFloat(bubble.style.maxWidth) || 240) });
+    Object.defineProperty(bubble, 'offsetHeight', { get: () => (bubble.offsetWidth < 240 ? 68 : 50) });
+    const at = (r: { left: number; top: number; right: number; bottom: number }) => ({ getBoundingClientRect: () => ({ ...r, width: r.right - r.left, height: r.bottom - r.top }) }) as unknown as HTMLElement;
+    const drawer = { left: 10, top: 133, right: 790, bottom: 290 };
+    const toolBar = { left: 208, top: 80, right: 592, bottom: 125 };
+    host.viewArea = () => ({ x0: 8, y0: 58, x1: 792, y1: 360 });
+    host.openCategory = () => 'habitats';
+    host.drawer = () => at(drawer);
+    host.card = () => at({ left: 50, top: 172, right: 142, bottom: 280 }); // Timber Rail Fence
+    host.toolBar = () => at(toolBar);
+    // another tool of the category in hand (its tool bar sits over the drawer)
+    setTool({ kind: 'terrain', terrain: 1, brush: 1 });
+    coach.update(1);
+    expect(bubbleTexts(coach)[2]).toBe('Pick a fence: timber rails suit grazers.');
+    const r = coach.rect!;
+    expect(r.right).toBeLessThanOrEqual(toolBar.left); // beside the tool bar, on the card's side
+    expect(r.left).toBeGreaterThanOrEqual(8);
+    expect(r.top).toBeGreaterThanOrEqual(62); // under the top HUD
+    expect(r.bottom).toBeLessThanOrEqual(drawer.top + 8); // the drawer's top padding at most
+    // with room below the tool bar it goes there, centred on the card
+    host.toolBar = () => at({ ...toolBar, top: 10, bottom: 50 });
+    coach.update(1);
+    expect(coach.rect).toEqual({ left: 8, top: 71, right: 248, bottom: 121 });
+    // the step's own tool already in hand: nothing to pick, so no bubble over the drawer
+    setTool({ kind: 'fence', fenceId: 1 });
+    coach.update(1);
+    expect(bubbleTexts(coach)).toEqual([]);
+  });
+
   it('counts build-mode entries for the camera tip', () => {
     const { coach } = setup();
     const shown = Array.from({ length: 7 }, () => coach.buildModeEntered());

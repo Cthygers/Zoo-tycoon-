@@ -25,7 +25,7 @@
 // built for the types in use while loading (prewarm), others on first use.
 
 import * as THREE from 'three';
-import { TILE } from '../core/constants';
+import { SHADOW_ONLY_LAYER, TILE } from '../core/constants';
 import type { IPropsLayer, QualitySettings } from '../core/contracts';
 import type { EventBus, TileRect } from '../core/events';
 import { hashFloat } from '../core/rng';
@@ -530,6 +530,7 @@ export class PropsLayer implements IPropsLayer {
         mat.name = 'prop-shadow-casters';
         mat.shadowSide = side;
         b = new MultiBatch(mat, this.quality.shadows, this.objRoot, true);
+        b.mesh.layers.set(SHADOW_ONLY_LAYER);
         this.shadowBatches.set(key, b);
         this.batchList.push(b);
       }

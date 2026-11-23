@@ -59,11 +59,13 @@ describe('commands', () => {
     expect(r.ok).toBe(true);
     expect(sim.money).toBe(m1 - edges.length * 30);
     expect(sim.world.habitats.size).toBe(1);
-    // upgrade to stone: pays new minus 40% of old
+    // upgrade to stone later on: pays new minus 40% of old (just-built fences are refunded in full)
+    sim.minuteOfDay += 90;
     const up = sim.placeFences(edges, 3);
     expect(up.cost).toBe(edges.length * (90 - 12));
     // same type again is skipped
     expect(sim.placeFences(edges, 3).ok).toBe(false);
+    sim.minuteOfDay += 90;
     const m2 = sim.money;
     const del = sim.removeFences(edges);
     expect(del.ok).toBe(true);
@@ -124,9 +126,11 @@ describe('object, habitat and pricing commands', () => {
     events.on('objectRemoved', (e) => removed.push(e.id));
     const rev = w.revision;
     const m0 = sim.money;
+    sim.minuteOfDay += 90; // past the full refund for something just built
     const dry = sim.removeObject(feeder.id, true);
     expect(dry.ok).toBe(true);
     expect(dry.cost).toBe(-Math.round(OBJECTS_BY_ID.feeder_hay.cost * 0.4));
+    expect(dry.refundFraction).toBe(0.4);
     expect(w.revision).toBe(rev);
     expect(sim.money).toBe(m0);
     const r = sim.removeObject(feeder.id);

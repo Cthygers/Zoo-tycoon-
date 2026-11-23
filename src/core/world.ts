@@ -556,7 +556,9 @@ export class World {
       terrainCounts: new Array(TERRAIN_COUNT).fill(0),
       objects: [],
       minFenceStrength: 4,
+      weakestFenceIds: [],
       viewTiles: [],
+      viewQuality: 0,
       minX: MAP_W,
       minZ: MAP_H,
       maxX: 0,
@@ -571,6 +573,9 @@ export class World {
       hab.terrainCounts.fill(0);
       hab.objects = [];
       hab.minFenceStrength = 4;
+      hab.weakestFenceIds = [];
+      let viewSum = 0,
+        viewEdges = 0;
       hab.minX = MAP_W;
       hab.minZ = MAP_H;
       hab.maxX = 0;
@@ -599,7 +604,15 @@ export class World {
               );
           if (!f) continue;
           const def = FENCES_BY_ID[f];
-          if (def) hab.minFenceStrength = Math.min(hab.minFenceStrength, def.strength);
+          if (def) {
+            if (def.strength < hab.minFenceStrength || !hab.weakestFenceIds.length) {
+              hab.minFenceStrength = Math.min(hab.minFenceStrength, def.strength);
+              if (def.strength === hab.minFenceStrength) hab.weakestFenceIds = [def.id];
+            } else if (def.strength === hab.minFenceStrength && !hab.weakestFenceIds.includes(def.id)) {
+              hab.weakestFenceIds.push(def.id);
+              hab.weakestFenceIds.sort((a, b) => a - b);
+            }
+          }
           if (this.inBounds(nx, nz) && this.habitatOf[this.idx(nx, nz)] !== hab.id) {
             // view tiles: path tiles within 2 tiles outward of the fence
             for (let k = 0; k < 2; k++) {
@@ -607,6 +620,8 @@ export class World {
                 vz = nz + (nz - z) * k;
               if (this.inBounds(vx, vz) && this.path[this.idx(vx, vz)] && !this.habitatOf[this.idx(vx, vz)]) {
                 view.add(this.idx(vx, vz));
+                viewSum += def?.visibility ?? 1;
+                viewEdges++;
                 break;
               }
             }
@@ -615,6 +630,7 @@ export class World {
       }
       hab.objects = Array.from(objs);
       hab.viewTiles = Array.from(view);
+      hab.viewQuality = viewEdges ? viewSum / viewEdges : 0;
     }
     if (emit) this.events.emit('habitatsChanged', {});
   }

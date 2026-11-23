@@ -160,8 +160,12 @@ export interface Habitat {
   objects: number[];
   /** Weakest fence segment strength around the habitat. */
   minFenceStrength: number;
+  /** Fence ids (FenceDef.id, ascending) of the weakest segments: more than one when types of that strength are mixed. */
+  weakestFenceIds: number[];
   /** Path tiles adjacent to the fence, from which guests can view the habitat. */
   viewTiles: number[];
+  /** 0..1 how well guests see in: mean FenceDef.visibility of the fence segments facing view tiles (0 = none). */
+  viewQuality: number;
   /** Bounding box in tiles. */
   minX: number;
   minZ: number;
@@ -285,6 +289,32 @@ export interface StaffState {
   seed: number;
 }
 
+/** A shop's or restroom's figures for today (reset at midnight). */
+export interface ServiceDayStats {
+  /** Parties served (shops) or visits (restrooms). */
+  visits: number;
+  /** Shops: items sold. */
+  sold: number;
+  /** Shops: takings after stock costs, as the Finances "Shops" row books them. */
+  income: number;
+  /** Guests who gave up waiting in line. */
+  gaveUp: number;
+  /** Guests in line right now. */
+  queue: number;
+}
+
+/** What a staff member has done today (reset at midnight). */
+export interface StaffDayStats {
+  /** Litter and dung cleared. */
+  cleaned: number;
+  /** Habitats fed and cleaned. */
+  serviced: number;
+  /** Sick or hurt animals treated. */
+  treated: number;
+  /** Escaped animals brought back. */
+  recaptured: number;
+}
+
 export interface Litter {
   id: number;
   x: number;
@@ -306,6 +336,8 @@ export interface LedgerEntry {
   admissions: number;
   shopIncome: number;
   donations: number;
+  /** One-off income: goal rewards, animal sales and removal refunds (not part of the running result). */
+  other: number;
   upkeep: number;
   /** Animal food (daily, scaled by each animal's size and growth). */
   food: number;
@@ -325,6 +357,13 @@ export interface CommandResult {
    * habitat ("a path runs inside the fence"). The UI shows it as a warning.
    */
   warning?: string;
+  /**
+   * Removals: share of the build price paid back — 1 when everything removed was built in
+   * the last game hour (undoing a mis-tap), REFUND_FRACTION (0.4) for older things.
+   */
+  refundFraction?: number;
+  /** Paths: tiles that already had another path type and are re-surfaced (their price is in `cost`). */
+  resurfaced?: { tiles: number; cost: number };
 }
 
 export type Tool =

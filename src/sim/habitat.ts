@@ -6,7 +6,7 @@ import { MAP_W } from '../core/constants';
 import type { SpeciesSuitability } from '../core/contracts';
 import { Terrain, TERRAIN_COUNT, type Habitat, type SpeciesDef } from '../core/types';
 import type { World } from '../core/world';
-import { FENCES } from '../data/fences';
+import { fenceAdvice } from '../data/fences';
 import { OBJECTS_BY_ID, rotatedSize } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
 import { pluralName } from './names';
@@ -75,11 +75,6 @@ export function feederFor(sp: SpeciesDef): string[] {
   return ['feeder_meat'];
 }
 
-export function weakestFenceName(danger: number): string {
-  const f = FENCES.filter((d) => d.strength >= danger).sort((a, b) => a.costPerSegment - b.costPerSegment)[0];
-  return f ? f.name : 'a stronger fence';
-}
-
 /**
  * Evaluate a species in a habitat. `pop` is the current population; when
  * `adding` is true one extra animal of the species is assumed (adopt preview).
@@ -101,14 +96,18 @@ export function evaluateSpecies(
 
   // ---- terrain
   const want = terrainWant(sp, []);
+  const favourite = Math.max(...want) * 0.9;
   let l1 = 0;
   const deficits: { t: number; have: number; want: number }[] = [];
   const excess: { t: number; have: number }[] = [];
   for (let t = 0; t < TERRAIN_COUNT; t++) {
     const have = hab.terrainCounts[t] / area;
-    l1 += Math.abs(have - want[t]);
-    if (want[t] - have > 0.1) deficits.push({ t, have, want: want[t] });
-    else if (have - want[t] > 0.25) excess.push({ t, have });
+    // more of its favourite ground is never a problem: a habitat painted all over with it
+    // still scores well, and only the missing variety counts against it
+    const over = have - want[t];
+    if (over <= 0 || want[t] < favourite) l1 += Math.abs(over);
+    if (-over > 0.1) deficits.push({ t, have, want: want[t] });
+    else if (over > 0.25 && want[t] < favourite) excess.push({ t, have });
   }
   const terrain = Math.max(0, 1 - l1 / 2);
   deficits.sort((a, b) => b.want - b.have - (a.want - a.have));
@@ -157,7 +156,7 @@ export function evaluateSpecies(
 
   // ---- fence
   const fenceOk = hab.minFenceStrength >= sp.danger;
-  if (!fenceOk) urgent.push(`Fence too weak (strength ${hab.minFenceStrength}, needs ${sp.danger}: use ${weakestFenceName(sp.danger)})`);
+  if (!fenceOk) urgent.push(`Fence too weak (strength ${hab.minFenceStrength}, needs ${sp.danger}) — use ${fenceAdvice(sp.danger)}`);
 
   // ---- water
   const waterTiles = hab.terrainCounts[Terrain.Water] + hab.terrainCounts[Terrain.DeepWater];

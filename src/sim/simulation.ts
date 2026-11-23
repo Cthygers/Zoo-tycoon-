@@ -22,6 +22,7 @@ import {
   type SimSave,
   type SimSpeed,
   type SpeciesSuitability,
+  type SuitabilityOptions,
   type ZooStats,
 } from '../core/contracts';
 import type { EventBus, NotifyKind, TileRect } from '../core/events';
@@ -35,10 +36,12 @@ import {
   type Objective,
   type PathType,
   type PlacedObject,
+  type ServiceDayStats,
+  type StaffDayStats,
   type StaffRole,
 } from '../core/types';
 import { World, type EdgeRef, type WorldSave } from '../core/world';
-import { FENCES_BY_ID } from '../data/fences';
+import { BLOCKED_VIEW, FENCES_BY_ID, fencesFor } from '../data/fences';
 import { OBJECTS_BY_ID } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
 import { AnimalSystem, dailyFoodCost } from './animals';
@@ -51,7 +54,8 @@ import { Progress, createObjectives } from './progress';
 import { packRows, rleDecode, rleEncode, unpackRows, type PackedRows } from './savepack';
 import { SimRng } from './rng';
 import { StaffSystem } from './staff';
-import type { AnimalSim, GuestSim, HabitatRuntime, StaffSim } from './state';
+import { serviceOf } from './queues';
+import { emptyStaffDay, type AnimalSim, type GuestSim, type HabitatRuntime, type ServiceTally, type StaffSim } from './state';
 
 /** Largest simulated step (scaled seconds). Larger frames are sub-stepped. */
 export const MAX_STEP = 0.1;
@@ -71,6 +75,7 @@ export function emptyLedger(day: number): LedgerEntry {
     admissions: 0,
     shopIncome: 0,
     donations: 0,
+    other: 0,
     upkeep: 0,
     food: 0,
     salaries: 0,
@@ -120,6 +125,8 @@ interface SimSaveData extends SimSave {
   starterObjectMaxId?: number;
   /** Run-length encoded starterPath mask. */
   starterPath?: number[];
+  /** Today's shop / restroom tallies by object id (older saves: none). */
+  serviceDay?: [number, ServiceTally][];
 }
 
 export class Simulation implements ISimulation {
@@ -139,6 +146,8 @@ export class Simulation implements ISimulation {
   objectives: Objective[] = createObjectives();
   ledger: LedgerEntry[] = [];
   today: LedgerEntry = emptyLedger(1);
+  /** Today's figures per shop / restroom, by object id (cleared at midnight). */
+  serviceDay = new Map<number, ServiceTally>();
 
   // ---- internal state (serialized)
   rng: SimRng;
@@ -321,7 +330,9 @@ export class Simulation implements ISimulation {
     for (const s of this.staff.values()) {
       salaries += s.salary * s.payShare;
       s.payShare = 1;
+      s.today = emptyStaffDay();
     }
+    this.serviceDay.clear();
     salaries = Math.round(salaries);
     if (upkeep) this.spend('upkeep', upkeep);
     if (food) this.spend('food', food);
@@ -363,7 +374,7 @@ export class Simulation implements ISimulation {
     if (!amount) return;
     this.addMoney(amount);
     this.today.income += amount;
-    if (kind !== 'other') this.today[kind] += amount;
+    this.today[kind] += amount;
     if (popup) this.events.emit('moneyPopup', { x: popup.x, z: popup.z, amount });
   }
   /** Spend (positive) or refund (negative) money in an expense category. */
@@ -666,6 +677,34 @@ export class Simulation implements ISimulation {
   staffWage(role: StaffRole): number {
     return staffWage(role);
   }
+  pregnancy(animalId: number): { day: number; of: number } | null {
+    const a = this.animals.get(animalId);
+    return a ? this.animalSys.pregnancy(a) : null;
+  }
+  staffSettlement(staffId: number): number {
+    return this.cmd.staffSettlement(staffId);
+  }
+
+  /** Today's tally for a shop / restroom (created on first use; cleared at midnight). */
+  serviceTally(objectId: number): ServiceTally {
+    let t = this.serviceDay.get(objectId);
+    if (!t) {
+      t = { visits: 0, sold: 0, income: 0, gaveUp: 0 };
+      this.serviceDay.set(objectId, t);
+    }
+    return t;
+  }
+  serviceStats(objectId: number): ServiceDayStats | null {
+    const o = this.world.objects.get(objectId);
+    if (!o || !serviceOf(o.defId)) return null;
+    const t = this.serviceDay.get(objectId);
+    const queue = this.guestSys.queues.points.get(objectId)?.line.length ?? 0;
+    return { visits: t?.visits ?? 0, sold: t?.sold ?? 0, income: t?.income ?? 0, gaveUp: t?.gaveUp ?? 0, queue };
+  }
+  staffStats(staffId: number): StaffDayStats | null {
+    const s = this.staff.get(staffId);
+    return s ? { ...s.today } : null;
+  }
   terrainCost(terrain: Terrain): number {
     return terrainCost(terrain);
   }
@@ -733,8 +772,12 @@ export class Simulation implements ISimulation {
     return out;
   }
 
-  /** Adopt preview: how the habitat would suit the species with one more of it living there. */
-  suitability(speciesId: string, habitatId: number): SpeciesSuitability {
+  /**
+   * Adopt / move preview: how the habitat would suit the species with the newcomer living
+   * there. `opts.animalId` is an animal being moved: it is already counted when it lives in
+   * this habitat, so the preview then adds no one.
+   */
+  suitability(speciesId: string, habitatId: number, opts?: SuitabilityOptions): SpeciesSuitability {
     const sp = SPECIES_BY_ID[speciesId];
     const hab = this.world.habitats.get(habitatId);
     if (!sp || !hab) {
@@ -750,7 +793,9 @@ export class Simulation implements ISimulation {
         issues: [!sp ? 'Unknown species' : 'Not a habitat — enclose an area with fences first'],
       };
     }
-    const e = evaluateSpecies(this.world, hab, sp, this.population(habitatId), this.keeperCount(), true);
+    const mover = opts?.animalId !== undefined ? this.animals.get(opts.animalId) : undefined;
+    const adding = !mover || mover.escaped || mover.habitatId !== habitatId;
+    const e = evaluateSpecies(this.world, hab, sp, this.population(habitatId), this.keeperCount(), adding);
     return this.describeSuitability(e, habitatId);
   }
 
@@ -769,6 +814,10 @@ export class Simulation implements ISimulation {
     if (present && rt && rt.food < 0.5 && this.keeperCount() > 0) issues.push('Food is running out (keepers will refill it)');
     if (this.habitatDirt(habitatId) > 0.5) issues.push('Dirty — dung needs cleaning by a keeper');
     if (!hab.viewTiles.length) issues.push('Guests cannot see this habitat (build a path next to the fence)');
+    else if (hab.viewQuality < BLOCKED_VIEW) {
+      const better = fencesFor(SPECIES_BY_ID[e.speciesId]?.danger ?? 1).bestView;
+      issues.push(`Walls block the guests’ view${better && better.visibility - hab.viewQuality >= 0.2 ? ` (${better.name} shows the animals)` : ''}`);
+    }
     return {
       speciesId: e.speciesId,
       score: e.score,
@@ -850,6 +899,7 @@ export class Simulation implements ISimulation {
       openEnclosures: this.enclosures.serialize(),
       starterObjectMaxId: this.starterObjectMaxId,
       starterPath: rleEncode(this.starterPath),
+      serviceDay: Array.from(this.serviceDay),
     };
     // deep copy (so later simulation never mutates a save that is still being written),
     // with fractional numbers rounded to 1/1000 — positions to the millimetre — which
@@ -888,8 +938,8 @@ export class Simulation implements ISimulation {
     this.rating = s.rating;
     this.objectives = mergeObjectives(s.objectives ?? []);
     // older saves have no 'food' field (food was booked under upkeep)
-    this.ledger = (s.ledger ?? []).map((e) => ({ ...emptyLedger(e.day), ...e }));
-    this.today = { ...emptyLedger(this.day), ...(s.today ?? {}) };
+    this.ledger = (s.ledger ?? []).map((e) => upgradeLedger({ ...emptyLedger(e.day), ...e }));
+    this.today = upgradeLedger({ ...emptyLedger(this.day), ...(s.today ?? {}) });
     this.habRt.clear();
     for (const h of s.habitats ?? []) this.habRt.set(h.id, h);
     this.nextIds = s.nextIds;
@@ -907,6 +957,8 @@ export class Simulation implements ISimulation {
     // older saves did not track free starter scenery: everything counts as bought
     this.starterObjectMaxId = s.starterObjectMaxId ?? 0;
     this.starterPath.set(s.starterPath ? rleDecode(s.starterPath, N_TILES) : new Array<number>(N_TILES).fill(0));
+    this.serviceDay = new Map(s.serviceDay ?? []);
+    this.cmd.resetBuildLog();
     this.pendingDelta = 0;
     this.resetCaches();
     // Saves written before the world persisted habitat ids carry one sample tile per
@@ -975,6 +1027,8 @@ export class Simulation implements ISimulation {
     this.objectives = createObjectives();
     this.ledger = [];
     this.today = emptyLedger(1);
+    this.serviceDay.clear();
+    this.cmd.resetBuildLog();
     this.rng = new SimRng(s ^ 0x5bd1e995);
     this.time = 0;
     this.slowAcc = 0;
@@ -1013,26 +1067,36 @@ export class Simulation implements ISimulation {
   }
 }
 
+/** The day's running result: tickets, shops and donations less wages, food and upkeep. */
+export function runningResult(d: LedgerEntry): number {
+  return d.admissions + d.shopIncome + d.donations - (d.salaries + d.food + d.upkeep);
+}
+
 /**
- * End-of-day message. One-off purchases (building, animals) are reported apart from the
- * day's running result (income less upkeep, food and wages), and only a running loss is
- * a warning: a day of building is an investment, not bad news.
+ * End-of-day message. One-off items (building, animals, goal rewards, sales and refunds)
+ * are reported apart from the day's running result, and only a running loss is a
+ * warning: a day of building is an investment, and a reward is not everyday income.
  */
 export function daySummary(d: LedgerEntry): { text: string; kind: NotifyKind } {
   const net = d.income - d.expenses;
   const investment = d.construction + d.animalPurchases;
-  const running = net + investment;
-  if (investment > 0) {
-    const what = [d.construction > 0 && 'building', d.animalPurchases > 0 && 'animals'].filter(Boolean).join(' and ');
+  const running = runningResult(d);
+  const other = Math.round(d.other);
+  const kind: NotifyKind = running < 0 ? 'warn' : 'info';
+  if (investment === 0 && other === 0) {
     return {
-      text: `Day ${d.day} closed: ${fmtMoney(net, { sign: true })} (${what} ${fmtMoney(investment)}; daily running ${fmtMoney(running, { sign: true })})`,
-      kind: running < 0 ? 'warn' : 'info',
+      text: `Day ${d.day} closed: ${fmtMoney(net, { sign: true })} (income ${fmtMoney(d.income)}, running costs ${fmtMoney(d.expenses)})`,
+      kind,
     };
   }
-  return {
-    text: `Day ${d.day} closed: ${fmtMoney(net, { sign: true })} (income ${fmtMoney(d.income)}, running costs ${fmtMoney(d.expenses)})`,
-    kind: net < 0 ? 'warn' : 'info',
-  };
+  const parts: string[] = [];
+  if (investment !== 0) {
+    const what = [d.construction !== 0 && 'building', d.animalPurchases !== 0 && 'animals'].filter(Boolean).join(' and ');
+    parts.push(`${what} ${fmtMoney(investment)}`);
+  }
+  parts.push(`daily running ${fmtMoney(running, { sign: true })}`);
+  if (other !== 0) parts.push(`rewards & refunds ${fmtMoney(other, { sign: true })}`);
+  return { text: `Day ${d.day} closed: ${fmtMoney(net, { sign: true })} (${parts.join('; ')})`, kind };
 }
 
 /** JSON replacer: fractional numbers rounded to 3 decimals (integers, strings untouched). */
@@ -1063,9 +1127,17 @@ function upgradeAnimal(a: AnimalSim): AnimalSim {
   return a;
 }
 
+/** Older saves booked rewards, sales and refunds only in `income`: recover them from it. */
+function upgradeLedger(e: LedgerEntry): LedgerEntry {
+  if (!e.other) e.other = Math.round(e.income - e.admissions - e.shopIncome - e.donations);
+  return e;
+}
+
 /** Fill in staff fields added after a save was written. */
 function upgradeStaff(s: StaffSim): StaffSim {
-  (s as Partial<StaffSim>).payShare ??= 1;
+  const d = s as Partial<StaffSim>;
+  d.payShare ??= 1;
+  d.today = { ...emptyStaffDay(), ...d.today };
   return s;
 }
 

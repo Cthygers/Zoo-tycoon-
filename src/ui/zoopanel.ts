@@ -14,12 +14,24 @@ import { cue } from './sound';
 
 export type ZooTab = 'finance' | 'goals' | 'stats' | 'messages' | 'settings';
 
+/** What a save did: written, skipped for the showcase zoo, skipped to keep an unreadable old save, or failed (reported by main). */
+export type SaveOutcome = 'saved' | 'showcase' | 'kept' | 'failed';
+
+/** Toast for Settings > Save now (none on failure: main.ts already says the save could not be written). */
+export function saveToast(outcome: SaveOutcome | void): { text: string; kind: 'good' | 'info' } | null {
+  if (outcome === 'failed') return null;
+  if (outcome === 'showcase') return { text: 'Showcase zoos are not saved', kind: 'info' };
+  if (outcome === 'kept') return { text: 'Not saved, so your old save is kept', kind: 'info' };
+  return { text: 'Zoo saved', kind: 'good' };
+}
+
 export interface ZooPanelHost {
   sim: ISimulation;
   ctx: IRenderContext;
   audio: IAudio;
   uiRoot: HTMLElement;
-  save(): void;
+  /** Persist the game; older hosts return nothing (taken as saved). */
+  save(): SaveOutcome | void;
   newGame(): void;
   toast(text: string, kind: 'info' | 'good' | 'warn' | 'bad'): void;
   qualityChanged(q: QualityLevel): void;
@@ -202,13 +214,12 @@ export class ZooPanel {
         setText(yday.v, '—');
         setText(yday.s, 'First day');
       }
-      // goal rewards, animal sales and removal refunds are booked as income without a category of their own
-      const other = t.income - t.admissions - t.shopIncome - t.donations;
       const rows: [string, number][] = [
         ['Tickets', t.admissions],
         ['Shops', t.shopIncome],
         ['Donations', t.donations],
-        ['Rewards & refunds', Math.abs(other) < 0.5 ? 0 : other],
+        // one-offs (goal rewards, animal sales, removal refunds): the day-end message keeps them out of the running result too
+        ['Rewards & refunds', t.other],
         ['Construction', -t.construction],
         ['Animals', -t.animalPurchases],
         ['Wages', -t.salaries],
@@ -374,8 +385,8 @@ export class ZooPanel {
         'Save game',
         'Your zoo also saves automatically every few minutes.',
         button('wh-btn-ghost', 'save', 'Save now', () => {
-          this.host.save();
-          this.host.toast('Zoo saved', 'good');
+          const t = saveToast(this.host.save());
+          if (t) this.host.toast(t.text, t.kind);
         }),
       ),
       row(

@@ -154,14 +154,16 @@ async function boot() {
   views.update(0);
   if (creatures.warmLods) await creatures.warmLods(gates(0.79, 0.83));
 
-  const save = () => {
-    if (demo) return; // never overwrite the player's save with the showcase zoo
-    if (!mayWriteSave) return; // the unreadable save could not be backed up: keep it
+  const save = (): 'saved' | 'showcase' | 'kept' | 'failed' => {
+    if (demo) return 'showcase'; // never overwrite the player's save with the showcase zoo
+    if (!mayWriteSave) return 'kept'; // the unreadable save could not be backed up: keep it
     try {
       const ok = storageSet(SAVE_KEY, JSON.stringify(sim.serialize()));
       if (!ok) events.emit('notify', { text: 'Could not save the game (storage full?)', kind: 'bad' });
+      return ok ? 'saved' : 'failed';
     } catch (err) {
       console.error('[save] serialize failed', err);
+      return 'failed';
     }
   };
   const newGame = () => {

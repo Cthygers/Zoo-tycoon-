@@ -24,6 +24,10 @@ const CAMERA_TIP_USES = 5;
 const ANCHOR_EVERY = 0.12;
 /** Gap (px) between the docked bubble and the top bar, and around what is being built. */
 const DOCK_GAP = 6;
+/** Narrowest bubble (px) that may sit beside a tool bar. */
+const MIN_SIDE_W = 150;
+/** How far (px) a bubble beside the tool bar may reach into the drawer: its top padding, not the title row. */
+const DRAWER_PAD = 8;
 
 /** Build category that works towards an objective (others open the Goals tab). */
 const GOAL_CATEGORY: Record<string, CategoryId> = {
@@ -120,10 +124,8 @@ const STEPS: TourStep[] = [
 interface Anchor {
   x: number;
   top: number;
-  /** Used instead of `top` when the bubble would not fit above it. */
-  fallbackTop?: number;
-  /** The bubble stays below this (besides the top HUD). */
-  ceiling?: number;
+  /** A tool bar over the drawer: the bubble goes below it, or beside it when there is no room below. */
+  bar?: ScreenRect;
 }
 
 export interface CoachHost {
@@ -336,6 +338,11 @@ export class Coach {
     let text = '';
     let anchor: Anchor | null = null;
     if (cat === s.cat) {
+      // the step's own tool is already in hand: nothing to pick (it docks again once the drawer closes)
+      if (s.tool(tool) && !moving) {
+        this.hideBubble();
+        return;
+      }
       const card = h.card(s.card);
       const drawer = h.drawer();
       if (card && drawer) {
@@ -343,13 +350,10 @@ export class Coach {
         const d = drawer.getBoundingClientRect();
         // the tool bar sits over the drawer while a tool is in hand
         const actions = h.toolBar()?.getBoundingClientRect();
-        // above the drawer pointing down at the card; where a tool bar over the drawer leaves
-        // no room, over the drawer's title row instead (never over the tool bar)
         anchor = {
           x: Math.max(d.left + 16, Math.min(d.right - 16, c.left + c.width / 2)),
           top: d.top,
-          fallbackTop: c.top,
-          ceiling: actions && actions.bottom <= d.top + 1 ? actions.bottom : 0,
+          bar: actions && actions.bottom <= d.top + 1 ? actions : undefined,
         };
       }
       text = s.pick;
@@ -377,22 +381,52 @@ export class Coach {
     this.moveTo(null, false);
   }
 
-  /** Put the bubble above the anchor, with its arrow on it, inside the view and below the top HUD. */
+  /**
+   * Put the bubble above the anchor, with its arrow on it, inside the view and below the top HUD
+   * (and below a tool bar over the drawer, or else beside it). Never over the tool bar, and over
+   * the drawer's title row only when nothing else fits.
+   */
   private place(a: Anchor): void {
     const b = this.bubble;
     b.classList.remove('docked', 'faded');
-    const w = b.offsetWidth;
-    const hgt = b.offsetHeight;
+    b.style.maxWidth = '';
     // sideways inside the view (never over an open species card)
     const area = this.host.viewArea();
-    const left = Math.max(area.x0, Math.min(area.x1 - w, a.x - w / 2));
-    const ceiling = Math.max(area.y0, a.ceiling ?? 0) + 4;
-    let top = a.top - 12 - hgt;
-    if (top < ceiling && a.fallbackTop !== undefined) top = a.fallbackTop - 12 - hgt;
-    top = Math.max(ceiling, top);
-    // the arrow stays on the anchor even when the bubble is pushed sideways
-    this.arrow.style.left = `${Math.round(Math.max(14, Math.min(w - 14, a.x - left)))}px`;
-    this.moveTo({ left, top, right: left + w, bottom: top + hgt }, false);
+    const ceiling = area.y0 + 4;
+    let w = b.offsetWidth;
+    let hgt = b.offsetHeight;
+    const put = (left: number, top: number) => {
+      // the arrow stays on the anchor even when the bubble is pushed sideways; beside the tool bar
+      // the anchor may be out of reach, and then there is no arrow
+      const ax = a.x - left;
+      this.arrow.style.display = ax >= 14 && ax <= w - 14 ? '' : 'none';
+      this.arrow.style.left = `${Math.round(Math.max(14, Math.min(w - 14, ax)))}px`;
+      this.moveTo({ left, top, right: left + w, bottom: top + hgt }, false);
+    };
+    const centred = (x0: number, x1: number) => Math.max(x0, Math.min(x1 - w, a.x - w / 2));
+    const above = a.top - 12 - hgt;
+    if (above >= Math.max(ceiling, a.bar ? a.bar.bottom + 4 : 0)) return put(centred(area.x0, area.x1), above);
+    if (a.bar) {
+      // beside the tool bar, the side nearer the card first, narrowed to the room there
+      const bar = a.bar;
+      const sides = [
+        { x0: area.x0, x1: bar.left - DOCK_GAP },
+        { x0: bar.right + DOCK_GAP, x1: area.x1 },
+      ].sort((p, q) => Math.abs((p.x0 + p.x1) / 2 - a.x) - Math.abs((q.x0 + q.x1) / 2 - a.x));
+      for (const side of sides) {
+        if (side.x1 - side.x0 < MIN_SIDE_W) continue;
+        b.style.maxWidth = `${Math.floor(side.x1 - side.x0)}px`;
+        w = b.offsetWidth;
+        hgt = b.offsetHeight;
+        const top = Math.max(ceiling, a.top - 12 - hgt);
+        if (top + hgt <= a.top + DRAWER_PAD) return put(centred(side.x0, side.x1), top);
+      }
+      b.style.maxWidth = '';
+      w = b.offsetWidth;
+      hgt = b.offsetHeight;
+    }
+    // last resort: as high as it may go, reaching into the drawer as little as possible
+    put(centred(area.x0, area.x1), Math.max(ceiling, a.bar ? a.bar.bottom + 4 : 0));
   }
 
   /**
@@ -402,6 +436,7 @@ export class Coach {
   private dock(): void {
     const b = this.bubble;
     b.classList.add('docked');
+    b.style.maxWidth = '';
     const w = b.offsetWidth;
     const hgt = b.offsetHeight;
     const a = this.host.viewArea();

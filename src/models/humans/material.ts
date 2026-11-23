@@ -13,8 +13,8 @@
 //                                passed to the fragment shader as flat varyings.
 
 import * as THREE from 'three';
-import { NOISE_GLSL } from '../material/shaderChunks';
-import { crowdDepthMaterial, HIGHLIGHT_GLSL, type BatchMaterials } from '../crowd/materials';
+import { HIGHLIGHT_FN_GLSL, NOISE_GLSL } from '../material/shaderChunks';
+import { crowdDepthMaterial, type BatchMaterials } from '../crowd/materials';
 import { crowdUniforms, patchCrowdVertex } from '../crowd/skinning';
 
 export interface HumanColors {
@@ -59,6 +59,8 @@ interface HumanUniforms {
   uEye: { value: THREE.Vector3 };
   uMouth: { value: THREE.Vector3 };
   uMicro: { value: number };
+  /** Selection highlight amount (0 = off; pulsed by HumanModel). */
+  uHighlight: { value: number };
 }
 
 interface ColorExpr {
@@ -149,6 +151,7 @@ export function createHumanMaterial(colors: HumanColors, cut: HumanCut, marks: H
     uEye: { value: new THREE.Vector3(...marks.eyeL) },
     uMouth: { value: new THREE.Vector3(...marks.mouth) },
     uMicro: { value: detail > 0 ? 1 : 0 },
+    uHighlight: { value: 0 },
   };
   mat.userData.human = u;
   mat.onBeforeCompile = (shader) => {
@@ -180,9 +183,11 @@ uniform vec3 uMarks;
 uniform vec3 uEye;
 uniform vec3 uMouth;
 uniform float uMicro;
+uniform float uHighlight;
 varying vec4 vZone;
 varying vec3 vRestPos;
-${FRAG_HELPERS}`,
+${FRAG_HELPERS}
+${HIGHLIGHT_FN_GLSL}`,
       )
       .replace(
         '#include <color_fragment>',
@@ -199,9 +204,10 @@ ${FRAG_HELPERS}`,
           mouth: 'uMouth',
         }),
       )
-      .replace('#include <roughnessmap_fragment>', ROUGHNESS_GLSL);
+      .replace('#include <roughnessmap_fragment>', ROUGHNESS_GLSL)
+      .replace('#include <opaque_fragment>', 'outgoingLight = crHighlightOf(outgoingLight, uHighlight);\n#include <opaque_fragment>');
   };
-  mat.customProgramCacheKey = () => 'creature-human-v1';
+  mat.customProgramCacheKey = () => 'creature-human-v2';
   return mat;
 }
 
@@ -307,7 +313,8 @@ flat varying vec4 vHm2;
 flat varying vec4 vHm3;
 flat varying vec4 vHm4;
 flat varying vec4 vHm5;
-${FRAG_HELPERS}`,
+${FRAG_HELPERS}
+${HIGHLIGHT_FN_GLSL}`,
       )
       .replace(
         '#include <color_fragment>',
@@ -326,8 +333,8 @@ ${humanColorGLSL({
 })}`,
       )
       .replace('#include <roughnessmap_fragment>', ROUGHNESS_GLSL)
-      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>\ntotalEmissiveRadiance += ${HIGHLIGHT_GLSL} * vHm5.w;`);
+      .replace('#include <opaque_fragment>', 'outgoingLight = crHighlightOf(outgoingLight, vHm5.w);\n#include <opaque_fragment>');
   };
-  mat.customProgramCacheKey = () => `creature-human-batch-v1-${n}`;
+  mat.customProgramCacheKey = () => `creature-human-batch-v2-${n}`;
   return { material: mat, depth: crowdDepthMaterial(u), uniforms: [u] };
 }

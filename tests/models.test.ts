@@ -493,12 +493,12 @@ describe('crowd renderer', () => {
     t.object.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(t.object, true);
     expect(box.max.y).toBeGreaterThan(1.4);
-    // standalone highlight keeps the person's clothing material (emissive glow only)
+    // standalone highlight keeps the person's clothing material (selection rim only)
     const mesh = t.object.children[0] as THREE.SkinnedMesh;
     const before = mesh.material;
     t.setHighlighted(true);
     expect(mesh.material).toBe(before);
-    expect((mesh.material as THREE.MeshStandardMaterial).emissiveIntensity).toBeGreaterThan(0);
+    expect((mesh.material as THREE.MeshStandardMaterial).userData.human.uHighlight.value).toBeGreaterThan(0);
     t.setHighlighted(false);
     thumb.add(t.object);
     t.dispose();

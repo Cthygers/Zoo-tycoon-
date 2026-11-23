@@ -2,7 +2,7 @@
 // from core/types with AI bookkeeping. Everything here is plain JSON data so the
 // whole entity can be serialized verbatim and restored exactly.
 
-import type { AnimalAction, AnimalState, GuestState, StaffState } from '../core/types';
+import type { AnimalAction, AnimalState, GuestState, ServiceDayStats, StaffDayStats, StaffState } from '../core/types';
 
 export type AnimalGoal =
   | 'idle'
@@ -170,7 +170,16 @@ export interface StaffSim extends StaffState, Walker {
   noAccessWarned: boolean;
   /** Share of today's wage paid at day end: hired part-way through a day, only the hours left. */
   payShare: number;
+  /** Work done today (reset at midnight). */
+  today: StaffDayStats;
 }
+
+export function emptyStaffDay(): StaffDayStats {
+  return { cleaned: 0, serviced: 0, treated: 0, recaptured: 0 };
+}
+
+/** A shop's or restroom's tallies for today (the live queue length is added on read). */
+export type ServiceTally = Omit<ServiceDayStats, 'queue'>;
 
 export interface HabitatRuntime {
   id: number;

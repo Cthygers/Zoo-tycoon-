@@ -27,6 +27,23 @@ export const SHALLOW_DEPTH = 0.9;
 export const DEEP_DEPTH = 2.0;
 /** Y of the walking surface of boardwalk decks built over water. */
 export const DECK_Y = WATER_LEVEL + 0.25;
+/**
+ * Per-metre absorption of light in pond water (linear RGB: red goes first, then
+ * green → teal shallows), shared by the lake bed and submerged creatures so
+ * both sink into the same water colour.
+ */
+export const WATER_ABSORPTION: readonly [number, number, number] = [0.5, 0.19, 0.14];
+/**
+ * Mean linear albedo of the wet lake bed (the lakeBed ground layer in
+ * render/textures.ts darkened by the ground shader's underwater wetness):
+ * submerged creatures fade into it with the murk of their water column.
+ */
+export const LAKE_BED_WET_ALBEDO: readonly [number, number, number] = [0.044, 0.044, 0.021];
+/**
+ * three.js layer of meshes that only cast shadows (prop shadow batches): the
+ * sun's shadow camera renders it, the main camera never even binds them.
+ */
+export const SHADOW_ONLY_LAYER = 1;
 
 /** Entrance gate tile (centre of the south edge). Path starts here. */
 export const ENTRANCE_TILE = { x: Math.floor(MAP_W / 2), z: MAP_H - 1 };

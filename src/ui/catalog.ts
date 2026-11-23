@@ -31,6 +31,8 @@ export interface CatalogItem {
   section: string;
   description: string;
   biome?: Biome;
+  /** Fences: how strong it is (1..4) and how much of the animals guests see through it (0..1). */
+  fence?: { strength: number; visibility: number };
 }
 
 export interface Category {
@@ -113,7 +115,8 @@ export function buildCatalog(sim: ISimulation): Category[] {
         thumb: { kind: 'fence', fenceId: f.id },
         icon: 'fence',
         section: 'Fences',
-        description: `${f.description} Strength ${f.strength}/4 · ${Math.round(f.visibility * 100)}% visibility.`,
+        description: `${f.description} ${fenceStatsText(f)}.`,
+        fence: { strength: f.strength, visibility: f.visibility },
       }),
     ),
     ...TERRAIN_INFO.map(
@@ -214,6 +217,11 @@ export function buildCatalog(sim: ISimulation): Category[] {
     { id: 'animalfac', name: 'Animal Facilities', short: 'Care', icon: 'hut', hint: 'Shelters, feeders and enrichment for habitats', items: animalfac },
     { id: 'staff', name: 'Staff', short: 'Staff', icon: 'staff', hint: 'Hire staff — tap a path to place them', items: staff },
   ];
+}
+
+/** "Strength 3/4 · 25% view": what a fence holds back and how well guests see through it. */
+export function fenceStatsText(f: { strength: number; visibility: number }): string {
+  return `Strength ${f.strength}/4 · ${Math.round(f.visibility * 100)}% view`;
 }
 
 /** A short human name for a tool (toolbar title). */

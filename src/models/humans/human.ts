@@ -313,12 +313,9 @@ export class HumanModel extends RiggedModel implements BatchedModel {
   }
 
   // ---------------------------------------------------------------- highlight
-  /** Standalone: keep the person's own material, glow through its emissive term. */
+  /** Standalone: keep the person's own material, switch its selection rim. */
   protected applyStandaloneHighlight(_mesh: THREE.SkinnedMesh, on: boolean): void {
-    if (this.material) {
-      this.material.emissive.setRGB(1, 0.85, 0.35);
-      this.material.emissiveIntensity = on ? 0.25 : 0;
-    }
+    if (this.material) this.material.userData.human.uHighlight.value = on ? 0.25 : 0;
   }
 
   // ---------------------------------------------------------------- animation hooks
@@ -329,7 +326,7 @@ export class HumanModel extends RiggedModel implements BatchedModel {
     if (want !== this.itemKind) this.setItem(want);
     if (this.handIdx >= 0) jointMatrix(this.handIdx, this.handM);
     if (this.itemKind === 'balloon') this.updateBalloon(dt);
-    if (this.highlighted && this.material) this.material.emissiveIntensity = 0.18 + 0.14 * Math.sin(performance.now() * 0.006);
+    if (this.highlighted && this.material) this.material.userData.human.uHighlight.value = 0.18 + 0.14 * Math.sin(performance.now() * 0.006);
   }
 
   private setItem(kind: string): void {
@@ -374,8 +371,7 @@ export class HumanModel extends RiggedModel implements BatchedModel {
     if (!this.material) {
       const a = this.asset as HumanAsset;
       this.material = createHumanMaterial(this.colors, this.cut, marksOf(a.human), this.detail);
-      this.material.emissive.setRGB(1, 0.85, 0.35);
-      this.material.emissiveIntensity = this.highlighted ? 0.25 : 0;
+      this.material.userData.human.uHighlight.value = this.highlighted ? 0.25 : 0;
     }
     return this.material;
   }

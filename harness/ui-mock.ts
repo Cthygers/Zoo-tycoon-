@@ -39,6 +39,8 @@ import {
   type Litter,
   type Objective,
   type SelectionRef,
+  type ServiceDayStats,
+  type StaffDayStats,
   type StaffRole,
   type StaffState,
 } from '../src/core/types';
@@ -55,7 +57,7 @@ const GUEST_NAMES = ['Maya Ortiz', 'Ben Hollis', 'Priya Shah', 'Tom Reed', 'Lena
 const THOUGHTS = ['The giraffes are so tall!', 'I could use a drink.', 'This path is lovely.', 'Those zebras look happy.', 'I wish there were more benches.', 'What a beautiful zoo!'];
 
 function emptyLedger(day: number): LedgerEntry {
-  return { day, income: 0, expenses: 0, admissions: 0, shopIncome: 0, donations: 0, upkeep: 0, food: 0, salaries: 0, construction: 0, animalPurchases: 0 };
+  return { day, income: 0, expenses: 0, admissions: 0, shopIncome: 0, donations: 0, other: 0, upkeep: 0, food: 0, salaries: 0, construction: 0, animalPurchases: 0 };
 }
 
 // ===========================================================================
@@ -546,6 +548,24 @@ export class MockSim implements ISimulation {
     return this.res(true, 0, undefined, false);
   }
 
+  staffSettlement(staffId: number): number {
+    const s = this.staff.get(staffId);
+    return s ? Math.round((s.salary * this.minuteOfDay) / 1440) : 0;
+  }
+  serviceStats(objectId: number): ServiceDayStats | null {
+    const o = this.world.objects.get(objectId);
+    const def = o && OBJECTS_BY_ID[o.defId];
+    if (!def || !(def.shop || def.restroom)) return null;
+    return def.shop ? { visits: 14, sold: 22, income: 88, gaveUp: 1, queue: 3 } : { visits: 31, sold: 0, income: 0, gaveUp: 0, queue: 2 };
+  }
+  staffStats(staffId: number): StaffDayStats | null {
+    return this.staff.has(staffId) ? { cleaned: 7, serviced: 2, treated: 0, recaptured: 0 } : null;
+  }
+  pregnancy(animalId: number): { day: number; of: number } | null {
+    const a = this.animals.get(animalId);
+    const sp = a && SPECIES_BY_ID[a.speciesId];
+    return a && sp && a.pregnantDays > 0 ? { day: Math.min(sp.gestationDays, Math.floor(a.pregnantDays) + 1), of: sp.gestationDays } : null;
+  }
   staffWage(role: StaffRole): number {
     return SALARY[role] ?? 0;
   }

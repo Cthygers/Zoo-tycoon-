@@ -10,6 +10,31 @@ export const FENCES: FenceDef[] = [
 
 export const FENCES_BY_ID: Record<number, FenceDef> = Object.fromEntries(FENCES.map((f) => [f.id, f]));
 
+/** Fences below this visibility hide the animals from guests. */
+export const POOR_VIEW = 0.4;
+/** A habitat's Habitat.viewQuality below this: walls block much of the guests' view. */
+export const BLOCKED_VIEW = 0.5;
+
+/** Fences strong enough for a danger level: the cheapest one and the one guests see through best. */
+export function fencesFor(danger: number): { cheapest?: FenceDef; bestView?: FenceDef } {
+  const ok = FENCES.filter((f) => f.strength >= danger);
+  const cheapest = ok.slice().sort((a, b) => a.costPerSegment - b.costPerSegment)[0];
+  const bestView = ok.slice().sort((a, b) => b.visibility - a.visibility || a.costPerSegment - b.costPerSegment)[0];
+  return { cheapest, bestView };
+}
+
+/**
+ * Which fence to build for a danger level, e.g. "Stone Wall (blocks the view) or Glass
+ * Viewing Wall": the cheapest strong-enough fence, plus the best-view one when guests
+ * would see clearly more through it.
+ */
+export function fenceAdvice(danger: number): string {
+  const { cheapest, bestView } = fencesFor(danger);
+  if (!cheapest || !bestView) return 'a stronger fence';
+  const name = cheapest.visibility < POOR_VIEW ? `${cheapest.name} (blocks the view)` : cheapest.name;
+  return bestView.visibility - cheapest.visibility >= 0.2 ? `${name} or ${bestView.name}` : name;
+}
+
 export const PATHS: PathDef[] = [
   { type: PathType.Paved, name: 'Stone Pavers', costPerTile: 20, description: 'Clean, hard-wearing paving.' },
   { type: PathType.Gravel, name: 'Gravel Path', costPerTile: 10, description: 'Cheap and natural-looking.' },

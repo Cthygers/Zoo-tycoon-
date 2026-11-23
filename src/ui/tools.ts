@@ -27,6 +27,8 @@ export interface PendingAction {
   noteKind?: 'bad' | 'warn';
   /** Allowed, but probably not what the player wants (the confirm button says so). */
   risky?: boolean;
+  /** Removals: share of the price paid back (1 = full refund, just built). */
+  refundFraction?: number;
   commit(): CommandResult;
 }
 
@@ -760,9 +762,12 @@ export class ToolManager implements ToolInput {
     const r = sim.placePaths(tiles, type, true);
     const end = tiles[tiles.length - 1];
     const def = PATHS_BY_TYPE[type];
-    this.setLabel({ x: (end.x + 0.5) * TILE, z: (end.z + 0.5) * TILE }, fmtMoney(r.cost), `${tiles.length} tile${tiles.length > 1 ? 's' : ''}`, r.ok);
+    const count = `${tiles.length} tile${tiles.length > 1 ? 's' : ''}`;
+    // tiles of another path type are re-surfaced and paid for: say so, it is easy to miss
+    const resurfaced = r.resurfaced ? ` · ${r.resurfaced.tiles} re-surfaced` : '';
+    this.setLabel({ x: (end.x + 0.5) * TILE, z: (end.z + 0.5) * TILE }, fmtMoney(r.cost), count, r.ok);
     this.setPending({
-      title: `${def?.name ?? 'Path'} · ${tiles.length} tile${tiles.length > 1 ? 's' : ''}`,
+      title: `${def?.name ?? 'Path'} · ${count}${resurfaced}`,
       verb: 'Build',
       cost: r.cost,
       ok: r.ok,
@@ -855,7 +860,8 @@ export class ToolManager implements ToolInput {
       return;
     }
     const refund = -res.cost;
-    this.setLabel({ x: (r.x1 + 1) * TILE, z: (r.z1 + 1) * TILE }, res.ok ? `+${fmtMoney(refund)}` : 'Nothing here', `${r.x1 - r.x0 + 1}×${r.z1 - r.z0 + 1}`, res.ok);
+    const size = `${r.x1 - r.x0 + 1}×${r.z1 - r.z0 + 1}`;
+    this.setLabel({ x: (r.x1 + 1) * TILE, z: (r.z1 + 1) * TILE }, res.ok ? `+${fmtMoney(refund)}` : 'Nothing here', res.refundFraction === 1 ? `${size} · full refund` : size, res.ok);
     const rect = { ...r };
     // say what goes: "Picnic Table · 6 path tiles · 8 m fence" (the size is on the floating label)
     const parts: string[] = [];
@@ -868,6 +874,7 @@ export class ToolManager implements ToolInput {
       verb: 'Remove',
       cost: res.cost,
       ok: res.ok,
+      refundFraction: res.refundFraction,
       ...this.note(res),
       commit: () => sim.bulldoze(rect),
     });
@@ -979,6 +986,7 @@ export class ToolManager implements ToolInput {
       verb: 'Remove',
       cost: res.cost,
       ok: res.ok,
+      refundFraction: res.refundFraction,
       ...(res.ok ? this.note(res) : { note: 'Tap a fence, or drag along one', noteKind: 'bad' as const }),
       commit: () => sim.removeFences(todo),
     });
@@ -1149,7 +1157,8 @@ export class ToolManager implements ToolInput {
     let suit: SpeciesSuitability | null = null;
     if (hab) {
       try {
-        suit = sim.suitability(speciesId, hab.id);
+        // a moved animal counts as a newcomer only when it comes from another habitat
+        suit = sim.suitability(speciesId, hab.id, mover ? { animalId: mover.id } : undefined);
       } catch {
         suit = null;
       }

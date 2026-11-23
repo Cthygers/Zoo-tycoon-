@@ -600,9 +600,9 @@ export class RiggedModel implements CreatureModel {
       const s = out.s[i] * bs[i];
       b.scale.set(s, s, s);
     }
-    if (this.highlighted) {
-      const m = sa.mesh.material as THREE.MeshStandardMaterial;
-      if (m.emissiveIntensity !== undefined && m === this.asset.highlightMaterial) m.emissiveIntensity = 0.18 + 0.14 * Math.sin(performance.now() * 0.006);
+    if (this.highlighted && sa.mesh.material === this.asset.highlightMaterial) {
+      const u = this.asset.highlightMaterial.userData.creatureUniforms?.uHighlight as THREE.IUniform<number> | undefined;
+      if (u) u.value = 0.18 + 0.14 * Math.sin(performance.now() * 0.006);
     }
   }
 

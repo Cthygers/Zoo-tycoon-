@@ -92,6 +92,20 @@ export interface FootprintRect {
 
 const HIGHLIGHT_COLOR = new THREE.Color(1.0, 0.78, 0.4);
 
+/**
+ * Additive colour that leaves the target's alpha alone: on high the HDR
+ * target's alpha carries the lamp-lit mark to the grade (render/post.ts), and
+ * stock AdditiveBlending would raise it under the highlight.
+ */
+const ADD_KEEP_ALPHA = {
+  blending: THREE.CustomBlending,
+  blendEquation: THREE.AddEquation,
+  blendSrc: THREE.SrcAlphaFactor,
+  blendDst: THREE.OneFactor,
+  blendSrcAlpha: THREE.ZeroFactor,
+  blendDstAlpha: THREE.OneFactor,
+} as const;
+
 export class Highlighter {
   readonly group = new THREE.Group();
   private overlay: THREE.Object3D | null = null;
@@ -111,7 +125,7 @@ export class Highlighter {
       uniforms: { uColor: this.color, uStrength: this.ringStrength },
       transparent: true,
       depthWrite: false,
-      blending: THREE.AdditiveBlending,
+      ...ADD_KEEP_ALPHA,
       polygonOffset: true,
       polygonOffsetFactor: -2,
       polygonOffsetUnits: -2,
@@ -145,7 +159,7 @@ export class Highlighter {
       },
       transparent: true,
       depthWrite: false,
-      blending: THREE.AdditiveBlending,
+      ...ADD_KEEP_ALPHA,
       side: src.side,
       polygonOffset: true,
       polygonOffsetFactor: -1,

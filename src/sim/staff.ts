@@ -11,7 +11,7 @@ import type { OpenEnclosure } from './enclosures';
 import { STAFF_SALARY, STAFF_TITLE, personName, staffAppearance, singularName } from './names';
 import { FAR, N_TILES } from './nav';
 import type { Simulation } from './simulation';
-import type { AnimalSim, StaffSim } from './state';
+import { emptyStaffDay, type AnimalSim, type StaffSim } from './state';
 import { approach, personY, standFacing, walkToNext } from './walker';
 
 const DX = [1, -1, 0, 0];
@@ -101,6 +101,7 @@ export class StaffSystem {
       think: 0,
       noAccessWarned: false,
       payShare: (MINUTES_PER_DAY - sim.minuteOfDay) / MINUTES_PER_DAY,
+      today: emptyStaffDay(),
     };
     sim.staff.set(id, s);
     return s;
@@ -501,8 +502,11 @@ export class StaffSystem {
         const hab = w.habitats.get(s.jobRef);
         const rt = sim.habitatRuntime(s.jobRef);
         const enc = hab ? undefined : sim.enclosures.find(s.jobRef);
-        if (enc) this.serviceOpen(s, enc);
-        else if (hab && rt) {
+        if (enc) {
+          this.serviceOpen(s, enc);
+          s.today.serviced++;
+        } else if (hab && rt) {
+          s.today.serviced++;
           rt.food = Math.max(rt.food, foodCapacity(sim, hab.id));
           rt.sinceService = 0;
           // food is left just inside the fence where the keeper stands
@@ -521,6 +525,7 @@ export class StaffSystem {
             if (w.inBounds(lt.x, lt.z) && w.habitatOf[w.idx(lt.x, lt.z)] === hab.id) ids.push(l.id);
           }
           for (const id of ids) sim.removeLitter(id);
+          s.today.cleaned += ids.length;
           sim.dungByHab.set(hab.id, 0);
         }
         break;
@@ -532,6 +537,7 @@ export class StaffSystem {
           if ((l.x - s.x) ** 2 + (l.z - s.z) ** 2 < 2.6 * 2.6) ids.push(l.id);
         }
         for (const id of ids) sim.removeLitter(id);
+        s.today.cleaned += ids.length;
         break;
       }
       case 'heal': {
@@ -544,6 +550,7 @@ export class StaffSystem {
             healed++;
           }
         }
+        s.today.treated += healed;
         if (healed) {
           const hab = w.habitats.get(s.jobRef);
           sim.notify(`healed:${s.jobRef}`, `${s.name} treated ${healed} animal${healed > 1 ? 's' : ''} in ${hab?.name ?? 'a habitat'}.`, 'good', { x: s.x, z: s.z }, 60);
@@ -555,6 +562,7 @@ export class StaffSystem {
         if (a && a.escaped) {
           const sp = SPECIES_BY_ID[a.speciesId];
           if (sim.animalSys.returnHome(a)) {
+            s.today.recaptured++;
             const where = w.habitats.get(a.home)?.name ?? 'its habitat';
             sim.notify(null, `${s.name} safely returned ${a.name} the ${singularName(sp.id)} to ${where}.`, 'good', { x: a.x, z: a.z });
           }

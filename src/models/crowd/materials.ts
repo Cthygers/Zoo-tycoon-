@@ -7,7 +7,7 @@
 // meshes. Per-instance parameters arrive through the batch data texture:
 //
 //   look texel 0 = (highlight, growth 0..1, user0, user1)
-//     → fragment: `flat varying vec4 vCrLook0` (x = highlight emissive,
+//     → fragment: `flat varying vec4 vCrLook0` (x = highlight amount,
 //        y = growth — e.g. for a juvenile tint, z/w free for extensions)
 //     → fragment: `flat varying vec2 vCrYaw` (cos, sin of the instance yaw);
 //        `normalMatrix` is redefined as normalMatrix × instance rotation so
@@ -17,31 +17,80 @@
 // RiggedModel.writeLook(), read it with `crTexel(crBase + k)` in the vertex
 // shader (see `afterBase` below) and pass it on as a flat varying.
 //
-// Below the pond surface the animal's light is absorbed per channel exactly
-// like the lake bed's albedo in render/groundMaterial.ts (red first, then
-// green), so wading legs and swimming bodies sink into the water colour at
-// their depth instead of showing their dry, sky-lit colour through the veil.
+// Below the pond surface a fragment looks like the pond around it
+// (UNDERWATER_GLSL): no sun, sheen or specular past the first few centimetres,
+// dimmed sky light, and along the view ray the murk of its water column fading
+// it into the lit lake bed the shallows show, all absorbed per channel like
+// the bed (WATER_ABSORPTION, render/groundMaterial.ts); the water surface's
+// veil (render/water.ts) then lies over legs and bed alike. The waterline is
+// blended over a few cm under a darker wet band.
+//
+// The selection highlight (look texel x) is a warm Fresnel rim plus a slight
+// lift of the lit colour (HIGHLIGHT_FN_GLSL), relative to the light on the
+// creature, so a selected animal keeps its coat readable day and night.
 
 import * as THREE from 'three';
-import { WATER_LEVEL } from '../../core/constants';
+import { LAKE_BED_WET_ALBEDO, WATER_ABSORPTION, WATER_LEVEL } from '../../core/constants';
 import type { LookSpec } from '../types';
 import { createAnimalMaterial } from '../material/animalMaterial';
+import { HIGHLIGHT_FN_GLSL } from '../material/shaderChunks';
 import { crowdUniforms, patchCrowdVertex, type CrowdUniforms } from './skinning';
 
 /** Look texels per animal instance (see header). */
 export const ANIMAL_LOOK_TEXELS = 1;
 
-export const HIGHLIGHT_GLSL = 'vec3(1.0, 0.85, 0.35)';
+const vec3 = (c: readonly number[]) => `vec3(${c.map((x) => x.toFixed(4)).join(', ')})`;
 
-/** Fragment code applying the underwater absorption to `outgoingLight` (see header). */
+/** Turbidity of pond water seen through by submerged creatures (1/m of view path): a coat fades out within ~1 m. */
+const MURK = 0.8;
+
+/**
+ * Fragment code making the submerged part of `outgoingLight` look like the
+ * pond around it (see header). The water surface's veil uses the pond depth
+ * where the view ray crosses it, far less than the leg's own water column
+ * when a low camera looks across the shallows at a wading animal, and it can
+ * only mirror the sky there: over a dark, shaded leg that read as a pale blue
+ * sock. So the murk of the leg's column is added here: along the view ray the
+ * coat gives way to what the shallows show around it, the wet lake bed lit by
+ * the light entering the water where the ray crosses the surface (sun shadowed
+ * there, not at the leg). Everything is absorbed per channel like the bed.
+ */
 const UNDERWATER_GLSL = /* glsl */ `{
   float crWd = ${WATER_LEVEL.toFixed(3)} - vCrWPos.y;
-  if (crWd > 0.0) {
-    // view leg up to the eye plus the shorter leg of the light down to this
-    // point; murky pond water also scatters light away, so deeper parts fade
-    // into the water colour the surface veil lays over them
-    float crVy = max(normalize(cameraPosition - vCrWPos).y, 0.25);
-    outgoingLight *= exp(-(crWd / crVy + crWd * 0.4) * vec3(0.5, 0.19, 0.14) - crWd * 1.6);
+  float crSub = smoothstep(-0.015, 0.035, crWd);
+  // wet skin just above the waterline
+  outgoingLight *= 1.0 - 0.2 * smoothstep(-0.12, 0.0, crWd) * (1.0 - crSub);
+  if (crSub > 0.0) {
+    float d = max(crWd, 0.0);
+    vec3 toEye = normalize(cameraPosition - vCrWPos);
+    float vy = max(toEye.y, 0.25);
+    // no sheen or specular under water and no sun past the first few cm
+    // (murky water scatters it away); the sky light only through Snell's
+    // window, mostly shaded by the body above wading legs
+    vec3 lit = reflectedLight.directDiffuse * (1.0 - smoothstep(0.0, 0.05, d)) + reflectedLight.indirectDiffuse * 0.45;
+    // light entering the water where the view ray crosses the surface
+    vec3 up = normalize((viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
+    vec3 e = getAmbientLightIrradiance(ambientLightColor);
+    #if NUM_HEMI_LIGHTS > 0
+    for (int i = 0; i < NUM_HEMI_LIGHTS; i++) e += getHemisphereLightIrradiance(hemisphereLights[i], up);
+    #endif
+    #ifdef USE_ENVMAP
+    e += getIBLIrradiance(up);
+    #endif
+    #if NUM_DIR_LIGHTS > 0
+    float sunVis = 1.0;
+    #if defined( USE_SHADOWMAP ) && NUM_DIR_LIGHT_SHADOWS > 0
+    vec4 crossing = directionalShadowMatrix[0] * vec4(vCrWPos + toEye * (d / max(toEye.y, 0.05)), 1.0);
+    sunVis = getShadow(directionalShadowMap[0], directionalLightShadows[0].shadowMapSize, directionalLightShadows[0].shadowIntensity, directionalLightShadows[0].shadowBias, directionalLightShadows[0].shadowRadius, crossing);
+    #endif
+    e += directionalLights[0].color * saturate(dot(up, directionalLights[0].direction)) * sunVis;
+    #endif
+    // murk along the view ray: the coat gives way to the lit lake bed
+    float clear = exp(-d / vy * ${MURK.toFixed(2)});
+    lit = lit * clear + BRDF_Lambert(${vec3(LAKE_BED_WET_ALBEDO)}) * e * (1.0 - clear);
+    // absorbed per channel on the way down and back up, like the lake bed
+    lit *= exp(-(d * 0.4 + d / vy) * ${vec3(WATER_ABSORPTION)});
+    outgoingLight = mix(outgoingLight, lit, crSub);
   }
 }`;
 
@@ -85,6 +134,11 @@ export function batchedAnimalMaterials(look: LookSpec, detail: 0 | 1 | 2): Batch
     const pre = `flat varying vec4 vCrLook0;
 flat varying vec2 vCrYaw;
 varying vec3 vCrWPos;
+#if defined( USE_SHADOWMAP ) && NUM_DIR_LIGHT_SHADOWS > 0
+// (the vertex stage's uniform: the underwater murk samples the sun's shadow at the water surface)
+uniform highp mat4 directionalShadowMatrix[ NUM_DIR_LIGHT_SHADOWS ];
+#endif
+${HIGHLIGHT_FN_GLSL}
 ${
   hasNM
     ? `mat3 crInstanceNormalMatrix() {
@@ -97,9 +151,8 @@ ${
 void main() {`;
     shader.fragmentShader = fs
       .replace('void main() {', pre)
-      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>\ntotalEmissiveRadiance += ${HIGHLIGHT_GLSL} * vCrLook0.x;`)
-      .replace('#include <opaque_fragment>', `${UNDERWATER_GLSL}\n#include <opaque_fragment>`);
+      .replace('#include <opaque_fragment>', `outgoingLight = crHighlightOf(outgoingLight, vCrLook0.x);\n${UNDERWATER_GLSL}\n#include <opaque_fragment>`);
   };
-  mat.customProgramCacheKey = () => `${baseKey()}|crowd-v1`;
+  mat.customProgramCacheKey = () => `${baseKey()}|crowd-v2`;
   return { material: mat, depth: crowdDepthMaterial(u), uniforms: [u] };
 }

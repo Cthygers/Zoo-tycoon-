@@ -4,7 +4,7 @@
 // grass and (high tier) post FX.
 
 import * as THREE from 'three';
-import { MAP_H, MAP_W, WORLD_H, WORLD_W } from '../core/constants';
+import { MAP_H, MAP_W, SHADOW_ONLY_LAYER, WORLD_H, WORLD_W } from '../core/constants';
 import type { IRenderContext, QualityLevel, QualitySettings } from '../core/contracts';
 import type { EventBus, TileRect } from '../core/events';
 import type { World } from '../core/world';
@@ -413,6 +413,8 @@ export class RenderContext implements IRenderContext {
     this.sun = new THREE.DirectionalLight(0xffffff, SUN_E);
     this.sun.name = 'sun';
     this.sun.castShadow = q.shadows;
+    // shadow-only casters (prop shadow batches) live on their own layer
+    this.sun.shadow.camera.layers.enable(SHADOW_ONLY_LAYER);
     this.configureShadow();
     this.scene.add(this.sun, this.sun.target);
     this.hemi = new THREE.HemisphereLight(0xbcd0ff, 0x4a4632, 0.2);
