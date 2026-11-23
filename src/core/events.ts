@@ -30,8 +30,11 @@ export interface GameEvents {
   litterAdded: { id: number };
   litterRemoved: { id: number };
   moneyChanged: { money: number; delta: number };
-  /** Toast message for the player. */
-  notify: { text: string; kind: NotifyKind; focus?: { x: number; z: number } };
+  /**
+   * Toast message for the player, kept in the message log. `logOnly`: log it without a
+   * toast, because something else on screen already shows it (e.g. the goal-complete card).
+   */
+  notify: { text: string; kind: NotifyKind; focus?: { x: number; z: number }; logOnly?: boolean };
   dayChanged: { day: number };
   objectiveCompleted: { id: string; text: string; reward: number };
   /** Floating "+$12" style feedback at a world position. */

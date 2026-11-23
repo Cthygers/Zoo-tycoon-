@@ -9,6 +9,15 @@
 //    adaptation state is the exposure itself (≈1.8 at noon, 2.5–4 at golden
 //    hour and sunset, 5–10 at blue hour, ≥ 12 under the moon), so no extra
 //    uniform is needed.
+//  - Lamp-lit mark (post-FX tier): real lamp light is tens of times brighter
+//    than moonlight and seen in colour, but the game shows it only a few
+//    times brighter (so lit paving keeps its texture), which is still in the
+//    mesopic range. The night light pools therefore raise the HDR target's
+//    alpha above 1 where they light the ground (props/lights/nightlights.ts),
+//    and the OutputPass hands the excess to the grade (whLampLit, see
+//    readLampMark), which drops the Purkinje shift there. Materials that
+//    tone-map themselves (low / medium) leave whLampLit at 0; their pools
+//    blend after the grade, in display space.
 //  - Directional shadow fade: shadows fade out over the outer few percent of
 //    the (camera-fitted) shadow frustum instead of ending in a hard line.
 //
@@ -21,12 +30,13 @@ import * as THREE from 'three';
 /** Exposure at which mesopic desaturation starts / is complete. */
 export const MESOPIC_EXPOSURE = [4.5, 10.0] as const;
 
-const CUSTOM_TM = /* glsl */ `vec3 CustomToneMapping( vec3 color ) {
+const CUSTOM_TM = /* glsl */ `float whLampLit = 0.0;
+vec3 CustomToneMapping( vec3 color ) {
 	float whEx = toneMappingExposure;
 	float whLum = dot( color, vec3( 0.2126, 0.7152, 0.0722 ) );
 	float whDisp = whLum * whEx;
 	// rods: peak sensitivity near 500 nm, blind to red; blue-shifted percept
-	float whMeso = smoothstep( ${MESOPIC_EXPOSURE[0].toFixed(2)}, ${MESOPIC_EXPOSURE[1].toFixed(2)}, whEx ) * ( 1.0 - smoothstep( 0.06, 0.5, whDisp ) );
+	float whMeso = smoothstep( ${MESOPIC_EXPOSURE[0].toFixed(2)}, ${MESOPIC_EXPOSURE[1].toFixed(2)}, whEx ) * ( 1.0 - smoothstep( 0.06, 0.5, whDisp ) ) * ( 1.0 - smoothstep( 0.0, 0.4, whLampLit ) );
 	float whRod = dot( color, vec3( 0.03, 0.55, 0.62 ) );
 	color = mix( color, whRod * vec3( 0.6, 0.8, 1.28 ), whMeso * 0.82 );
 	// daylight: slight saturation, cool shadows / warm highlights
@@ -59,6 +69,19 @@ export function installShaderPatches(): void {
     const head = sm.slice(0, cut).split(SHADOW_RETURN).join(SHADOW_FADE);
     chunks.shadowmap_pars_fragment = head + sm.slice(cut);
   }
+}
+
+const OUTPUT_TM = 'gl_FragColor.rgb = CustomToneMapping( gl_FragColor.rgb );';
+
+/**
+ * Patch the OutputPass fragment shader to pass the lamp-lit mark (HDR alpha
+ * above 1, see header) to the grade; its output alpha is reset to 1.
+ */
+export function readLampMark(outputFragment: string): string {
+  return outputFragment.replace(
+    OUTPUT_TM,
+    `whLampLit = clamp( gl_FragColor.a - 1.0, 0.0, 1.0 );\n${OUTPUT_TM}\ngl_FragColor.a = 1.0;`,
+  );
 }
 
 /** True when the custom grade is available (patch applied). */

@@ -195,17 +195,7 @@ const CSS = /* css */ `
 .wh-toast .wh-toast-count { font-size: 11px; font-weight: 700; background: rgba(255,255,255,.12); border-radius: 8px; padding: 1px 6px; }
 .wh-toast-status { pointer-events: none; cursor: default; }
 .wh-toast-status.hidden { display: none; }
-/* keep toasts centred over the visible 3D view, never on top of an open side sheet */
-@media (orientation: landscape) {
-  .wh-ui.sheet-open .wh-toasts {
-    left: calc((var(--wh-gl) + 100% - min(340px, 40vw) - var(--wh-gr) - 10px) / 2);
-    width: min(460px, calc(100% - min(340px, 40vw) - var(--wh-gl) - var(--wh-gr) - 24px));
-  }
-  .wh-ui.card-open .wh-toasts {
-    left: calc((var(--wh-gl) + min(310px, 36vw) + 10px + 100% - var(--wh-gr)) / 2);
-    width: min(460px, calc(100% - min(310px, 36vw) - var(--wh-gl) - var(--wh-gr) - 24px));
-  }
-}
+/* (GameUI.layoutToasts keeps the column over the clear part of the view: beside open side sheets, the goal pill and the tour's bubble) */
 @keyframes wh-toast-in { from { opacity: 0; transform: translateY(-12px) scale(.96); } to { opacity: 1; transform: none; } }
 @keyframes wh-toast-out { to { opacity: 0; transform: translateY(-8px) scale(.97); } }
 
@@ -223,6 +213,8 @@ const CSS = /* css */ `
 }
 .wh-costlabel .wh-cl-sub { color: var(--wh-muted); font-weight: 600; margin-left: 6px; }
 .wh-costlabel.bad { color: #ffab90; }
+/* the pending build waits while a drawer is open (its confirm bar hides too) */
+.wh-ui.drawer-open .wh-costlabel { visibility: hidden; }
 
 /* ------------------------------------------------------------ bottom dock */
 .wh-bottom {
@@ -367,6 +359,11 @@ const CSS = /* css */ `
   animation: wh-fade .3s ease both;
 }
 .wh-coach.hidden { display: none; }
+/* while a tool is in hand: compact in a top corner, under the cost label and money popups */
+.wh-coach.docked { z-index: 4; max-width: min(260px, 36vw); transition: transform .22s cubic-bezier(.2, .9, .3, 1), opacity .2s ease; }
+.wh-coach.docked .wh-coach-arrow { display: none; }
+/* (without the fade-in animation, whose end state would keep it fully opaque) */
+.wh-coach.faded { animation: none; opacity: .4; }
 .wh-coach-head { display: flex; align-items: center; gap: 7px; }
 .wh-coach-n { flex: none; padding: 1px 6px; border-radius: 8px; background: var(--wh-leaf); color: #16230f; font-size: 10.5px; font-weight: 800; }
 .wh-coach-title { flex: 1; font-size: 13px; font-weight: 700; white-space: nowrap; }
@@ -583,10 +580,11 @@ const CSS = /* css */ `
 @keyframes wh-pop { from { opacity: 0; transform: scale(.92); } to { opacity: 1; transform: none; } }
 
 /* ------------------------------------------------------------ celebration */
-.wh-cele-card { pointer-events: auto; cursor: pointer; margin-bottom: 4px; position: relative; display: flex; align-items: center; gap: 14px; padding: 14px 20px 14px 14px; border-radius: 20px; min-width: min(360px, 90vw); max-width: 92vw; animation: wh-cele-in .55s cubic-bezier(.2,.9,.3,1.3) both; overflow: visible; }
+/* taps go straight through the goal card to the map: it only announces */
+.wh-cele-card { pointer-events: none; margin-bottom: 4px; position: relative; display: flex; align-items: center; gap: 12px; padding: 10px 18px 10px 10px; border-radius: 18px; min-width: min(320px, 100%); max-width: 100%; animation: wh-cele-in .55s cubic-bezier(.2,.9,.3,1.3) both; overflow: visible; }
 .wh-cele-card.out { animation: wh-toast-out .4s ease both; }
-.wh-cele-badge { width: 54px; height: 54px; border-radius: 16px; display: flex; align-items: center; justify-content: center; background: linear-gradient(160deg, #f2cf74, #c99636); color: #3a2a08; flex: none; box-shadow: 0 6px 18px rgba(220,170,70,.4); }
-.wh-cele-badge .wh-ico { width: 30px; height: 30px; }
+.wh-cele-badge { width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; background: linear-gradient(160deg, #f2cf74, #c99636); color: #3a2a08; flex: none; box-shadow: 0 6px 18px rgba(220,170,70,.4); }
+.wh-cele-badge .wh-ico { width: 25px; height: 25px; }
 .wh-cele-k { font-size: 11px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; color: #f2cf74; }
 .wh-cele-t { font-weight: 700; font-size: 15px; margin: 1px 0; }
 .wh-cele-r { font-weight: 800; color: var(--wh-leaf-2); }

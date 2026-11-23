@@ -144,7 +144,7 @@ export interface ISimulation {
   setSpeed(speed: SimSpeed): void;
 
   // ---- queries
-  /** Daily wage of a staff role (also charged up front when hiring). */
+  /** Daily wage of a staff role, paid at day end (on the hiring day only for the hours left). */
   staffWage(role: StaffRole): number;
   /** Price to repaint one tile with this terrain type. */
   terrainCost(terrain: Terrain): number;

@@ -95,6 +95,12 @@ export interface ObjectDef {
   guestOnly?: boolean;
   /** Animals / guests cannot walk through it. */
   solid: boolean;
+  /**
+   * Solid objects: size (m) [x, z] at rotation 0 of the part bodies must stay out of,
+   * centred on the footprint (e.g. a feeder's frame, a tree's trunk). Defaults to the
+   * footprint less a 0.1 m border.
+   */
+  solidSize?: [number, number];
   /** Terrain the object looks natural on (purely informational for UI). */
   biomes?: Biome[];
   shop?: { kind: ShopKind; price: number; stockCost: number };

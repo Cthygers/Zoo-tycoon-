@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { buildPoolGrid, poolLight, type WorldEmitter } from '../src/props/lights/nightlights';
+import { EventBus } from '../src/core/events';
+import { PathType, Terrain } from '../src/core/types';
+import { World } from '../src/core/world';
+import { buildPoolGrid, poolLight, surfaceBrightness, type WorldEmitter } from '../src/props/lights/nightlights';
 
 function lamp(x: number, z: number, y = 3.2): WorldEmitter {
   return { x, y, z, kind: 'lamp', px: x, pz: z, radius: 6.7, intensity: 1 };
@@ -66,5 +69,21 @@ describe('night light pools', () => {
       const [x, y, z] = [grid.position[i * 3], grid.position[i * 3 + 1], grid.position[i * 3 + 2]];
       expect(y).toBeCloseTo(0.1 * x + 0.02 * z, 5);
     }
+  });
+
+  it('carries the moonlit brightness of the surface under each vertex', () => {
+    const world = new World(new EventBus(), 3);
+    world.setTerrainRect({ x0: 8, z0: 8, x1: 12, z1: 12 }, Terrain.Grass);
+    world.setPath(10, 10, PathType.Paved);
+    world.setTerrainRect({ x0: 12, z0: 10, x1: 12, z1: 10 }, Terrain.Snow);
+    const lawn = surfaceBrightness(world, 17, 21);
+    const paved = surfaceBrightness(world, 21, 21); // centre of tile (10, 10)
+    expect(paved).toBeGreaterThan(lawn);
+    // a vertex on the path's edge takes the brighter side (never pushed past white)
+    expect(surfaceBrightness(world, 20, 21)).toBe(paved);
+    expect(surfaceBrightness(world, 19, 21)).toBe(lawn);
+    expect(surfaceBrightness(world, 25, 21)).toBeGreaterThan(paved); // snow
+    const grid = buildPoolGrid([lamp(21, 21)], () => 0, (x, z) => surfaceBrightness(world, x, z));
+    for (let i = 0; i < grid.light.length; i++) expect(grid.bright[i]).toBeCloseTo(surfaceBrightness(world, grid.position[i * 3], grid.position[i * 3 + 2]), 6);
   });
 });

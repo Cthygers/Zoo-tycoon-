@@ -3,6 +3,8 @@ import * as THREE from 'three';
 import { AtmosphereModel } from '../src/render/atmosphere';
 import { SUN_FACING_MAX, daylight } from '../src/render/context';
 import { createGroundMaterial } from '../src/render/groundMaterial';
+import { installShaderPatches, readLampMark } from '../src/render/grade';
+import { OutputShader } from 'three/examples/jsm/shaders/OutputShader.js';
 import type { GroundTextureSet } from '../src/render/textures';
 
 const DEG = Math.PI / 180;
@@ -51,5 +53,18 @@ describe('ground material options', () => {
     expect(m.version).toBe(v + 1);
     g.setOptions({ ...high });
     expect(m.version).toBe(v + 1); // unchanged options: no recompile
+  });
+});
+
+describe('night grade', () => {
+  it('lets the night light pools mark lamp-lit pixels for the grade (high tier)', () => {
+    installShaderPatches();
+    expect(THREE.ShaderChunk.tonemapping_pars_fragment).toMatch(/float whLampLit = 0\.0;[\s\S]*whLampLit/);
+    const fs = readLampMark(OutputShader.fragmentShader);
+    // the mark (HDR alpha above 1) is read before the grade runs, and not passed on to the canvas
+    const read = fs.indexOf('whLampLit = clamp( gl_FragColor.a - 1.0');
+    expect(read).toBeGreaterThan(0);
+    expect(read).toBeLessThan(fs.indexOf('CustomToneMapping( gl_FragColor.rgb )'));
+    expect(fs).toContain('gl_FragColor.a = 1.0;');
   });
 });

@@ -3,7 +3,8 @@
 //    build category that achieves it (or the Goals tab);
 //  * a five-step coach-mark tour for a new zoo (fence a habitat → paint its ground →
 //    adopt an animal → connect a path → hire a keeper). A bubble points at the dock
-//    button, then the card, then the tool bar / confirm bar, step by step;
+//    button, then the card; while a tool is in hand it docks, compact, in a top corner
+//    of the view away from what is being built. A finished step puts its tool away;
 //  * how many times build mode was entered, so the tool bar can teach the camera
 //    gesture for the first few uses.
 // Progress lives in localStorage (best effort: without storage the tour simply shows again).
@@ -11,7 +12,7 @@
 import type { ISimulation } from '../core/contracts';
 import type { Objective, Tool } from '../core/types';
 import type { CategoryId } from './catalog';
-import { button, el, fmtMoney, setText, storageGet, storageSet, swallowPointer, toggleClass } from './dom';
+import { button, el, fmtMoney, setText, storageGet, storageSet, swallowPointer, toggleClass, type ScreenRect } from './dom';
 import { icon } from './icons';
 
 /** 'done' once the tour was finished or skipped, else the number of steps reached so far. */
@@ -21,6 +22,8 @@ const BUILD_USES_KEY = 'wildhaven-build-uses';
 const CAMERA_TIP_USES = 5;
 /** Seconds between bubble re-anchors (a handful of layout reads, only while the tour runs). */
 const ANCHOR_EVERY = 0.12;
+/** Gap (px) between the docked bubble and the top bar, and around what is being built. */
+const DOCK_GAP = 6;
 
 /** Build category that works towards an objective (others open the Goals tab). */
 const GOAL_CATEGORY: Record<string, CategoryId> = {
@@ -33,6 +36,13 @@ const GOAL_CATEGORY: Record<string, CategoryId> = {
   species_6: 'animals',
   species_10: 'animals',
 };
+
+/** Area (px²) two screen rects share, with `gap` added around the first. */
+function overlapArea(a: ScreenRect, b: ScreenRect, gap: number): number {
+  const w = Math.min(a.right + gap, b.right) - Math.max(a.left - gap, b.left);
+  const h = Math.min(a.bottom + gap, b.bottom) - Math.max(a.top - gap, b.top);
+  return w > 0 && h > 0 ? w * h : 0;
+}
 
 interface TourStep {
   title: string;
@@ -128,10 +138,16 @@ export interface CoachHost {
   drawer(): HTMLElement | null;
   toolBar(): HTMLElement | null;
   confirmBar(): HTMLElement | null;
-  /** Bottom edge (px) of the top HUD: the bubble never covers it. */
-  hudBottom(): number;
+  /** Part of the 3D view the top bar, dock and side cards leave free (screen px). */
+  viewArea(): { x0: number; y0: number; x1: number; y1: number };
+  /** Screen rect of what is being built (preview + cost label), if anything. */
+  workRect(): ScreenRect | null;
   /** Something modal or a side sheet is up: keep the tour out of the way. */
   busy(): boolean;
+  /** Put the tool in hand away (back to Inspect). */
+  endTool(): void;
+  /** The bubble appeared, moved or went away (the toasts make room for it). */
+  bubbleMoved(): void;
   openBuildCategory(id: CategoryId): void;
   openGoals(): void;
   toast(text: string, kind: 'good'): void;
@@ -154,6 +170,11 @@ export class Coach {
   private painted = false;
   private acc = ANCHOR_EVERY;
   private shownStep = -1;
+  /** Current tour step (-1 when the tour is not showing). */
+  private step = -1;
+  /** Where the bubble is on screen (null while hidden), and whether it is docked in a top corner. */
+  private placed: ScreenRect | null = null;
+  private docked = false;
 
   constructor(private host: CoachHost) {
     this.pill = el('div', { class: 'wh-goal wh-glass hidden', attrs: { role: 'button', 'aria-label': 'Next goal' }, onClick: () => this.pillTapped() }, [
@@ -170,6 +191,16 @@ export class Coach {
       this.arrow,
     ]);
     this.reset();
+  }
+
+  /** Where the tour's bubble is on screen, or null while it is hidden. */
+  get rect(): ScreenRect | null {
+    return this.placed;
+  }
+
+  /** Where the bubble is while docked under the top bar (a tool in hand), else null. */
+  get dockedRect(): ScreenRect | null {
+    return this.docked ? this.placed : null;
   }
 
   /** (Re)decide whether the tour runs, for a newly started or loaded zoo. */
@@ -207,9 +238,14 @@ export class Coach {
     this.acc += dt;
     if (this.acc < ANCHOR_EVERY) return;
     this.acc = 0;
-    const step = this.touring ? this.currentStep() : -1;
-    this.updatePill(step >= 0);
-    this.updateBubble(step);
+    this.step = this.touring ? this.currentStep() : -1;
+    this.updatePill(this.step >= 0);
+    this.updateBubble(this.step);
+  }
+
+  /** Re-place the bubble now (e.g. a tool was just picked up, so it docks before the view is measured). */
+  refresh(): void {
+    if (this.touring) this.updateBubble(this.step);
   }
 
   // ------------------------------------------------------------ next-goal pill
@@ -249,6 +285,8 @@ export class Coach {
     // painting leaves no trace to check, so a resumed tour trusts the progress it saved
     const painted = this.painted || this.reached > 1;
     const i = STEPS.findIndex((s) => !s.done(sim, painted));
+    // a step just done puts its tool away, so a drag to look around doesn't start another one
+    if (this.shownStep >= 0 && (i < 0 || i > this.shownStep)) this.endStepTool(STEPS[this.shownStep]);
     if (i < 0) {
       this.finish(true);
       return -1;
@@ -260,11 +298,16 @@ export class Coach {
     return i;
   }
 
+  private endStepTool(s: TourStep): void {
+    const { tool, moving } = this.host.tool();
+    if (s.tool(tool) && !moving) this.host.endTool();
+  }
+
   private finish(completed: boolean): void {
     if (!this.touring) return;
     this.touring = false;
     storageSet(TOUR_KEY, 'done');
-    this.bubble.classList.add('hidden');
+    this.hideBubble();
     if (completed) this.host.toast('Your zoo is up and running! The goal at the top left shows what to aim for next.', 'good');
     else this.updatePill(false);
   }
@@ -273,7 +316,7 @@ export class Coach {
     const h = this.host;
     const s = STEPS[step];
     if (!s || h.busy()) {
-      this.bubble.classList.add('hidden');
+      this.hideBubble();
       return;
     }
     if (step !== this.shownStep) {
@@ -282,22 +325,24 @@ export class Coach {
       setText(this.bubbleTitle, s.title);
     }
     const { tool, moving } = h.tool();
-    const confirm = h.confirmBar();
-    // the tool bar or the confirm bar (one at a time), above the drawer and the dock buttons
-    const actionsEl = confirm ?? h.toolBar();
-    const actions = actionsEl ? actionsEl.getBoundingClientRect() : null;
+    const cat = h.openCategory();
+    if (cat === null && tool.kind !== 'select') {
+      // building: docked in a top corner, clear of the preview and its cost label
+      const own = s.tool(tool) && !moving;
+      this.showText(own ? (h.confirmBar() ? s.confirm : s.use) : s.open);
+      this.dock();
+      return;
+    }
     let text = '';
     let anchor: Anchor | null = null;
-    if (s.tool(tool) && !moving) {
-      text = confirm ? s.confirm : s.use;
-      if (actions) anchor = { x: actions.left + actions.width / 2, top: actions.top };
-    } else if (h.openCategory() === s.cat) {
-      text = s.pick;
+    if (cat === s.cat) {
       const card = h.card(s.card);
       const drawer = h.drawer();
       if (card && drawer) {
         const c = card.getBoundingClientRect();
         const d = drawer.getBoundingClientRect();
+        // the tool bar sits over the drawer while a tool is in hand
+        const actions = h.toolBar()?.getBoundingClientRect();
         // above the drawer pointing down at the card; where a tool bar over the drawer leaves
         // no room, over the drawer's title row instead (never over the tool bar)
         anchor = {
@@ -307,35 +352,76 @@ export class Coach {
           ceiling: actions && actions.bottom <= d.top + 1 ? actions.bottom : 0,
         };
       }
-    } else if (h.openCategory() === null) {
-      // (while the player browses another category the bubble keeps out of the way)
-      text = s.open;
+      text = s.pick;
+    } else if (cat === null) {
       const b = h.categoryButton(s.cat)?.getBoundingClientRect();
-      // above the tool bar as well when one sits over the dock
-      if (b && b.width) anchor = { x: b.left + b.width / 2, top: actions ? Math.min(b.top, actions.top) : b.top };
+      if (b && b.width) anchor = { x: b.left + b.width / 2, top: b.top };
+      text = s.open;
     }
+    // (while the player browses another category the bubble keeps out of the way)
     if (!anchor) {
-      this.bubble.classList.add('hidden');
+      this.hideBubble();
       return;
     }
-    setText(this.bubbleText, text);
-    this.bubble.classList.remove('hidden');
+    this.showText(text);
     this.place(anchor);
   }
 
-  /** Put the bubble above the anchor, inside the screen and below the top HUD. */
+  private showText(text: string): void {
+    setText(this.bubbleText, text);
+    this.bubble.classList.remove('hidden');
+  }
+
+  private hideBubble(): void {
+    this.bubble.classList.add('hidden');
+    this.moveTo(null, false);
+  }
+
+  /** Put the bubble above the anchor, with its arrow on it, inside the view and below the top HUD. */
   private place(a: Anchor): void {
     const b = this.bubble;
+    b.classList.remove('docked', 'faded');
     const w = b.offsetWidth;
     const hgt = b.offsetHeight;
-    const vw = window.innerWidth;
-    const left = Math.max(8, Math.min(vw - 8 - w, a.x - w / 2));
-    const ceiling = Math.max(this.host.hudBottom(), a.ceiling ?? 0) + 4;
+    // sideways inside the view (never over an open species card)
+    const area = this.host.viewArea();
+    const left = Math.max(area.x0, Math.min(area.x1 - w, a.x - w / 2));
+    const ceiling = Math.max(area.y0, a.ceiling ?? 0) + 4;
     let top = a.top - 12 - hgt;
     if (top < ceiling && a.fallbackTop !== undefined) top = a.fallbackTop - 12 - hgt;
     top = Math.max(ceiling, top);
-    b.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
     // the arrow stays on the anchor even when the bubble is pushed sideways
     this.arrow.style.left = `${Math.round(Math.max(14, Math.min(w - 14, a.x - left)))}px`;
+    this.moveTo({ left, top, right: left + w, bottom: top + hgt }, false);
+  }
+
+  /**
+   * Compact, without an arrow, in the top-left corner of the clear view (top-right when what
+   * is being built reaches into that corner; faded when it fills both).
+   */
+  private dock(): void {
+    const b = this.bubble;
+    b.classList.add('docked');
+    const w = b.offsetWidth;
+    const hgt = b.offsetHeight;
+    const a = this.host.viewArea();
+    const top = a.y0 + DOCK_GAP;
+    const work = this.host.workRect();
+    const at = (left: number): ScreenRect => ({ left, top, right: left + w, bottom: top + hgt });
+    const cost = (r: ScreenRect) => (work ? overlapArea(r, work, DOCK_GAP) : 0);
+    const leftSide = at(a.x0);
+    const rightSide = at(Math.max(a.x0, a.x1 - w));
+    const r = cost(leftSide) <= cost(rightSide) ? leftSide : rightSide;
+    toggleClass(b, 'faded', cost(r) > 0);
+    this.moveTo(r, true);
+  }
+
+  private moveTo(r: ScreenRect | null, docked: boolean): void {
+    const p = this.placed;
+    if (r) this.bubble.style.transform = `translate(${Math.round(r.left)}px, ${Math.round(r.top)}px)`;
+    const same = p && r ? Math.abs(p.left - r.left) + Math.abs(p.top - r.top) + Math.abs(p.right - r.right) + Math.abs(p.bottom - r.bottom) < 2 : p === r;
+    this.placed = r;
+    this.docked = docked;
+    if (!same) this.host.bubbleMoved();
   }
 }

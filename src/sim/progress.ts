@@ -1,6 +1,7 @@
 // Zoo rating (0..100, smoothed) and the progressive objective list.
 
 import { MAP_W, TILE } from '../core/constants';
+import { fmtMoney } from '../core/format';
 import type { Objective } from '../core/types';
 import { OBJECTS_BY_ID } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
@@ -229,8 +230,9 @@ export class Progress {
       if (!def || !def.check(sim, this)) continue;
       o.done = true;
       sim.earn('other', o.reward);
+      // the UI celebrates it with a card, so the message only goes to the log
       sim.events.emit('objectiveCompleted', { id: o.id, text: o.text, reward: o.reward });
-      sim.notify(null, `Goal complete: ${o.text} (+$${o.reward.toLocaleString('en-US')})`, 'good');
+      sim.logMessage(`Goal complete: ${o.text} (${fmtMoney(o.reward, { sign: true })})`, 'good');
     }
   }
 
@@ -254,7 +256,7 @@ export class Progress {
     if (this.litterParties.size >= thr) this.reportLitter();
     if (c.noAnimals >= Math.max(2, thr * 0.5)) sim.notify('cmp-noanimals', 'Guests are disappointed: there are no animals to see yet!', 'warn', undefined, 150);
     if (c.price >= thr)
-      sim.notify('cmp-price', `Many visitors turned away at the gate — they think about $${Math.round(sim.guestSys.fairPrice)} would be fair.`, 'warn', undefined, 150);
+      sim.notify('cmp-price', `Many visitors turned away at the gate — they think about ${fmtMoney(sim.guestSys.fairPrice)} would be fair.`, 'warn', undefined, 150);
     this.clearComplaints();
   }
 

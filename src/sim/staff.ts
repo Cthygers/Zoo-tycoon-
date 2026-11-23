@@ -2,7 +2,7 @@
 // litter on the paths, vets treat sick animals and bring escaped ones home.
 // Staff walk on the path network like guests and work from the fence line.
 
-import { MAP_W, TILE } from '../core/constants';
+import { MAP_W, MINUTES_PER_DAY, TILE } from '../core/constants';
 import type { StaffRole } from '../core/types';
 import { OBJECTS_BY_ID } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
@@ -100,6 +100,7 @@ export class StaffSystem {
       timer: rng.range(0.5, 1.5),
       think: 0,
       noAccessWarned: false,
+      payShare: (MINUTES_PER_DAY - sim.minuteOfDay) / MINUTES_PER_DAY,
     };
     sim.staff.set(id, s);
     return s;

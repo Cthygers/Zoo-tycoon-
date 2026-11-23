@@ -168,6 +168,8 @@ export interface StaffSim extends StaffState, Walker {
   timer: number;
   think: number;
   noAccessWarned: boolean;
+  /** Share of today's wage paid at day end: hired part-way through a day, only the hours left. */
+  payShare: number;
 }
 
 export interface HabitatRuntime {

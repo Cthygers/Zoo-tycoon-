@@ -74,15 +74,7 @@ export function escapeHtml(s: string): string {
 
 // ---------------------------------------------------------------- formatting
 
-export function fmtMoney(v: number, opts: { sign?: boolean; compact?: boolean } = {}): string {
-  const neg = v < 0;
-  const a = Math.abs(Math.round(v));
-  let body: string;
-  if (opts.compact && a >= 1_000_000) body = `${(a / 1_000_000).toFixed(a >= 10_000_000 ? 1 : 2)}M`;
-  else body = a.toLocaleString('en-US');
-  const sign = neg ? '−' : opts.sign ? '+' : '';
-  return `${sign}$${body}`;
-}
+export { fmtMoney } from '../core/format';
 
 export function fmtClock(minuteOfDay: number): string {
   const m = Math.floor(minuteOfDay) % 1440;
@@ -135,6 +127,14 @@ export function meter(label: string, ico?: IconName): { root: HTMLElement; set(v
 }
 
 /** Prevent pointer events from leaking through panels to the 3D view. */
+/** Screen rectangle (px), as getBoundingClientRect reports it. */
+export interface ScreenRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
 export function swallowPointer(e: HTMLElement): void {
   const stop = (ev: Event) => ev.stopPropagation();
   e.addEventListener('pointerdown', stop);

@@ -12,7 +12,7 @@ import { FENCES_BY_ID, PATHS_BY_TYPE } from '../data/fences';
 import { OBJECTS_BY_ID, rotatedSize } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
 import { STAFF_INFO, TERRAIN_INFO } from './catalog';
-import { fmtMoney } from './dom';
+import { fmtMoney, type ScreenRect } from './dom';
 import type { ToolInput } from './input';
 import { AnimalGhost, COL, DrapedMesh, FenceGhosts, GridOverlay, Marker, disposeOwned, ghostify, surfaceY, tintGhost, type EdgeState, type RGBA } from './preview';
 import { cue } from './sound';
@@ -62,6 +62,14 @@ export interface ToolHost {
 }
 
 type TP = { x: number; z: number };
+
+/** Height (m) a preview is taken to reach on screen: fences, ghosts, the animal ghost. */
+const PREVIEW_H = 2;
+
+/** Offset from the pointer's tile to the corner tile of a w×d footprint centred on it. */
+function centring(w: number, d: number): TP {
+  return { x: -Math.floor((w - 1) / 2), z: -Math.floor((d - 1) / 2) };
+}
 
 /** The paved plaza at the gate, which bulldozing leaves in place (mirrors the sim's protected entrance tiles). */
 function isEntrancePlaza(x: number, z: number): boolean {
@@ -126,6 +134,8 @@ export class ToolManager implements ToolInput {
   private prevGhostTile: TP | null = null;
   private prevGhostLocked = false;
   private moveOffset: TP = { x: 0, z: 0 };
+  /** The gesture started next to the ghost, not on it: a drag drags the ghost, a tap moves it there. */
+  private besideGhost = false;
   // animal / staff
   private point: TP | null = null;
   private prevPoint: TP | null = null;
@@ -141,11 +151,11 @@ export class ToolManager implements ToolInput {
   private pending: PendingAction | null = null;
   private disposed = false;
   private labelPos = new THREE.Vector3();
-  private labelOn = false;
   private recheck = 0;
   private habOutlineId = 0;
   private habOutlineRev = -1;
   private tmpV = new THREE.Vector3();
+  private projV = new THREE.Vector3();
 
   constructor(private host: ToolHost) {
     const world = host.sim.world;
@@ -346,15 +356,18 @@ export class ToolManager implements ToolInput {
         this.prevGhostLocked = this.ghostLocked;
         const def = OBJECTS_BY_ID[t.defId];
         const [w, d] = rotatedSize(def, t.rot);
+        this.besideGhost = false;
         if (this.ghostLocked && this.ghostTile) {
+          // a drag that starts on the ghost or within 2 tiles of it (fingers are wide) grabs it
           const g = this.ghostTile;
           const near = tile.x >= g.x - 2 && tile.x <= g.x + w + 1 && tile.z >= g.z - 2 && tile.z <= g.z + d + 1;
           if (near) {
+            this.besideGhost = !(tile.x >= g.x && tile.x < g.x + w && tile.z >= g.z && tile.z < g.z + d);
             this.moveOffset = { x: g.x - tile.x, z: g.z - tile.z };
             break;
           }
         }
-        this.moveOffset = { x: -Math.floor((w - 1) / 2), z: -Math.floor((d - 1) / 2) };
+        this.moveOffset = centring(w, d);
         this.ghostTile = { x: tile.x + this.moveOffset.x, z: tile.z + this.moveOffset.z };
         this.ghostLocked = true;
         break;
@@ -376,10 +389,15 @@ export class ToolManager implements ToolInput {
     this.ptrDirty = true;
   }
 
-  up(ndcX: number, ndcY: number, _tap: boolean): void {
+  up(ndcX: number, ndcY: number, tap: boolean): void {
     if (!this.gesture) return;
     this.ptrNdc.x = ndcX;
     this.ptrNdc.y = ndcY;
+    if (tap && this.besideGhost && this.tool.kind === 'object') {
+      // a tap next to the ghost (not on it) moves the ghost there, centred on the tapped tile
+      this.moveOffset = centring(...rotatedSize(OBJECTS_BY_ID[this.tool.defId], this.tool.rot));
+    }
+    this.besideGhost = false;
     this.applyPointer();
     this.gesture = false;
     this.refresh();
@@ -391,6 +409,7 @@ export class ToolManager implements ToolInput {
     if (!this.gesture) return;
     this.gesture = false;
     this.ptrDirty = false;
+    this.besideGhost = false;
     this.sel = this.prevSel;
     this.tapPt = this.prevTapPt;
     this.ghostTile = this.prevGhostTile;
@@ -466,10 +485,9 @@ export class ToolManager implements ToolInput {
       if (p) {
         this.showGridAt(p.x, p.z);
         if (this.tool.kind === 'object' && !this.ghostLocked) {
-          const def = OBJECTS_BY_ID[this.tool.defId];
-          const [w, d] = rotatedSize(def, this.tool.rot);
+          const off = centring(...rotatedSize(OBJECTS_BY_ID[this.tool.defId], this.tool.rot));
           const tile = this.tileOf(p);
-          this.ghostTile = { x: tile.x - Math.floor((w - 1) / 2), z: tile.z - Math.floor((d - 1) / 2) };
+          this.ghostTile = { x: tile.x + off.x, z: tile.z + off.z };
           this.refresh();
         }
       }
@@ -489,9 +507,66 @@ export class ToolManager implements ToolInput {
     }
   }
 
-  /** Project the label anchor each frame (camera moves). */
-  labelAnchor(): THREE.Vector3 | null {
-    return this.labelOn ? this.labelPos : null;
+  /** Screen rect (px) of the current preview, for keeping hints off it; null when nothing is shown. */
+  previewScreenRect(vw: number, vh: number): ScreenRect | null {
+    const b = this.previewBounds();
+    if (!b) return null;
+    const w = this.host.sim.world;
+    const cam = this.host.ctx.camera;
+    const r = { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity };
+    for (const x of [b.x0, b.x1])
+      for (const z of [b.z0, b.z1])
+        for (const up of [0, PREVIEW_H]) {
+          const v = this.projV.set(x, w.heightAt(x, z) + up, z).project(cam);
+          // partly behind the camera: take it to fill the view
+          if (v.z > 1) return { left: 0, top: 0, right: vw, bottom: vh };
+          const sx = (v.x * 0.5 + 0.5) * vw;
+          const sy = (0.5 - v.y * 0.5) * vh;
+          r.left = Math.min(r.left, sx);
+          r.right = Math.max(r.right, sx);
+          r.top = Math.min(r.top, sy);
+          r.bottom = Math.max(r.bottom, sy);
+        }
+    return r;
+  }
+
+  /**
+   * Ground rectangle (world metres) the current preview covers: the dragged area, the object
+   * ghost's footprint, or the tapped spot. Null when nothing is shown.
+   */
+  private previewBounds(): { x0: number; z0: number; x1: number; z1: number } | null {
+    const t = this.tool;
+    switch (t.kind) {
+      case 'fence':
+      case 'path':
+      case 'bulldoze':
+      case 'terrain': {
+        const s = this.sel;
+        const r =
+          t.kind === 'terrain'
+            ? this.rectOfSel(t.brush)
+            : s && { x0: Math.min(s.a.x, s.b.x), z0: Math.min(s.a.z, s.b.z), x1: Math.max(s.a.x, s.b.x), z1: Math.max(s.a.z, s.b.z) };
+        if (!r) return null;
+        // fences (and fence removal) run along tile corners, the rest covers whole tiles
+        const cornerSel = t.kind === 'fence' || (t.kind === 'bulldoze' && this.bulldozeMode === 'fence');
+        const e = cornerSel ? 0 : 1;
+        return { x0: r.x0 * TILE, z0: r.z0 * TILE, x1: (r.x1 + e) * TILE, z1: (r.z1 + e) * TILE };
+      }
+      case 'object': {
+        const g = this.ghostTile;
+        if (!g || !this.ghostLocked) return null;
+        const [w, d] = rotatedSize(OBJECTS_BY_ID[t.defId], t.rot);
+        return { x0: g.x * TILE, z0: g.z * TILE, x1: (g.x + w) * TILE, z1: (g.z + d) * TILE };
+      }
+      case 'animal':
+      case 'staff': {
+        const p = this.point;
+        const r = t.kind === 'animal' ? Math.max(1, (SPECIES_BY_ID[t.speciesId]?.length ?? 2) * 0.6) : 1;
+        return p ? { x0: p.x - r, z0: p.z - r, x1: p.x + r, z1: p.z + r } : null;
+      }
+      default:
+        return null;
+    }
   }
 
   // ------------------------------------------------------------ preview + pending
@@ -502,11 +577,9 @@ export class ToolManager implements ToolInput {
 
   private setLabel(pos: { x: number; z: number } | null, text = '', sub = '', ok = true): void {
     if (!pos) {
-      this.labelOn = false;
       this.host.onLabel(null, '', '', true);
       return;
     }
-    this.labelOn = true;
     this.labelPos.set(pos.x, surfaceY(this.host.sim.world, pos.x, pos.z) + 1.2, pos.z);
     this.host.onLabel(this.labelPos, text, sub, ok);
   }
@@ -1162,7 +1235,8 @@ export class ToolManager implements ToolInput {
     this.setPending({
       title: `Hire ${info.name.toLowerCase()}`,
       verb: 'Hire',
-      cost: r.cost,
+      // hiring itself is free; the button shows the daily wage
+      cost: sim.staffWage(role),
       ok: r.ok,
       ...this.note(r),
       commit: () => sim.hireStaff(role, px, pz),

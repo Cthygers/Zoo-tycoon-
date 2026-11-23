@@ -740,7 +740,7 @@ const SHEET_OF: Record<AtlasKind, SheetKind> = {
   fern: 'ground',
 };
 
-type Mip = { data: Uint8Array; width: number; height: number };
+export type Mip = { data: Uint8Array; width: number; height: number };
 
 /** Paint one atlas: its coverage-preserving mip chain (pure; also run in a worker). */
 export function paintAtlas(kind: AtlasKind): Mip[] {
@@ -764,44 +764,93 @@ function atlasMips(kind: AtlasKind): Mip[] {
 }
 
 /**
+ * Worker watchdog: a worker that sends no atlas for WORKER_STALL_TICKS ticks
+ * of WORKER_TICK_MS is given up. Ticks, not wall time: while the main thread
+ * is busy (terrain build, demo warm-up) the timer cannot fire and the replies
+ * wait in the queue, so a long main-thread task counts as one tick instead of
+ * timing the worker out. Painting one atlas takes ≈0.2–0.4 s on a desktop, a
+ * few times that on a slow phone; the first reply also waits for the worker
+ * script to load.
+ */
+const WORKER_TICK_MS = 250;
+const WORKER_STALL_TICKS = 40;
+
+/** Set once a worker failed or stalled: later calls paint on the main thread straight away. */
+let workerBroken = false;
+/** The worker run in flight, shared by concurrent callers. */
+let workerRun: { done: Promise<void>; listeners: ((fraction: number) => void)[] } | null = null;
+
+/** Reply of the atlas worker (atlasworker.ts): an atlas's mip chain, or why it could not be painted. */
+export type AtlasWorkerReply = { kind: AtlasKind; mips: Mip[] } | { kind: AtlasKind; error: string };
+
+/**
  * Paint the atlases of every sheet not built yet in a web worker, so the
  * loading screen's main thread only composes the sheets (painting is ~0.2–0.4 s
  * per atlas on a desktop, several times that on a phone). Resolves once all
- * are back; without worker support (or on a worker error) it resolves early
- * and the rest are painted on the main thread when first needed.
+ * are back. Never hangs: without worker support, when the worker fails
+ * (error, unreadable message) or stops answering (watchdog above), it
+ * resolves early and the missing atlases are painted on the main thread by
+ * the loading screen's atlasSteps(), one atlas per yielding step (or on first
+ * use). Concurrent calls share one worker.
  */
 export function paintAtlasesOffThread(onProgress?: (fraction: number) => void): Promise<void> {
-  const kinds: AtlasKind[] = [];
-  for (const sk of Object.keys(SHEETS) as SheetKind[]) {
-    if (hasCachedTexture(sheetKey(sk))) continue;
-    for (const k of Object.keys(SHEETS[sk].slots) as AtlasKind[]) if (!pendingMips.has(k)) kinds.push(k);
+  if (!workerRun) {
+    const kinds: AtlasKind[] = [];
+    for (const sk of Object.keys(SHEETS) as SheetKind[]) {
+      if (hasCachedTexture(sheetKey(sk))) continue;
+      for (const k of Object.keys(SHEETS[sk].slots) as AtlasKind[]) if (!pendingMips.has(k)) kinds.push(k);
+    }
+    if (kinds.length === 0 || workerBroken || typeof Worker === 'undefined') return Promise.resolve();
+    let worker: Worker;
+    try {
+      worker = new Worker(new URL('./atlasworker.ts', import.meta.url), { type: 'module' });
+    } catch {
+      workerBroken = true;
+      return Promise.resolve();
+    }
+    workerRun = runAtlasWorker(worker, kinds);
   }
-  if (kinds.length === 0 || typeof Worker === 'undefined') return Promise.resolve();
-  let worker: Worker;
-  try {
-    worker = new Worker(new URL('./atlasworker.ts', import.meta.url), { type: 'module' });
-  } catch {
-    return Promise.resolve();
-  }
-  return new Promise<void>((resolve) => {
-    let done = 0;
+  if (onProgress) workerRun.listeners.push(onProgress);
+  return workerRun.done;
+}
+
+function runAtlasWorker(worker: Worker, kinds: AtlasKind[]): NonNullable<typeof workerRun> {
+  const listeners: ((fraction: number) => void)[] = [];
+  const done = new Promise<void>((resolve) => {
+    let answered = 0;
+    let quietTicks = 0;
+    const watchdog = setInterval(() => {
+      if (++quietTicks >= WORKER_STALL_TICKS) giveUp('stopped answering');
+    }, WORKER_TICK_MS);
     const finish = () => {
+      clearInterval(watchdog);
+      worker.onmessage = worker.onerror = worker.onmessageerror = null;
       worker.terminate();
+      workerRun = null;
       resolve();
     };
-    worker.onmessage = (e: MessageEvent<{ kind: AtlasKind; mips: Mip[] }>) => {
-      if (!pendingMips.has(e.data.kind)) pendingMips.set(e.data.kind, e.data.mips);
-      done++;
-      onProgress?.(done / kinds.length);
-      if (done === kinds.length) finish();
+    const giveUp = (why: string) => {
+      workerBroken = true;
+      console.warn(`[props] foliage worker ${why}; painting the rest on the main thread`);
+      finish();
+    };
+    worker.onmessage = (e: MessageEvent<AtlasWorkerReply>) => {
+      quietTicks = 0;
+      const r = e.data;
+      // an atlas the worker could not paint is painted on the main thread (atlasSteps)
+      if ('mips' in r && !pendingMips.has(r.kind)) pendingMips.set(r.kind, r.mips);
+      answered++;
+      for (const l of listeners) l(answered / kinds.length);
+      if (answered === kinds.length) finish();
     };
     worker.onerror = (e) => {
       e.preventDefault();
-      console.warn('[props] foliage worker failed; painting on the main thread', e.message);
-      finish();
+      giveUp(`failed (${e.message || 'script error'})`);
     };
+    worker.onmessageerror = () => giveUp('sent an unreadable message');
     for (const k of kinds) worker.postMessage(k);
   });
+  return { done, listeners };
 }
 
 /** Compose a sheet's mip chain from its atlases' chains (levels they lack are box-filtered). */

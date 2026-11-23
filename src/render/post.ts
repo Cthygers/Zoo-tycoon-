@@ -1,6 +1,7 @@
 // Post-processing chain (high tier only): linear HDR render target with MSAA
 // → bloom (only while lamps glow at night) → OutputPass (tone mapping with
-// the colour grade from grade.ts + sRGB).
+// the colour grade from grade.ts + sRGB). The target's alpha carries the
+// lamp-lit mark to the grade (grade.ts), so bloom must leave it alone.
 //
 // Medium and low render straight into the canvas: on tile-based mobile GPUs a
 // float MSAA target costs a full multisample resolve plus extra full-screen
@@ -14,6 +15,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { readLampMark } from './grade';
 
 // Bloom works on the HDR target before exposure, and the night exposure is
 // ≈15× the noon one: fixed HDR thresholds made whole lamp-lit walls bloom into
@@ -67,8 +69,16 @@ export class PostFX {
     const hp = this.bloom.materialHighPassFilter;
     hp.uniforms.uCeiling = { value: BLOOM_CEILING };
     hp.fragmentShader = HIGH_PASS_FRAG;
+    // add the glow to the colour only: the alpha holds the lamp-lit mark
+    const blend = this.bloom.blendMaterial;
+    blend.blending = THREE.CustomBlending;
+    blend.blendSrc = THREE.OneFactor;
+    blend.blendDst = THREE.OneFactor;
+    blend.blendSrcAlpha = THREE.ZeroFactor;
+    blend.blendDstAlpha = THREE.OneFactor;
     this.composer.addPass(this.bloom);
     this.output = new OutputPass();
+    this.output.material.fragmentShader = readLampMark(this.output.material.fragmentShader);
     this.composer.addPass(this.output);
   }
 

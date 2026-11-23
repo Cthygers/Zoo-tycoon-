@@ -647,10 +647,11 @@ export class MockSim implements ISimulation {
     const sal = SALARY[role];
     if (!best) return this.res(false, sal, 'Staff must be placed on a path', dryRun, { x: wx, z: wz });
     if (!this.canAfford(sal)) return this.res(false, sal, this.noMoney(sal), dryRun);
-    if (dryRun) return this.res(true, sal, undefined, true);
+    // like the sim: nothing is charged at hire, wages are paid at day end
+    if (dryRun) return this.res(true, 0, undefined, true);
     const s = this.hire(role, best.x, best.z);
     this.events.emit('notify', { text: `${s.name} joined the team.`, kind: 'good', focus: { x: s.x, z: s.z } });
-    return this.res(true, sal, undefined, false, { x: s.x, z: s.z });
+    return this.res(true, 0, undefined, false, { x: s.x, z: s.z });
   }
 
   fireStaff(staffId: number): CommandResult {

@@ -25,6 +25,7 @@ import {
   type ZooStats,
 } from '../core/contracts';
 import type { EventBus, NotifyKind, TileRect } from '../core/events';
+import { fmtMoney } from '../core/format';
 import {
   TERRAIN_COUNT,
   Terrain,
@@ -317,7 +318,11 @@ export class Simulation implements ISimulation {
       if (sp) food += dailyFoodCost(sp, a.growth);
     }
     let salaries = 0;
-    for (const s of this.staff.values()) salaries += s.salary;
+    for (const s of this.staff.values()) {
+      salaries += s.salary * s.payShare;
+      s.payShare = 1;
+    }
+    salaries = Math.round(salaries);
     if (upkeep) this.spend('upkeep', upkeep);
     if (food) this.spend('food', food);
     if (salaries) this.spend('salaries', salaries);
@@ -330,10 +335,10 @@ export class Simulation implements ISimulation {
     this.animalSys.daily();
     this.debtWarned = false;
     this.events.emit('dayChanged', { day: this.day });
-    const net = done.income - done.expenses;
-    this.notify(null, `Day ${done.day} closed: income $${Math.round(done.income)}, expenses $${Math.round(done.expenses)} (${net >= 0 ? '+' : '-'}$${Math.abs(Math.round(net))})`, net >= 0 ? 'info' : 'warn');
+    const summary = daySummary(done);
+    this.notify(null, summary.text, summary.kind);
     if (this.money < 0) {
-      this.notify('debt', `You are $${Math.round(-this.money)} in debt! Building is blocked until you earn money — raise income or sell something.`, 'bad', undefined, 0);
+      this.notify('debt', `You are ${fmtMoney(-this.money)} in debt! Building is blocked until you earn money — raise income or sell something.`, 'bad', undefined, 0);
     }
   }
 
@@ -390,6 +395,11 @@ export class Simulation implements ISimulation {
       this.notifyLast.set(key, this.time);
     }
     this.events.emit('notify', focus ? { text, kind, focus: { x: focus.x, z: focus.z } } : { text, kind });
+  }
+
+  /** A message for the log only, no toast: something on screen already shows it. */
+  logMessage(text: string, kind: NotifyKind) {
+    this.events.emit('notify', { text, kind, logOnly: true });
   }
 
   // ================================================================= litter
@@ -723,6 +733,7 @@ export class Simulation implements ISimulation {
     return out;
   }
 
+  /** Adopt preview: how the habitat would suit the species with one more of it living there. */
   suitability(speciesId: string, habitatId: number): SpeciesSuitability {
     const sp = SPECIES_BY_ID[speciesId];
     const hab = this.world.habitats.get(habitatId);
@@ -739,11 +750,22 @@ export class Simulation implements ISimulation {
         issues: [!sp ? 'Unknown species' : 'Not a habitat — enclose an area with fences first'],
       };
     }
-    const pop = this.population(habitatId);
-    const present = (pop.count.get(speciesId) ?? 0) > 0;
-    const e = present ? this.evalFor(habitatId, speciesId)! : evaluateSpecies(this.world, hab, sp, pop, this.keeperCount(), true);
+    const e = evaluateSpecies(this.world, hab, sp, this.population(habitatId), this.keeperCount(), true);
+    return this.describeSuitability(e, habitatId);
+  }
+
+  /** How the habitat suits the animals of a species already living there (habitat report). */
+  private residentSuitability(speciesId: string, habitatId: number): SpeciesSuitability {
+    const e = this.evalFor(habitatId, speciesId);
+    return e ? this.describeSuitability(e, habitatId) : this.suitability(speciesId, habitatId);
+  }
+
+  /** Public suitability record: the evaluation plus the habitat's current upkeep problems. */
+  private describeSuitability(e: SpeciesEval, habitatId: number): SpeciesSuitability {
+    const hab = this.world.habitats.get(habitatId)!;
     const issues = e.issues.slice();
     const rt = this.habitatRuntime(habitatId);
+    const present = (this.population(habitatId).count.get(e.speciesId) ?? 0) > 0;
     if (present && rt && rt.food < 0.5 && this.keeperCount() > 0) issues.push('Food is running out (keepers will refill it)');
     if (this.habitatDirt(habitatId) > 0.5) issues.push('Dirty — dung needs cleaning by a keeper');
     if (!hab.viewTiles.length) issues.push('Guests cannot see this habitat (build a path next to the fence)');
@@ -779,7 +801,7 @@ export class Simulation implements ISimulation {
       area: hab.tiles.length,
       animals,
       species,
-      suitability: species.map((s) => this.suitability(s, habitatId)),
+      suitability: species.map((s) => this.residentSuitability(s, habitatId)),
       terrainFractions,
       viewable: hab.viewTiles.length > 0,
     };
@@ -855,7 +877,7 @@ export class Simulation implements ISimulation {
     this.litter.clear();
     for (const a of unpackRows<AnimalSim>(s.animals)) this.animals.set(a.id, upgradeAnimal(a));
     for (const g of unpackRows<GuestSim>(s.guests)) this.guests.set(g.id, upgradeGuest(g));
-    for (const st of unpackRows<StaffSim>(s.staff)) this.staff.set(st.id, st);
+    for (const st of unpackRows<StaffSim>(s.staff)) this.staff.set(st.id, upgradeStaff(st));
     for (const l of unpackRows<Litter>(s.litter)) this.litter.set(l.id, l);
 
     this.money = s.money;
@@ -991,6 +1013,28 @@ export class Simulation implements ISimulation {
   }
 }
 
+/**
+ * End-of-day message. One-off purchases (building, animals) are reported apart from the
+ * day's running result (income less upkeep, food and wages), and only a running loss is
+ * a warning: a day of building is an investment, not bad news.
+ */
+export function daySummary(d: LedgerEntry): { text: string; kind: NotifyKind } {
+  const net = d.income - d.expenses;
+  const investment = d.construction + d.animalPurchases;
+  const running = net + investment;
+  if (investment > 0) {
+    const what = [d.construction > 0 && 'building', d.animalPurchases > 0 && 'animals'].filter(Boolean).join(' and ');
+    return {
+      text: `Day ${d.day} closed: ${fmtMoney(net, { sign: true })} (${what} ${fmtMoney(investment)}; daily running ${fmtMoney(running, { sign: true })})`,
+      kind: running < 0 ? 'warn' : 'info',
+    };
+  }
+  return {
+    text: `Day ${d.day} closed: ${fmtMoney(net, { sign: true })} (income ${fmtMoney(d.income)}, running costs ${fmtMoney(d.expenses)})`,
+    kind: net < 0 ? 'warn' : 'info',
+  };
+}
+
 /** JSON replacer: fractional numbers rounded to 3 decimals (integers, strings untouched). */
 function roundFloats(_key: string, v: unknown): unknown {
   return typeof v === 'number' && !Number.isInteger(v) && Number.isFinite(v) ? Math.round(v * 1000) / 1000 : v;
@@ -1017,6 +1061,12 @@ function upgradeAnimal(a: AnimalSim): AnimalSim {
   d.homeTile ??= a.escaped || !a.habitatId ? -1 : Math.floor(a.z / TILE) * MAP_W + Math.floor(a.x / TILE);
   d.bestDist ??= -1;
   return a;
+}
+
+/** Fill in staff fields added after a save was written. */
+function upgradeStaff(s: StaffSim): StaffSim {
+  (s as Partial<StaffSim>).payShare ??= 1;
+  return s;
 }
 
 /** Fill in guest fields added after a save was written. */

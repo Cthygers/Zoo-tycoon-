@@ -4,6 +4,7 @@
 
 import { ENTRANCE_PLAZA, ENTRANCE_TILE, MAP_H, MAP_W, TILE } from '../core/constants';
 import type { TileRect } from '../core/events';
+import { fmtMoney } from '../core/format';
 import { PathType, Terrain, isWater, type AnimalState, type CommandResult, type Habitat, type PlacedObject, type SpeciesDef, type StaffRole } from '../core/types';
 import type { EdgeRef, EnclosureProblem } from '../core/world';
 import { FENCES_BY_ID, PATHS_BY_TYPE } from '../data/fences';
@@ -47,7 +48,6 @@ const NOT_A_HABITAT: Record<EnclosureProblem, string> = {
 export const MAX_HABITAT_NAME = 32;
 export const SELL_FRACTION = 0.5;
 
-const money = (v: number) => `$${Math.round(v).toLocaleString('en-US')}`;
 
 export class Commands {
   /** Wall-clock throttle for failure toasts while dragging tools. */
@@ -108,8 +108,8 @@ export class Commands {
 
   private noMoney(cost: number): string {
     return this.sim.money < 0
-      ? `Your zoo is in debt — earn money before building (needs ${money(cost)})`
-      : `Not enough money (needs ${money(cost)}, you have ${money(this.sim.money)})`;
+      ? `Your zoo is in debt — earn money before building (needs ${fmtMoney(cost)})`
+      : `Not enough money (needs ${fmtMoney(cost)}, you have ${fmtMoney(this.sim.money)})`;
   }
 
   private rectCentre(r: TileRect) {
@@ -713,6 +713,10 @@ export class Commands {
     const ev = evaluateSpecies(w, hab, sp, sim.population(hab.id), sim.keeperCount(), adding);
     if (ev.compat < 0.5) warn.push(ev.issues.find((i) => i.includes('predators')) ?? 'it does not get along with the other animals here');
     else if (ev.score < 0.45) warn.push(`this habitat suits it poorly (${Math.round(ev.score * 100)}%): ${ev.issues[0] ?? ''}`);
+    else if (adding && ev.space < 0.95) {
+      const crowded = ev.issues.find((i) => i.startsWith('Too crowded'));
+      warn.push(`it would be too crowded here${crowded ? ` ${crowded.slice('Too crowded '.length)}` : ''}`);
+    }
     if (!warn.length) return {};
     const text = warn.join('; ');
     return { warning: text[0].toUpperCase() + text.slice(1) };
@@ -750,7 +754,7 @@ export class Commands {
     if (dryRun) return this.result(true, -value, undefined, true, { x: a.x, z: a.z });
     sim.animalSys.remove(animalId);
     sim.earn('other', value);
-    sim.notify(null, `${a.name} the ${sp?.name ?? 'animal'} was sold to another zoo for ${money(value)}.`, 'info', { x: a.x, z: a.z });
+    sim.notify(null, `${a.name} the ${sp?.name ?? 'animal'} was sold to another zoo for ${fmtMoney(value)}.`, 'info', { x: a.x, z: a.z });
     return this.result(true, -value, undefined, false, { x: a.x, z: a.z });
   }
 
@@ -768,13 +772,13 @@ export class Commands {
     const tile = sim.nav.nearestPathTile(tx, tz, 4);
     if (tile < 0) return this.result(false, salary, `${STAFF_TITLE[role]}s must be placed on a path`, dryRun, at);
     if (!sim.canAfford(salary)) return this.result(false, salary, this.noMoney(salary), dryRun, at);
-    if (dryRun) return this.result(true, salary, undefined, true, at);
+    // nothing is charged now: wages are paid at day end, the first day only for the hours left
+    if (dryRun) return this.result(true, 0, undefined, true, at);
     const s = sim.staffSys.create(role, tile);
-    sim.spend('salaries', salary); // recruitment: first day's wage up front
     sim.events.emit('staffAdded', { id: s.id });
     sim.markPopulationDirty();
-    sim.notify(null, `${s.name} joined as ${role === 'keeper' ? 'a keeper' : role === 'vet' ? 'a vet' : 'a groundskeeper'} (${money(salary)}/day).`, 'good', { x: s.x, z: s.z });
-    return this.result(true, salary, undefined, false, { x: s.x, z: s.z });
+    sim.notify(null, `${s.name} joined as ${role === 'keeper' ? 'a keeper' : role === 'vet' ? 'a vet' : 'a groundskeeper'} (${fmtMoney(salary)}/day, paid at day end).`, 'good', { x: s.x, z: s.z });
+    return this.result(true, 0, undefined, false, { x: s.x, z: s.z });
   }
 
   fireStaff(staffId: number): CommandResult {

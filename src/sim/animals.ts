@@ -3,8 +3,9 @@
 // predators, escapes and dung.
 
 import { GAME_MINUTES_PER_SECOND, MAP_H, MAP_W, TILE, WATER_LEVEL } from '../core/constants';
-import { Terrain, type SpeciesDef } from '../core/types';
-import { OBJECTS_BY_ID } from '../data/objects';
+import { fmtMoney } from '../core/format';
+import { Terrain, type ObjectDef, type PlacedObject, type SpeciesDef } from '../core/types';
+import { OBJECTS_BY_ID, rotatedSize } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
 import type { OpenEnclosure } from './enclosures';
 import { evaluateSpecies, feederFor, type SpeciesEval } from './habitat';
@@ -65,8 +66,74 @@ function halfLength(sp: SpeciesDef, growth: number): number {
 function halfWidth(sp: SpeciesDef, growth: number): number {
   return Math.max(0.12, Math.min(0.85, 0.13 * sp.length + 0.1)) * growthScale(growth);
 }
+/**
+ * Bodies are capsules along the heading: a spine of this half-length with a radius of
+ * halfWidth, so the nose reaches halfLength from the centre.
+ */
+function spineHalf(sp: SpeciesDef, growth: number): number {
+  return Math.max(0, halfLength(sp, growth) - halfWidth(sp, growth));
+}
+/** Gap (m) left between a muzzle and the object it eats or drinks from. */
+const MUZZLE_GAP = 0.05;
 /** Fence posts / rails stand this far into the tile (m). */
 const FENCE_CLEAR = 0.12;
+
+/** World box { x0, z0, x1, z1 } bodies must stay out of for a solid object (see ObjectDef.solidSize). */
+function solidBox(o: PlacedObject, def: ObjectDef, out: { x0: number; z0: number; x1: number; z1: number }) {
+  const [fw, fd] = rotatedSize(def, o.rot);
+  const cx = (o.tx + fw / 2) * TILE,
+    cz = (o.tz + fd / 2) * TILE;
+  let hx = (fw * TILE) / 2 - 0.1,
+    hz = (fd * TILE) / 2 - 0.1;
+  if (def.solidSize) {
+    const odd = o.rot % 2 === 1;
+    hx = def.solidSize[odd ? 1 : 0] / 2;
+    hz = def.solidSize[odd ? 0 : 1] / 2;
+  }
+  out.x0 = cx - hx;
+  out.x1 = cx + hx;
+  out.z0 = cz - hz;
+  out.z1 = cz + hz;
+  return out;
+}
+
+/**
+ * Closest points between segments p + d1·s and q + d2·t (s, t in 0..1), after Ericson's
+ * "Real-Time Collision Detection" 5.1.9; writes s and t into `out`.
+ */
+function closestOnSegments(px: number, pz: number, d1x: number, d1z: number, qx: number, qz: number, d2x: number, d2z: number, out: { s: number; t: number }) {
+  const rx = px - qx,
+    rz = pz - qz;
+  const a = d1x * d1x + d1z * d1z,
+    e = d2x * d2x + d2z * d2z,
+    f = d2x * rx + d2z * rz;
+  const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+  let s = 0,
+    t = 0;
+  if (a <= 1e-9 && e <= 1e-9) {
+    // two points
+  } else if (a <= 1e-9) t = clamp01(f / e);
+  else {
+    const c = d1x * rx + d1z * rz;
+    if (e <= 1e-9) s = clamp01(-c / a);
+    else {
+      const b = d1x * d2x + d1z * d2z;
+      const denom = a * e - b * b;
+      s = denom > 1e-9 ? clamp01((b * f - c * e) / denom) : 0;
+      t = (b * s + f) / e;
+      if (t < 0) {
+        t = 0;
+        s = clamp01(-c / a);
+      } else if (t > 1) {
+        t = 1;
+        s = clamp01((b - c) / a);
+      }
+    }
+  }
+  out.s = s;
+  out.t = t;
+}
+
 function turnRate(sp: SpeciesDef): number {
   return Math.max(1.0, Math.min(4.0, 3.2 / Math.sqrt(Math.max(0.5, sp.length / 1.5))));
 }
@@ -286,11 +353,11 @@ export class AnimalSystem {
       tz = nz;
       if (!this.enterable(this.tileOf(tx, tz))) return false;
     }
-    // keep the body clear of fences, facing the way it walks in
+    // keep the body clear of objects and fences, facing the way it walks in
     {
       const h = (tx - a.x) ** 2 + (tz - a.z) ** 2 > 0.25 ? Math.atan2(tx - a.x, tz - a.z) : a.heading;
       const c = this.tc2;
-      this.clampBody(sp, a.growth, h, tx, tz, c);
+      this.fitBody(sp, a.growth, h, tx, tz, c);
       if (this.tileOf(c.x, c.z) === this.tileOf(tx, tz) || this.enterable(this.tileOf(c.x, c.z))) {
         tx = c.x;
         tz = c.z;
@@ -534,7 +601,7 @@ export class AnimalSystem {
         const sp = SPECIES_BY_ID[a.speciesId];
         if (this.returnHome(a)) {
           sim.spend('animalPurchases', RESCUE_FEE);
-          sim.notify(null, `An animal rescue team returned ${a.name} the ${sp.name} (fee $${RESCUE_FEE}). Hire a vet or keeper to handle escapes.`, 'warn', { x: a.x, z: a.z });
+          sim.notify(null, `An animal rescue team returned ${a.name} the ${sp.name} (fee ${fmtMoney(RESCUE_FEE)}). Hire a vet or keeper to handle escapes.`, 'warn', { x: a.x, z: a.z });
         } else {
           this.warnNoHome(a, sp);
           // nowhere to take it yet: once there is, staff get a minute before the paid team steps in
@@ -1464,9 +1531,10 @@ export class AnimalSystem {
       const dx = obj.cx - this.tc.x,
         dz = obj.cz - this.tc.z;
       const d = Math.hypot(dx, dz) || 1;
-      const lean = nearOnly ? 0 : Math.max(0, 0.95 - Math.max(halfWidth(sp, a.growth), halfLength(sp, a.growth) * 0.55));
-      const tx = this.tc.x + (dx / d) * lean,
-        tz = this.tc.z + (dz / d) * lean;
+      // to eat or drink, stand facing it with the muzzle just short of its solid part
+      const step = nearOnly ? 0 : this.distToSolid(o, def, this.tc.x, this.tc.z, dx / d, dz / d) - halfLength(sp, a.growth) - MUZZLE_GAP;
+      const tx = this.tc.x + (dx / d) * step,
+        tz = this.tc.z + (dz / d) * step;
       if (this.goTo(a, sp, tx, tz)) {
         a.face = nearOnly ? rng.range(-Math.PI, Math.PI) : Math.atan2(dx, dz);
         return true;
@@ -1787,12 +1855,92 @@ export class AnimalSystem {
     return true;
   }
 
-  /** Keep the body (by its length and heading) clear of fences and blocked tiles. */
+  /** Keep the body (by its length and heading) clear of objects, fences and blocked tiles. */
   private applyMargins(a: AnimalSim, sp: SpeciesDef) {
     const c = this.tc2;
-    this.clampBody(sp, a.growth, a.heading, a.x, a.z, c);
+    this.fitBody(sp, a.growth, a.heading, a.x, a.z, c);
     a.x = c.x;
     a.z = c.z;
+  }
+
+  /** Body centre moved out of solid objects, then clamped inside fences (fences win). */
+  private fitBody(sp: SpeciesDef, growth: number, h: number, x: number, z: number, out: { x: number; z: number }) {
+    this.clearObjects(sp, growth, h, x, z, out);
+    this.clampBody(sp, growth, h, out.x, out.z, out);
+  }
+
+  private box = { x0: 0, z0: 0, x1: 0, z1: 0 };
+
+  /**
+   * Push a body (a capsule along heading h) out of the solid part of nearby objects
+   * (ObjectDef.solidSize): circles spaced at most a radius apart along its spine are
+   * kept clear of each object's box.
+   */
+  private clearObjects(sp: SpeciesDef, growth: number, h: number, x: number, z: number, out: { x: number; z: number }) {
+    out.x = x;
+    out.z = z;
+    const w = this.sim.world;
+    const r = halfWidth(sp, growth),
+      s = spineHalf(sp, growth);
+    const reach = s + r;
+    const tx0 = Math.max(0, Math.floor((x - reach) / TILE)),
+      tx1 = Math.min(MAP_W - 1, Math.floor((x + reach) / TILE)),
+      tz0 = Math.max(0, Math.floor((z - reach) / TILE)),
+      tz1 = Math.min(MAP_H - 1, Math.floor((z + reach) / TILE));
+    const ux = Math.sin(h),
+      uz = Math.cos(h);
+    const n = Math.min(5, 1 + Math.ceil((2 * s) / r));
+    const b = this.box;
+    for (let tz = tz0; tz <= tz1; tz++)
+      for (let tx = tx0; tx <= tx1; tx++) {
+        const t = tz * MAP_W + tx;
+        if (!this.solid[t]) continue;
+        const o = w.objects.get(w.objectGrid[t]);
+        const def = o && OBJECTS_BY_ID[o.defId];
+        if (!def) continue;
+        solidBox(o, def, b);
+        for (let k = 0; k < n; k++) {
+          const f = n === 1 ? 0 : -s + (2 * s * k) / (n - 1);
+          const px = out.x + ux * f,
+            pz = out.z + uz * f;
+          const dx = px - Math.max(b.x0, Math.min(b.x1, px)),
+            dz = pz - Math.max(b.z0, Math.min(b.z1, pz));
+          const d2 = dx * dx + dz * dz;
+          if (d2 >= r * r) continue;
+          if (d2 > 1e-8) {
+            const d = Math.sqrt(d2);
+            out.x += (dx / d) * (r - d);
+            out.z += (dz / d) * (r - d);
+          } else {
+            // this part of the body is inside the box: leave by the nearest side
+            const ex = Math.min(px - b.x0, b.x1 - px),
+              ez = Math.min(pz - b.z0, b.z1 - pz);
+            if (ex < ez) out.x += (px - b.x0 < b.x1 - px ? -1 : 1) * (ex + r);
+            else out.z += (pz - b.z0 < b.z1 - pz ? -1 : 1) * (ez + r);
+          }
+        }
+      }
+  }
+
+  /** Distance from (x, z) along unit (ux, uz) to where the ray enters the object's solid box. */
+  private distToSolid(o: PlacedObject, def: ObjectDef, x: number, z: number, ux: number, uz: number): number {
+    const b = solidBox(o, def, this.box);
+    let near = 0,
+      far = Infinity;
+    for (const [p, u, lo, hi] of [
+      [x, ux, b.x0, b.x1],
+      [z, uz, b.z0, b.z1],
+    ] as const) {
+      if (Math.abs(u) < 1e-9) {
+        if (p < lo || p > hi) return Math.hypot((b.x0 + b.x1) / 2 - x, (b.z0 + b.z1) / 2 - z);
+        continue;
+      }
+      const t0 = (lo - p) / u,
+        t1 = (hi - p) / u;
+      near = Math.max(near, Math.min(t0, t1));
+      far = Math.min(far, Math.max(t0, t1));
+    }
+    return near <= far ? near : Math.hypot((b.x0 + b.x1) / 2 - x, (b.z0 + b.z1) / 2 - z);
   }
 
   /**
@@ -1930,33 +2078,61 @@ export class AnimalSystem {
     } else a.actionTime += dt;
   }
 
-  /** Push overlapping animals of one habitat apart. */
+  private seg = { s: 0, t: 0 };
+
+  /** How readily an animal gives way when bodies overlap: walkers more, lying animals hardly. */
+  private static yieldWeight(a: AnimalSim): number {
+    return a.moving ? 0.6 : a.action === 'sleep' || a.action === 'sit' ? 0.15 : 0.4;
+  }
+
+  /** Push overlapping animals of one habitat apart (bodies are capsules along their heading). */
   private separate(arr: AnimalSim[]) {
+    const seg = this.seg;
     for (let i = 0; i < arr.length; i++) {
       const a = arr[i];
       const sa = SPECIES_BY_ID[a.speciesId];
-      const ra = bodyRadius(sa, a.growth);
+      const ra = halfWidth(sa, a.growth),
+        la = spineHalf(sa, a.growth);
+      const uax = Math.sin(a.heading),
+        uaz = Math.cos(a.heading);
       for (let j = i + 1; j < arr.length; j++) {
         const b = arr[j];
         const sb = SPECIES_BY_ID[b.speciesId];
-        const rb = bodyRadius(sb, b.growth);
-        const dx = b.x - a.x,
-          dz = b.z - a.z;
-        let min = ra + rb;
+        const rb = halfWidth(sb, b.growth),
+          lb = spineHalf(sb, b.growth);
         // resting herd members (and mother + baby) huddle closer
-        if ((a.action === 'sleep' && b.action === 'sleep') || a.mother === b.id || b.mother === a.id) min *= 0.6;
+        let min = ra + rb;
+        if (a.mother === b.id || b.mother === a.id) min *= 0.6;
+        else if (a.action === 'sleep' && b.action === 'sleep') min *= 0.75;
+        const reach = min + la + lb;
+        if (Math.abs(b.x - a.x) >= reach || Math.abs(b.z - a.z) >= reach) continue;
+        const ubx = Math.sin(b.heading),
+          ubz = Math.cos(b.heading);
+        // spines run from the rump end (x0, z0) along the full spine vector
+        const ax0 = a.x - uax * la,
+          az0 = a.z - uaz * la,
+          bx0 = b.x - ubx * lb,
+          bz0 = b.z - ubz * lb;
+        closestOnSegments(ax0, az0, 2 * la * uax, 2 * la * uaz, bx0, bz0, 2 * lb * ubx, 2 * lb * ubz, seg);
+        const dx = bx0 + 2 * lb * ubx * seg.t - (ax0 + 2 * la * uax * seg.s),
+          dz = bz0 + 2 * lb * ubz * seg.t - (az0 + 2 * la * uaz * seg.s);
         const d2 = dx * dx + dz * dz;
         if (d2 >= min * min) continue;
-        const d = Math.sqrt(d2) || 0.01;
-        const push = (min - d) * 0.5;
-        const ux = d2 > 1e-6 ? dx / d : Math.cos(a.id),
-          uz = d2 > 1e-6 ? dz / d : Math.sin(a.id);
-        // heavier / stationary animals move less
-        const wa = a.moving ? 0.6 : 0.4,
-          wb = b.moving ? 0.6 : 0.4;
-        const s = wa + wb;
-        this.tryMove(a, sa, a.x - ux * push * (wa / s) * 2 * 0.5, a.z - uz * push * (wa / s) * 2 * 0.5);
-        this.tryMove(b, sb, b.x + ux * push * (wb / s) * 2 * 0.5, b.z + uz * push * (wb / s) * 2 * 0.5);
+        const d = Math.sqrt(d2);
+        // spines crossing: part along the line between the centres
+        const cx = b.x - a.x,
+          cz = b.z - a.z;
+        const cd = Math.hypot(cx, cz);
+        const ux = d > 1e-3 ? dx / d : cd > 1e-3 ? cx / cd : Math.cos(a.id),
+          uz = d > 1e-3 ? dz / d : cd > 1e-3 ? cz / cd : Math.sin(a.id);
+        // most of the overlap per step, shared by how readily each gives way
+        const push = (min - d) * 0.8;
+        const wa = AnimalSystem.yieldWeight(a),
+          wb = AnimalSystem.yieldWeight(b);
+        const fa = (push * wa) / (wa + wb),
+          fb = (push * wb) / (wa + wb);
+        this.tryMove(a, sa, a.x - ux * fa, a.z - uz * fa);
+        this.tryMove(b, sb, b.x + ux * fb, b.z + uz * fb);
       }
     }
   }

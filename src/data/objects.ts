@@ -6,19 +6,19 @@ import type { ObjectDef } from '../core/types';
 
 export const OBJECTS: ObjectDef[] = [
   // ---------------------------------------------------------------- trees
-  { id: 'tree_acacia', name: 'Umbrella Acacia', category: 'tree', size: [1, 1], cost: 240, upkeep: 0, appeal: 3, solid: true, biomes: ['savanna'], description: 'Flat-topped thorn tree of the African savanna.' },
-  { id: 'tree_baobab', name: 'Baobab', category: 'tree', size: [2, 2], cost: 600, upkeep: 0, appeal: 5, solid: true, biomes: ['savanna'], description: 'Massive bottle-trunked tree that stores water.' },
-  { id: 'tree_oak', name: 'Broadleaf Oak', category: 'tree', size: [1, 1], cost: 220, upkeep: 0, appeal: 3, solid: true, biomes: ['temperate', 'tropical'], description: 'Spreading deciduous shade tree.' },
-  { id: 'tree_pine', name: 'Scots Pine', category: 'tree', size: [1, 1], cost: 200, upkeep: 0, appeal: 3, solid: true, biomes: ['temperate', 'arctic'], description: 'Tall evergreen conifer with orange upper bark.' },
-  { id: 'tree_birch', name: 'Silver Birch', category: 'tree', size: [1, 1], cost: 180, upkeep: 0, appeal: 3, solid: true, biomes: ['temperate'], description: 'Slender tree with white papery bark.' },
-  { id: 'tree_palm', name: 'Date Palm', category: 'tree', size: [1, 1], cost: 260, upkeep: 0, appeal: 3, solid: true, biomes: ['tropical', 'desert', 'wetland'], description: 'Feathery-fronded palm of oases and riverbanks.' },
-  { id: 'bamboo', name: 'Bamboo Grove', category: 'plant', size: [1, 1], cost: 150, upkeep: 0, appeal: 2, solid: true, biomes: ['tropical'], description: 'Dense clump of giant bamboo canes.' },
+  { id: 'tree_acacia', name: 'Umbrella Acacia', category: 'tree', size: [1, 1], cost: 240, upkeep: 0, appeal: 3, solid: true, solidSize: [1.0, 1.0], biomes: ['savanna'], description: 'Flat-topped thorn tree of the African savanna.' },
+  { id: 'tree_baobab', name: 'Baobab', category: 'tree', size: [2, 2], cost: 600, upkeep: 0, appeal: 5, solid: true, solidSize: [2.8, 2.8], biomes: ['savanna'], description: 'Massive bottle-trunked tree that stores water.' },
+  { id: 'tree_oak', name: 'Broadleaf Oak', category: 'tree', size: [1, 1], cost: 220, upkeep: 0, appeal: 3, solid: true, solidSize: [1.0, 1.0], biomes: ['temperate', 'tropical'], description: 'Spreading deciduous shade tree.' },
+  { id: 'tree_pine', name: 'Scots Pine', category: 'tree', size: [1, 1], cost: 200, upkeep: 0, appeal: 3, solid: true, solidSize: [0.9, 0.9], biomes: ['temperate', 'arctic'], description: 'Tall evergreen conifer with orange upper bark.' },
+  { id: 'tree_birch', name: 'Silver Birch', category: 'tree', size: [1, 1], cost: 180, upkeep: 0, appeal: 3, solid: true, solidSize: [0.8, 0.8], biomes: ['temperate'], description: 'Slender tree with white papery bark.' },
+  { id: 'tree_palm', name: 'Date Palm', category: 'tree', size: [1, 1], cost: 260, upkeep: 0, appeal: 3, solid: true, solidSize: [0.9, 0.9], biomes: ['tropical', 'desert', 'wetland'], description: 'Feathery-fronded palm of oases and riverbanks.' },
+  { id: 'bamboo', name: 'Bamboo Grove', category: 'plant', size: [1, 1], cost: 150, upkeep: 0, appeal: 2, solid: true, solidSize: [1.4, 1.4], biomes: ['tropical'], description: 'Dense clump of giant bamboo canes.' },
   // --------------------------------------------------------------- plants
   { id: 'bush_savanna', name: 'Thorn Bush', category: 'plant', size: [1, 1], cost: 60, upkeep: 0, appeal: 1, solid: false, biomes: ['savanna', 'desert'], description: 'Hardy dry-country shrub.' },
   { id: 'bush_fern', name: 'Fern Thicket', category: 'plant', size: [1, 1], cost: 60, upkeep: 0, appeal: 1, solid: false, biomes: ['temperate', 'tropical'], description: 'Lush ground ferns for shady forest floors.' },
   { id: 'grass_tall', name: 'Tall Grass', category: 'plant', size: [1, 1], cost: 30, upkeep: 0, appeal: 1, solid: false, biomes: ['savanna', 'temperate'], description: 'Waist-high grass tussocks — great cover for big cats.' },
   { id: 'reeds', name: 'Reed Bed', category: 'plant', size: [1, 1], cost: 50, upkeep: 0, appeal: 1, solid: false, biomes: ['wetland'], description: 'Tall reeds that grow at the water’s edge or in shallows.' },
-  { id: 'cactus', name: 'Desert Cactus', category: 'plant', size: [1, 1], cost: 80, upkeep: 0, appeal: 2, solid: true, biomes: ['desert'], description: 'Columnar cactus for arid habitats.' },
+  { id: 'cactus', name: 'Desert Cactus', category: 'plant', size: [1, 1], cost: 80, upkeep: 0, appeal: 2, solid: true, solidSize: [1.0, 1.0], biomes: ['desert'], description: 'Columnar cactus for arid habitats.' },
   { id: 'flower_bed', name: 'Flower Bed', category: 'decoration', size: [1, 1], cost: 90, upkeep: 1, appeal: 3, solid: false, guestOnly: true, description: 'Colourful planting that cheers up guests.' },
   { id: 'hedge', name: 'Clipped Hedge', category: 'decoration', size: [1, 1], cost: 70, upkeep: 1, appeal: 2, solid: true, guestOnly: true, description: 'Neat box hedge for borders.' },
   // ---------------------------------------------------------------- rocks
@@ -34,9 +34,9 @@ export const OBJECTS: ObjectDef[] = [
   { id: 'toy_ball', name: 'Enrichment Ball', category: 'enrichment', size: [1, 1], cost: 150, upkeep: 1, appeal: 2, solid: false, habitatOnly: true, serves: 'play', description: 'Large durable ball to push and chase.' },
   { id: 'climbing_frame', name: 'Climbing Frame', category: 'enrichment', size: [2, 2], cost: 1100, upkeep: 3, appeal: 3, solid: true, habitatOnly: true, serves: 'play', description: 'Timber poles, platforms and ropes for climbers.' },
   // ------------------------------------------------------------- feeders
-  { id: 'feeder_hay', name: 'Hay Feeder', category: 'feeder', size: [1, 1], cost: 250, upkeep: 4, appeal: 0, solid: true, habitatOnly: true, serves: 'food', description: 'Raised hay rack for grazers and browsers. Keepers refill it.' },
+  { id: 'feeder_hay', name: 'Hay Feeder', category: 'feeder', size: [1, 1], cost: 250, upkeep: 4, appeal: 0, solid: true, solidSize: [1.36, 0.96], habitatOnly: true, serves: 'food', description: 'Raised hay rack for grazers and browsers. Keepers refill it.' },
   { id: 'feeder_meat', name: 'Meat Platform', category: 'feeder', size: [1, 1], cost: 300, upkeep: 6, appeal: 0, solid: false, habitatOnly: true, serves: 'food', description: 'Feeding platform for carnivores. Keepers refill it.' },
-  { id: 'water_trough', name: 'Water Trough', category: 'feeder', size: [1, 1], cost: 200, upkeep: 1, appeal: 0, solid: true, habitatOnly: true, serves: 'water', description: 'Stone drinking trough (animals can also drink from ponds).' },
+  { id: 'water_trough', name: 'Water Trough', category: 'feeder', size: [1, 1], cost: 200, upkeep: 1, appeal: 0, solid: true, solidSize: [1.7, 0.8], habitatOnly: true, serves: 'water', description: 'Stone drinking trough (animals can also drink from ponds).' },
   // --------------------------------------------------------------- shops
   { id: 'shop_snack', name: 'Snack Kiosk', category: 'shop', size: [2, 2], cost: 2500, upkeep: 12, appeal: 1, solid: true, guestOnly: true, needsPathAccess: true, light: true, shop: { kind: 'food', price: 6, stockCost: 2 }, description: 'Sells hot snacks to hungry guests.' },
   { id: 'shop_drinks', name: 'Drinks Kiosk', category: 'shop', size: [1, 1], cost: 1500, upkeep: 8, appeal: 1, solid: true, guestOnly: true, needsPathAccess: true, light: true, shop: { kind: 'drink', price: 4, stockCost: 1 }, description: 'Cold drinks and juices.' },

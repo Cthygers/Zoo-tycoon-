@@ -4,19 +4,20 @@ import type * as THREE from 'three';
 //   showLoadingScreen(root)       → { setProgress, hide }
 //   showMainMenu(root, opts)      → Promise<'continue' | 'new'>
 
+import { Vector3 } from 'three';
 import { ENTRANCE_TILE, TILE } from '../core/constants';
 import type { IGameUI, QualityLevel, SimSpeed, UIDeps } from '../core/contracts';
-import type { SelectionRef, Tool } from '../core/types';
+import type { Habitat, SelectionRef, Tool } from '../core/types';
 import { OBJECTS_BY_ID } from '../data/objects';
 import { CameraController } from './camera';
 import { buildCatalog, type CatalogItem, type Category, type CategoryId } from './catalog';
 import { Coach } from './coach';
 import { Dock } from './dock';
-import { el, toggleClass } from './dom';
+import { el, setStyle, toggleClass, type ScreenRect } from './dom';
 import { Hud } from './hud';
 import { InputController } from './input';
 import { CostLabel, Celebration, MoneyPopups, Toasts } from './notify';
-import { InfoPanel, SpeciesCard, closeTopDialog, dialogOpen } from './panels';
+import { InfoPanel, SpeciesCard, closeTopDialog, dialogOpen, habitatCentre } from './panels';
 import { bindAudio, cue } from './sound';
 import { ensureStyles } from './styles';
 import { ThumbnailService } from './thumbs';
@@ -44,6 +45,15 @@ const APPLYING_MIN_MS = 1200;
 const APPLYING_MAX_MS = 30000;
 /** Without a completion signal from the creature factory: rough rebuild time per species on a phone (ms). */
 const REBUILD_MS_PER_SPECIES = 700;
+/** Gap (px) between the clear view and an open side sheet or card. */
+const SIDE_GAP = 10;
+/** The toast column is at most this wide (px), and moves beside the goal pill / tour bubble only if it keeps this much. */
+const TOAST_COL_MAX = 460;
+const TOAST_COL_MIN = 300;
+/** Gap (px) between the toast column and the goal pill / tour bubble. */
+const TOAST_GAP = 8;
+
+const _corner = new Vector3();
 
 class GameUI implements GameUIHandle {
   readonly camera: CameraController;
@@ -140,7 +150,7 @@ class GameUI implements GameUIHandle {
       catalog: this.catalog,
       selectItem: (item) => this.selectItem(item),
       exitTool: () => this.setTool({ kind: 'select' }),
-      drawerOpened: () => this.select(null),
+      drawerOpened: (id) => this.categoryOpened(id),
       rotate: () => this.tools.rotate(),
       setFenceMode: (m) => this.tools.setFenceMode(m),
       setPathStraight: (on) => this.tools.setPathStraight(on),
@@ -188,8 +198,11 @@ class GameUI implements GameUIHandle {
       drawer: () => dock.drawerEl,
       toolBar: () => dock.toolbarEl,
       confirmBar: () => dock.confirmBarEl,
-      hudBottom: () => this.hud.root.offsetTop + this.hud.root.offsetHeight,
+      viewArea: () => this.viewArea(),
+      workRect: () => this.workRect(),
       busy: () => this.zoo.isOpen || dialogOpen() || this.info.sheet.open,
+      endTool: () => this.setTool({ kind: 'select' }),
+      bubbleMoved: () => this.layoutToasts(),
       openBuildCategory: (id) => this.openCategory(id),
       openGoals: () => this.openZooPanel('goals'),
       toast: (text, kind) => this.toasts.show(text, kind),
@@ -219,7 +232,7 @@ class GameUI implements GameUIHandle {
     // ---- events
     const ev = sim.events;
     this.offs.push(
-      ev.on('notify', (n) => this.toasts.show(n.text, n.kind, n.focus)),
+      ev.on('notify', (n) => (n.logOnly ? this.toasts.logOnly(n.text, n.kind, n.focus) : this.toasts.show(n.text, n.kind, n.focus))),
       ev.on('objectiveCompleted', (o) => {
         this.cele.show(o.text, o.reward);
         this.layoutToasts(); // toasts under the new card make way at once
@@ -308,39 +321,74 @@ class GameUI implements GameUIHandle {
   }
 
   /**
-   * Screen rect (px) of the 3D view that no HUD element covers: below the top bar, above the
-   * dock, and beside the info sheet (landscape) or above it (portrait).
+   * Screen rect (px) of the 3D view the fixed HUD leaves free: below the top bar, inside its
+   * side margins, above the dock, and beside the info sheet / species card (landscape) or
+   * above / below them (portrait).
    */
-  private clearArea(): { x0: number; y0: number; x1: number; y1: number } {
+  private viewArea(): { x0: number; y0: number; x1: number; y1: number } {
     const hud = this.hud.root;
-    const a = { x0: 0, y0: hud.offsetTop + hud.offsetHeight, x1: this.vw, y1: this.dock.root.offsetTop || this.vh };
-    if (this.info.sheet.open) {
+    const a = { x0: hud.offsetLeft, y0: hud.offsetTop + hud.offsetHeight, x1: hud.offsetLeft + hud.offsetWidth, y1: this.dock.root.offsetTop || this.vh };
+    for (const sheet of [this.info.sheet, this.species.sheet]) {
+      if (!sheet.open) continue;
       // layout box, not getBoundingClientRect: the sheet may still be sliding in
-      const s = this.info.sheet.root;
-      if (s.offsetWidth < this.vw * 0.7) a.x1 = Math.min(a.x1, s.offsetLeft);
-      else a.y1 = Math.min(a.y1, s.offsetTop);
+      const s = sheet.root;
+      if (s.offsetWidth >= this.vw * 0.7) {
+        if (s.offsetTop > this.vh / 2) a.y1 = Math.min(a.y1, s.offsetTop);
+        else a.y0 = Math.max(a.y0, s.offsetTop + s.offsetHeight);
+      } else if (s.offsetLeft > this.vw / 2) a.x1 = Math.min(a.x1, s.offsetLeft - SIDE_GAP);
+      else a.x0 = Math.max(a.x0, s.offsetLeft + s.offsetWidth + SIDE_GAP);
     }
     return a;
   }
 
+  /** The view area below the tour's bubble while it is docked under the top bar: where the camera centres things. */
+  private clearArea(): { x0: number; y0: number; x1: number; y1: number } {
+    const a = this.viewArea();
+    const b = this.coach.dockedRect;
+    if (b) a.y0 = Math.max(a.y0, b.bottom);
+    return a;
+  }
+
   /**
-   * Keep the toast column clear of the next-goal pill (it drops below the pill where the two
-   * would meet) and of the dock, drawer, tool bar and confirm bar under it (Toasts.setRoom:
-   * only what fits is shown, the rest waits).
+   * Lay the toast column out over the free part of the view, around the next-goal pill and
+   * the tour's bubble (beside them where there is room, else below the one under the top bar
+   * and above the one pointing at the dock), and above the dock, drawer, tool bar and confirm
+   * bar (Toasts.setRoom: only what fits is shown, the rest waits).
    */
   private layoutToasts(): void {
     const col = this.toasts.root;
+    const a = this.viewArea();
+    let { x0, x1 } = a;
+    let top = a.y0 + 4;
+    let bottom = a.y1;
     const pill = this.coach.pill;
-    let top = '';
-    if (getComputedStyle(pill).visibility !== 'hidden') {
-      const p = pill.getBoundingClientRect();
-      const c = col.getBoundingClientRect();
-      if (c.left < p.right + 8 && c.right > p.left - 8) top = `${Math.round(p.bottom + 8)}px`;
+    const obstacles: (ScreenRect | null)[] = [getComputedStyle(pill).visibility !== 'hidden' ? pill.getBoundingClientRect() : null, this.coach.rect];
+    for (const r of obstacles) {
+      const half = Math.min(TOAST_COL_MAX, x1 - x0) / 2;
+      const mid = (x0 + x1) / 2;
+      if (!r || r.right + TOAST_GAP <= mid - half || r.left - TOAST_GAP >= mid + half) continue;
+      const leftRoom = r.left - TOAST_GAP - x0;
+      const rightRoom = x1 - r.right - TOAST_GAP;
+      if (r.top > (a.y0 + a.y1) / 2) bottom = Math.min(bottom, r.top);
+      else if (Math.max(leftRoom, rightRoom) >= TOAST_COL_MIN) {
+        if (rightRoom >= leftRoom) x0 = r.right + TOAST_GAP;
+        else x1 = r.left - TOAST_GAP;
+      } else top = Math.max(top, r.bottom + TOAST_GAP);
     }
-    if (col.style.top !== top) col.style.top = top;
-    const room = this.clearArea().y1 - col.offsetTop - 6;
+    setStyle(col, 'left', `${Math.round((x0 + x1) / 2)}px`);
+    setStyle(col, 'width', `${Math.round(Math.min(TOAST_COL_MAX, x1 - x0))}px`);
+    setStyle(col, 'top', `${Math.round(top)}px`);
+    const room = bottom - top - 6;
     this.cele.setRoom(room);
     this.toasts.setRoom(room);
+  }
+
+  /** Screen rect (px) of what is being built right now: the tool's preview and its cost label. */
+  private workRect(): ScreenRect | null {
+    const r = this.tools.previewScreenRect(this.vw, this.vh);
+    const l = this.costLabel.shown ? this.costLabel.root.getBoundingClientRect() : null;
+    if (!r || !l) return r ?? l;
+    return { left: Math.min(r.left, l.left), top: Math.min(r.top, l.top), right: Math.max(r.right, l.right), bottom: Math.max(r.bottom, l.bottom) };
   }
 
   /** Fly the camera to a ground point, centring it in the part of the view that panels leave clear. */
@@ -366,6 +414,41 @@ class GameUI implements GameUIHandle {
     const m = 36; // room for the selection ring around the thing's ground point
     if (p.z < 1 && sx > a.x0 + m && sx < a.x1 - m && sy > a.y0 + m && sy < a.y1 - m) return;
     this.focusClear(x, z);
+  }
+
+  /**
+   * The species card covers one side of the view: bring the habitat an animal of this species
+   * would most likely go to (the best suited, the nearest among equals) into the clear part.
+   */
+  private showHabitatFor(speciesId: string): void {
+    const sim = this.deps.sim;
+    const t = this.camera.target;
+    let best: Habitat | null = null;
+    let bestKey = -Infinity;
+    for (const h of sim.world.habitats.values()) {
+      const c = habitatCentre(h);
+      const key = sim.suitability(speciesId, h.id).score - Math.hypot(c.x - t.x, c.z - t.z) / 1e4;
+      if (key > bestKey) {
+        bestKey = key;
+        best = h;
+      }
+    }
+    if (!best) return;
+    const a = this.clearArea();
+    const cam = this.deps.ctx.camera;
+    const w = sim.world;
+    const inView = [best.minX, best.maxX + 1].every((tx) =>
+      [best.minZ, best.maxZ + 1].every((tz) => {
+        const p = _corner.set(tx * TILE, w.heightAt(tx * TILE, tz * TILE), tz * TILE).project(cam);
+        const sx = (p.x * 0.5 + 0.5) * this.vw;
+        const sy = (0.5 - p.y * 0.5) * this.vh;
+        return p.z < 1 && sx > a.x0 && sx < a.x1 && sy > a.y0 && sy < a.y1;
+      }),
+    );
+    if (!inView) {
+      const c = habitatCentre(best);
+      this.focusClear(c.x, c.z);
+    }
   }
 
   private dropIfSelected(kind: SelectionRef['kind'], id: number): void {
@@ -400,8 +483,9 @@ class GameUI implements GameUIHandle {
     const cur = this.tools.tool;
     if (tool.kind === 'terrain' && cur.kind === 'terrain') tool = { ...tool, brush: cur.brush };
     if (tool.kind === 'object' && cur.kind === 'object') tool = { ...tool, rot: cur.rot };
-    this.applyTool(tool, item);
+    // drawer first: the species card then measures the view the drawer no longer covers
     this.dock.closeDrawer();
+    this.applyTool(tool, item);
   }
 
   setTool(tool: Tool): void {
@@ -435,8 +519,7 @@ class GameUI implements GameUIHandle {
     if (entering) this.enteredBuildMode();
     const hint = sel.kind === 'animal' ? 'Tap a spot inside a habitat' : 'Drag it to its new spot';
     this.dock.setTool(tool, this.itemFor(tool), { name: `Move ${name}`, hint });
-    if (tool.kind === 'animal') this.species.show(tool.speciesId);
-    else this.species.hide();
+    this.showSpeciesCard(tool);
     sim.events.emit('toolChanged', { tool });
   }
 
@@ -447,9 +530,25 @@ class GameUI implements GameUIHandle {
     this.tools.setTool(tool);
     if (entering) this.enteredBuildMode();
     this.dock.setTool(tool, item);
+    this.showSpeciesCard(tool);
+    this.deps.sim.events.emit('toolChanged', { tool });
+  }
+
+  /**
+   * The animal tool shows the species card, with a habitat to tap in the clear part of the view
+   * (measured once the tour's bubble has docked for the new tool).
+   */
+  private showSpeciesCard(tool: Tool): void {
     if (tool.kind === 'animal') this.species.show(tool.speciesId);
     else this.species.hide();
-    this.deps.sim.events.emit('toolChanged', { tool });
+    this.coach.refresh();
+    if (tool.kind === 'animal') this.showHabitatFor(tool.speciesId);
+  }
+
+  /** A build category opened: browsing another category than the tool's puts the tool (and its pending action) away. */
+  private categoryOpened(id: CategoryId): void {
+    this.select(null);
+    if (this.tools.active && this.dock.toolCategory !== id) this.setTool({ kind: 'select' });
   }
 
   /** Build mode entered from Inspect: the first few times, the tool bar says how to move the camera. */
@@ -546,7 +645,7 @@ class GameUI implements GameUIHandle {
         return this.handleBack();
       case 'Enter':
       case 'NumpadEnter':
-        if (!this.tools.hasPending) return false;
+        if (!this.dock.confirmVisible) return false;
         this.confirm();
         return true;
       case 'KeyR':

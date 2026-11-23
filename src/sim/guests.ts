@@ -40,6 +40,11 @@ const FAIR_BASE = 13.5;
 const FAIR_PER_ATTRACTION = 0.25;
 /** Share of guests who stop to look at an exhibit they pass on the way somewhere else. */
 const GLANCE_CHANCE = 0.7;
+/** People who fit along one tile of fence (2 m) side by side. */
+const VIEWERS_PER_TILE = 4;
+/** Body radii (m) for crowd spacing: adults' shoulders, children's. */
+const ADULT_R = 0.26;
+const CHILD_R = 0.2;
 /** Longest look at an exhibit passed on the way to another (sim seconds, see arrive). */
 const GLANCE_SECONDS = 9;
 /** With more than this many tiles to go, guests walk briskly (this much faster than their stroll). */
@@ -565,9 +570,10 @@ export class GuestSystem {
           const b = crowd[j];
           const ddx = b.x - a.x,
             ddz = b.z - a.z;
-          // members of one party walk close together
+          // shoulder to shoulder at most; members of one party walk a little closer
           const family = a.leader === b.id || b.leader === a.id || (a.leader !== 0 && a.leader === b.leader);
-          const min = (a.appearance.child || b.appearance.child ? 0.42 : 0.52) * (family ? 0.85 : 1);
+          const walking = a.speed > 0.25 || b.speed > 0.25;
+          const min = ((a.appearance.child ? CHILD_R : ADULT_R) + (b.appearance.child ? CHILD_R : ADULT_R)) * (family && walking ? 0.85 : 1);
           const d2 = ddx * ddx + ddz * ddz;
           if (d2 >= min * min) continue;
           const d = Math.sqrt(d2);
@@ -580,7 +586,7 @@ export class GuestSystem {
             ux = ddx / d;
             uz = ddz / d;
           }
-          const push = (min - d) * 0.5;
+          const push = (min - d) * 0.7;
           // people in a queue / at a counter / at a fence hold their place more
           const wa = this.weight(a),
             wb = this.weight(b);
@@ -1117,9 +1123,21 @@ export class GuestSystem {
     if (n.bladder < 0.3 || n.hunger < 0.3 || n.thirst < 0.3 || n.energy < 0.3) return false;
     // not if the look would leave no time for the exhibit the party set out for (it can look on the way back)
     if (g.plan && g.plan !== habId && this.tripTime(g, g.plan) + GLANCE_SECONDS > g.visitLeft) return false;
-    // stand right here at the fence (the plan stays: think() resumes it afterwards)
-    this.setGoal(g, 'view', `t:${g.tile}`, habId);
-    this.arrive(g);
+    // stand right here at the fence (the plan stays: think() resumes it afterwards), or a
+    // few steps along it when this stretch is full
+    const size = 1 + g.party.length;
+    const crowd = this.countViewers(g, habId);
+    let spot = g.tile;
+    if ((crowd.get(spot) ?? 0) + size > VIEWERS_PER_TILE) {
+      spot = this.pickViewTile(g, habId, hab.viewTiles, 4);
+      if ((crowd.get(spot) ?? 0) + size > VIEWERS_PER_TILE) return false;
+    }
+    this.setGoal(g, 'view', `t:${spot}`, habId);
+    if (spot === g.tile) this.arrive(g);
+    else {
+      g.phase = 0;
+      g.next = -1;
+    }
     return true;
   }
 
@@ -1722,7 +1740,7 @@ export class GuestSystem {
             const nx = x + DX[k] * s,
               nz = z + DZ[k] * s;
             if (!w.inBounds(nx, nz) || w.habitatOf[nz * MAP_W + nx] !== hab.id) continue;
-            const side = rng.range(-0.6, 0.6);
+            const side = this.fenceSlot(g, cx, cz, DX[k], DZ[k]);
             g.ax = cx + DX[k] * 0.55 - DZ[k] * side;
             g.az = cz + DZ[k] * 0.55 + DX[k] * side;
             g.faceHeading = Math.atan2(DX[k], DZ[k]);
@@ -1785,34 +1803,40 @@ export class GuestSystem {
   private viewCrowd = new Map<number, number>();
   private viewSeen = new Set<number>();
   private viewQueue: number[] = [];
+  /** BFS depth of each viewQueue entry. */
+  private viewSteps: number[] = [];
+  private slotSides: number[] = [];
 
-  /**
-   * Choose a viewing tile reachable along the habitat's viewing tiles (within
-   * a short stroll, ~8 tiles) that is close to the animals and not crowded.
-   */
-  private pickViewTile(g: GuestSim, habId: number, viewTiles: number[]): number {
-    const sim = this.sim;
+  /** People (whole parties) standing at, or walking to, each viewing tile of a habitat. */
+  private countViewers(g: GuestSim, habId: number): Map<number, number> {
     const crowd = this.viewCrowd;
     crowd.clear();
-    for (const o of sim.guests.values()) {
+    for (const o of this.sim.guests.values()) {
       if (o === g || o.leader || o.goal !== 'view' || o.goalRef !== habId) continue;
       const t = o.phase === 0 && o.goalKey.charCodeAt(0) === 116 ? Number(o.goalKey.slice(2)) : o.phase !== 0 ? o.tile : -1;
-      if (t < 0) continue;
-      const w = 1 + o.party.length * 0.6;
-      crowd.set(t, (crowd.get(t) ?? 0) + w);
-      // neighbouring tiles feel busy too
-      for (let k = 0; k < 4; k++) {
-        const n = t + DX[k] + DZ[k] * MAP_W;
-        if (n >= 0 && n < N_TILES) crowd.set(n, (crowd.get(n) ?? 0) + w * 0.4);
-      }
+      if (t >= 0) crowd.set(t, (crowd.get(t) ?? 0) + 1 + o.party.length);
     }
-    // BFS over this habitat's viewing tiles (and the path tiles between them), max ~14 steps
+    return crowd;
+  }
+
+  /**
+   * Choose a viewing tile reachable along the habitat's viewing tiles (within a short
+   * stroll, `maxSteps` tiles) that is close to the animals and has room for the party.
+   */
+  private pickViewTile(g: GuestSim, habId: number, viewTiles: number[], maxSteps = 14): number {
+    const sim = this.sim;
+    const crowd = this.countViewers(g, habId);
+    const size = 1 + g.party.length;
+    // BFS over this habitat's viewing tiles (and the path tiles between them), up to maxSteps
     const seen = this.viewSeen;
     seen.clear();
     const q = this.viewQueue;
     q.length = 0;
     q.push(g.tile);
     seen.add(g.tile);
+    const steps = this.viewSteps;
+    steps.length = 0;
+    steps.push(0);
     const adj = sim.nav.adj;
     let best = g.tile,
       bestScore = -Infinity;
@@ -1829,13 +1853,17 @@ export class GuestSystem {
           if (d < near) near = d;
         }
         const walk = Math.hypot(cx - g.x, cz - g.z);
-        const score = -Math.min(near, 60) * 0.08 - (crowd.get(t) ?? 0) * 1.6 - walk * 0.05 + sim.rng.float() * 1.2;
+        // neighbouring tiles feel busy too; a stretch without room for the party is a last resort
+        let busy = (crowd.get(t) ?? 0) * 0.9;
+        for (let k = 0; k < 4; k++) busy += (crowd.get(t + DX[k] + DZ[k] * MAP_W) ?? 0) * 0.3;
+        const overflow = Math.max(0, (crowd.get(t) ?? 0) + size - VIEWERS_PER_TILE);
+        const score = -Math.min(near, 60) * 0.08 - busy - overflow * 4 - walk * 0.05 + sim.rng.float() * 1.2;
         if (score > bestScore) {
           bestScore = score;
           best = t;
         }
       }
-      if (!isView && head > 0) continue; // only stroll along the viewing tiles
+      if ((!isView && head > 0) || steps[head] >= maxSteps) continue; // only stroll along the viewing tiles
       const m = adj[t];
       for (let k = 0; k < 4; k++) {
         if (!(m & (1 << k))) continue;
@@ -1843,6 +1871,47 @@ export class GuestSystem {
         if (seen.has(n)) continue;
         seen.add(n);
         q.push(n);
+        steps.push(steps[head] + 1);
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Where along the fence of this tile (offset from its centre, m) a party stands to watch:
+   * the slot whose members (leader, then FOLLOW_BESIDE) keep clear of people already there.
+   * (fx, fz) points from the tile centre at the fence.
+   */
+  private fenceSlot(g: GuestSim, cx: number, cz: number, fx: number, fz: number): number {
+    const sim = this.sim;
+    // others' positions along the fence (people already near this stretch, or walking up to it)
+    const sides = this.slotSides;
+    sides.length = 0;
+    for (const o of sim.guests.values()) {
+      // (leaders just walking past don't count)
+      if (o === g || o.leader === g.id || o.hidden || o.phase === 3 || (o.phase === 0 && !o.leader)) continue;
+      const px = o.phase === 1 && !o.leader ? o.ax : o.x,
+        pz = o.phase === 1 && !o.leader ? o.az : o.z;
+      const ox = px - cx,
+        oz = pz - cz;
+      if (ox * fx + oz * fz < 0.05 || Math.abs(ox * -fz + oz * fx) > 2.4) continue;
+      sides.push(ox * -fz + oz * fx);
+    }
+    let best = 0,
+      bestCost = Infinity;
+    const start = sim.rng.int(0, 4);
+    for (let c = 0; c < 5; c++) {
+      const side = -0.7 + ((start + c) % 5) * 0.35;
+      let cost = 0;
+      for (let m = 0; m <= g.party.length; m++) {
+        // follower m−1 stands its FOLLOW_BESIDE x to the leader's right, which is towards −side
+        const ms = m === 0 ? side : side - FOLLOW_BESIDE[Math.min(2, m - 1) * 2];
+        for (const os of sides) cost += Math.max(0, 2 * ADULT_R + 0.04 - Math.abs(ms - os));
+        cost += Math.max(0, Math.abs(ms) - 1.2) * 0.5; // past the tile: a little worse
+      }
+      if (cost < bestCost - 1e-6) {
+        bestCost = cost;
+        best = side;
       }
     }
     return best;

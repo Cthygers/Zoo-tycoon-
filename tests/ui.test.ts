@@ -113,6 +113,13 @@ describe('Toasts', () => {
     expect(t.log.entries).toHaveLength(1);
     expect(t.log.entries[0].count).toBe(2);
   });
+
+  it('logs a message another widget already shows without popping a toast', () => {
+    const t = make();
+    t.logOnly('Goal complete: Adopt your first animal (+$2,500)', 'good');
+    expect(visible(t)).toEqual([]);
+    expect(t.log.entries.map((e) => e.text)).toEqual(['Goal complete: Adopt your first animal (+$2,500)']);
+  });
 });
 
 describe('MessageLog', () => {

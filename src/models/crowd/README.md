@@ -70,6 +70,11 @@ Look texels:
   `void main() {` line of the fragment shader intact (the patch hooks them).
   If the fragment shader declares `uniform mat3 normalMatrix;` it gets the
   per-instance rotation automatically.
+* **Under water**: `batchedAnimalMaterials` absorbs the light of fragments
+  below `WATER_LEVEL` per channel like the lake bed (render/groundMaterial.ts),
+  plus a depth fade, so wading legs and swimming bodies take the pond colour.
+  It hooks `#include <project_vertex>` and `#include <opaque_fragment>` (keep
+  them).
 * **New per-vertex attribute** (coat baker): nothing to do. LOD meshes copy
   every attribute of level 0 (`lod/simplify.ts`), BatchedMesh requires all
   levels of a variant to share the attribute set — they do.

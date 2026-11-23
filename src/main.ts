@@ -9,8 +9,7 @@ import { CLOSE_HOUR, OPEN_HOUR, QUALITY_KEY, SAVE_KEY, SOUND_KEY } from './core/
 import type { QualityLevel } from './core/contracts';
 import { EventBus } from './core/events';
 import { createCreatureFactory } from './models';
-import { createPropsLayer } from './props';
-import { paintAtlasesOffThread } from './props/nature';
+import { createPropsLayer, paintAtlasesOffThread } from './props';
 import { createRenderContext, detectQuality } from './render';
 import { createSimulation } from './sim';
 import { createGameUI, showLoadingScreen, showMainMenu } from './ui';

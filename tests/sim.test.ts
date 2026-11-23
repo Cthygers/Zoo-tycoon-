@@ -201,7 +201,7 @@ describe('object, habitat and pricing commands', () => {
     expect(sim.staffWage('vet')).toBe(160);
     const before = sim.money;
     expect(sim.hireStaff('vet', (EX + 0.5) * TILE, (AVENUE + 0.5) * TILE).ok).toBe(true);
-    expect(before - sim.money).toBe(sim.staffWage('vet'));
+    expect(sim.money).toBe(before); // wages are paid at day end
     for (const t of [Terrain.Grass, Terrain.DryGrass, Terrain.Dirt, Terrain.Sand, Terrain.Rock, Terrain.Snow, Terrain.Mud, Terrain.Water, Terrain.DeepWater])
       expect(sim.terrainCost(t)).toBeGreaterThan(0);
   });
@@ -380,8 +380,9 @@ describe('simulation over several days', () => {
     let escaped = false;
     for (let i = 0; i < 20000 && !escaped; i++) {
       for (const a of sim.animals.values()) {
-        a.happiness = 0.05; // keep them miserable
+        a.happiness = 0.05; // keep them miserable (but fed: there is no keeper, and starving lions would die first)
         a.needs.environment = 0;
+        a.needs.hunger = a.needs.thirst = 1;
       }
       sim.update(0.1);
       escaped = [...sim.animals.values()].some((a) => a.escaped);

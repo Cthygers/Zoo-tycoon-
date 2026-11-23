@@ -63,8 +63,11 @@ function setup(opts: { animals?: number } = {}) {
     drawer: () => null,
     toolBar: () => null,
     confirmBar: () => null,
-    hudBottom: () => 54,
+    viewArea: () => ({ x0: 10, y0: 60, x1: 905, y1: 330 }),
+    workRect: () => null,
     busy: () => false,
+    endTool: vi.fn(() => (tool = { kind: 'select' })),
+    bubbleMoved: vi.fn(),
     openBuildCategory: vi.fn(),
     openGoals: vi.fn(),
     toast: vi.fn(),
@@ -143,18 +146,52 @@ describe('Coach', () => {
     expect(fresh.host.toast).not.toHaveBeenCalled();
   });
 
-  it('points at the tool bar while the step’s tool is in hand', () => {
+  it('docks in a top corner of the view while a tool is in hand, away from what is being built', () => {
     const { coach, host, setTool } = setup();
-    const bar = new FakeEl() as unknown as HTMLElement;
-    host.toolBar = () => bar;
+    const bubble = coach.bubble as unknown as FakeEl;
+    coach.update(1);
+    expect(bubble.classList.contains('docked')).toBe(false); // first it points at the Habitat button
+    expect(coach.dockedRect).toBeNull();
     setTool({ kind: 'fence', fenceId: 1 });
     coach.update(1);
     expect(bubbleTexts(coach)[2]).toBe('Drag a rectangle on open grass. Keep paths outside it.');
+    expect(bubble.classList.contains('docked')).toBe(true);
+    // top-left, just under the top bar (the fake bubble is 200 × 50)
+    expect(coach.rect).toEqual({ left: 10, top: 66, right: 210, bottom: 116 });
+    expect(coach.dockedRect).toEqual(coach.rect);
+    // a fence dragged into that corner sends it to the other one
+    host.workRect = () => ({ left: 120, top: 90, right: 400, bottom: 200 });
+    coach.update(1);
+    expect(coach.rect).toEqual({ left: 705, top: 66, right: 905, bottom: 116 });
+    expect(bubble.classList.contains('faded')).toBe(false);
+    // one that spans the whole top of the view: the bubble fades so the work shows through
+    host.workRect = () => ({ left: 0, top: 70, right: 915, bottom: 200 });
+    coach.update(1);
+    expect(bubble.classList.contains('faded')).toBe(true);
+    expect(host.bubbleMoved).toHaveBeenCalled();
     // while another category is being browsed the bubble keeps out of the way
     setTool({ kind: 'select' });
     host.openCategory = () => 'nature';
     coach.update(1);
     expect(bubbleTexts(coach)).toEqual([]);
+    expect(coach.rect).toBeNull();
+  });
+
+  it('puts the tool of a finished step away, but not another tool', () => {
+    const { sim, coach, host, setTool } = setup();
+    setTool({ kind: 'fence', fenceId: 1 });
+    coach.update(1);
+    sim.world.habitats.set(1, { viewTiles: [] }); // the fence went up
+    coach.update(1);
+    expect(host.endTool).toHaveBeenCalledTimes(1);
+    expect(bubbleTexts(coach).slice(0, 2)).toEqual(['2/5', 'Shape the ground']);
+    // step 2 is done while the player holds a path tool: that one stays
+    setTool({ kind: 'path', pathType: 1 });
+    coach.update(1);
+    coach.terrainPainted({ x0: 0, z0: 0, x1: 0, z1: 0 });
+    coach.update(1);
+    expect(bubbleTexts(coach)[0]).toBe('3/5');
+    expect(host.endTool).toHaveBeenCalledTimes(1);
   });
 
   it('opens the build category for a goal, or the Goals tab', () => {

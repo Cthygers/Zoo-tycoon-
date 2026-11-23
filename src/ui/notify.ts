@@ -22,7 +22,7 @@ const GAP = 8;
 /** Height (px) assumed for a toast that has not been on screen yet: one line of text. */
 const TOAST_H = 44;
 /** Height (px) assumed for a "Goal complete" card that has not been on screen yet. */
-const CARD_H = 88;
+const CARD_H = 76;
 
 const urgent = (k: NotifyKind) => k === 'warn' || k === 'bad';
 
@@ -171,6 +171,12 @@ export class Toasts {
       if (performance.now() - routine.shownAt < MIN_LIFE) this.enqueue(this.requeued(routine));
     }
     this.display(rec);
+  }
+
+  /** Keep a message in the log without popping a toast (something else already shows it, e.g. the goal card). */
+  logOnly(text: string, kind: NotifyKind, focus?: { x: number; z: number }): void {
+    const now = this.clock();
+    this.log.add(text, kind, focus, now.day, now.minute);
   }
 
   /**
@@ -392,6 +398,11 @@ export class CostLabel {
     this.root = el('div', 'wh-costlabel wh-glass-2', [this.main, this.sub]);
   }
 
+  /** On screen (it may still be off the edge of the view). */
+  get shown(): boolean {
+    return this.anchor !== null;
+  }
+
   set(anchor: THREE.Vector3 | null, text: string, sub: string, ok: boolean): void {
     this.anchor = anchor;
     if (!anchor) {
@@ -445,7 +456,10 @@ interface ShownCard {
   close(): void;
 }
 
-/** "Goal complete" celebration card with a confetti burst. */
+/**
+ * "Goal complete" card with a confetti burst, the one announcement of a goal (the sim
+ * only logs its message). Taps pass through it to the map; it leaves on its own.
+ */
 export class Celebration {
   private queue: CardItem[] = [];
   /** The card on screen (until its fade-out ends). */
@@ -497,7 +511,6 @@ export class Celebration {
       conf.append(p);
     }
     card.append(conf);
-    swallowPointer(card);
     const cur: ShownCard = {
       item,
       card,
@@ -515,10 +528,6 @@ export class Celebration {
         }, 380);
       },
     };
-    card.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      cur.close();
-    });
     this.current = cur;
     this.root.prepend(card);
     item.height = card.offsetHeight;

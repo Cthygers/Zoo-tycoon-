@@ -6,13 +6,17 @@
 //    the sum, so overlapping pools (double lamp heads, kiosk bulbs, windows)
 //    add up like light instead of compounding, and every ground point is
 //    covered once. The pool lights the moonlit ground it covers, so it
-//    respects albedo, texture and shadows:
-//      HDR pipeline (post-FX tier, linear light):  dst × (1 + s), s ≤ 3
-//      LDR pipeline (display space):               dst × (1 + s − dst), s ≤ 1.5
-//    The LDR form is a multiply with a shoulder: dark ground gets ≈ ×(1 + s),
-//    brighter paving rolls off toward white instead of clipping. LDR tiers add a
-//    faint warm fill first (a second draw of the same mesh): a multiply
-//    cannot warm the moon-graded blue-green of a dark lawn.
+//    respects albedo, texture and shadows, and leaves the ground untouched
+//    where its light is 0 (soft fringes, no seam at the mesh edge):
+//      dst × (1 + s);  HDR pipeline (post-FX tier, linear light): s ≤ 3,
+//                      LDR pipeline (display space): s ≤ 1
+//    (an 8-bit framebuffer clamps the blend source to 1, so LDR multiplies
+//    by 2 at most). In display space nothing rolls off highlights after the
+//    blend, so on LDR tiers s gets a soft knee per vertex from the brightness
+//    of the moonlit surface there (snow vs paving vs lawn), keeping it under
+//    white. LDR tiers also add a faint warm fill first (a second draw of the
+//    same mesh, not on snow-bright ground): a multiply alone cannot warm the
+//    moon-graded blue-green of a lawn, nor bluish paving within its ×2.
 //  - halos: one camera-facing soft sprite per lamp head (ONE instanced draw)
 //    so lamps read as glowing even without bloom, sized to stay under the
 //    bloom threshold.
@@ -21,33 +25,35 @@
 // Everything is invisible (0 draw calls) during the day.
 
 import * as THREE from 'three';
-import { WATER_LEVEL } from '../../core/constants';
+import { TILE, WATER_LEVEL } from '../../core/constants';
+import { PathType, Terrain } from '../../core/types';
 import type { World } from '../../core/world';
 
 /** Warm ≈2700 K lamp colour (linear-ish, as used by the shaders). */
 const WARM = new THREE.Color(0xffc68a);
 /**
  * Pool tint in the HDR pipeline: about lamp light over moonlight per channel
- * (the multiply scales moonlit ground), kept off pure red: the night grade
- * maps dim light to rod vision, which barely sees red, so the pool must lift
- * green too to leave the scotopic range, where its warmth shows again.
+ * (the multiply scales moonlit, blue-graded ground). The pools also mark the
+ * pixels they light in the HDR alpha, so the night grade shows them in
+ * colour instead of in rod vision (render/grade.ts).
  */
-const WARM_HDR = new THREE.Color(1.0, 0.5, 0.2);
+const WARM_HDR = new THREE.Color(1.0, 0.38, 0.1);
 /**
  * Pool tint in the LDR pipeline: saturated for the same reason (the moonlit
- * grade is in the framebuffer), but less so, as the multiply is in display space.
+ * grade is in the framebuffer): moonlit paving is bluish grey, and only a
+ * multiply far stronger in red than in blue turns it warm.
  */
-const WARM_LDR = new THREE.Color(1.0, 0.5, 0.18);
+const WARM_LDR = new THREE.Color(1.0, 0.6, 0.0);
 /**
  * Peak pool gain at full night (s at saturated light, red channel). HDR: the
  * multiplier stays under 4× in linear light, so lamp-lit paving keeps its
- * texture through the tone curve; LDR: the shoulder blend dst × (1 + s − dst)
- * stays below white for any moonlit surface darker than ≈0.4 (display).
+ * texture through the tone curve; LDR: 1, the most the 8-bit framebuffer
+ * passes (more would flatten pool centres to a plateau).
  */
 const POOL_GAIN_HDR = 3.0;
-const POOL_GAIN_LDR = 1.5;
-/** Additive warm fill of LDR tiers at saturated light. */
-const FILL_GAIN = 0.14;
+const POOL_GAIN_LDR = 1.0;
+/** Additive warm fill of LDR tiers at saturated light (display units). */
+const FILL_GAIN = 0.12;
 /**
  * Point lights (high tier) light what stands near a lamp: guests, benches,
  * kiosk walls. Their range ends just past the ground under the lamp, which the
@@ -65,6 +71,39 @@ const WINDOW_INTENSITY = 0.18;
 const WINDOW_LIFT = 1;
 /** Light below which a pool cell is not drawn. */
 const POOL_MIN = 0.004;
+
+/**
+ * Brightest moonlit display value (LDR tiers, red channel, with texture
+ * variation) of each walk surface / terrain: where the LDR pool's knee sets in.
+ */
+const PATH_BRIGHTNESS: Partial<Record<PathType, number>> = {
+  [PathType.Paved]: 0.34,
+  [PathType.Gravel]: 0.3,
+  [PathType.Boardwalk]: 0.24,
+};
+const TERRAIN_BRIGHTNESS: Partial<Record<Terrain, number>> = {
+  [Terrain.Sand]: 0.36,
+  [Terrain.Rock]: 0.24,
+  [Terrain.Snow]: 0.62,
+};
+/** Lawn, earth, mud, water. */
+const DARK_BRIGHTNESS = 0.12;
+
+/**
+ * Moonlit brightness of the surface at a pool grid vertex (world metres): the
+ * brightest of the tiles touching it, so a vertex on a path edge is never
+ * pushed past white.
+ */
+export function surfaceBrightness(world: World, x: number, z: number): number {
+  let b = DARK_BRIGHTNESS;
+  // a vertex on a tile edge touches the tiles on both sides
+  for (let tz = Math.ceil(z / TILE) - 1; tz <= Math.floor(z / TILE); tz++)
+    for (let tx = Math.ceil(x / TILE) - 1; tx <= Math.floor(x / TILE); tx++) {
+      if (!world.inBounds(tx, tz)) continue;
+      b = Math.max(b, PATH_BRIGHTNESS[world.getPath(tx, tz)] ?? TERRAIN_BRIGHTNESS[world.getTerrain(tx, tz)] ?? DARK_BRIGHTNESS);
+    }
+  return b;
+}
 
 export type EmitterKind = 'lamp' | 'window';
 
@@ -118,6 +157,8 @@ export interface PoolGrid {
   position: Float32Array;
   /** Saturated ground light 0..1 per vertex (poolLight of the summed irradiance). */
   light: Float32Array;
+  /** Moonlit surface brightness per vertex (see surfaceBrightness). */
+  bright: Float32Array;
   /** Two triangles per lit 1 m cell; every cell appears once. */
   index: number[];
 }
@@ -125,12 +166,18 @@ export interface PoolGrid {
 /**
  * Drape one 1 m grid over the ground under all emitters: vertices are shared
  * between overlapping pools and carry the summed light, so the mesh covers
- * each ground point exactly once. `surfaceY(x, z)` gives the mesh height.
+ * each ground point exactly once. `surfaceY(x, z)` gives the mesh height,
+ * `surfaceBright(x, z)` the moonlit brightness of the surface there.
  */
-export function buildPoolGrid(emitters: Iterable<WorldEmitter>, surfaceY: (x: number, z: number) => number): PoolGrid {
+export function buildPoolGrid(
+  emitters: Iterable<WorldEmitter>,
+  surfaceY: (x: number, z: number) => number,
+  surfaceBright: (x: number, z: number) => number = () => DARK_BRIGHTNESS,
+): PoolGrid {
   const key = (x: number, z: number) => (x + 4096) * 8192 + (z + 4096);
   const vert = new Map<number, number>();
   const pos: number[] = [];
+  const bright: number[] = [];
   const sum: number[] = [];
   for (const em of emitters) {
     // one ring beyond the pool so its edge cells are complete
@@ -146,6 +193,7 @@ export function buildPoolGrid(emitters: Iterable<WorldEmitter>, surfaceY: (x: nu
           v = sum.length;
           vert.set(k, v);
           pos.push(x, surfaceY(x, z), z);
+          bright.push(surfaceBright(x, z));
           sum.push(0);
         }
         sum[v] += emitterLight(em, x, pos[v * 3 + 1], z);
@@ -162,7 +210,7 @@ export function buildPoolGrid(emitters: Iterable<WorldEmitter>, surfaceY: (x: nu
     if (Math.max(light[a], light[b], light[c], light[d]) < POOL_MIN) continue;
     index.push(a, b, c, c, b, d);
   }
-  return { position: new Float32Array(pos), light, index };
+  return { position: new Float32Array(pos), light, bright: new Float32Array(bright), index };
 }
 
 // ---------------------------------------------------------------------------
@@ -230,20 +278,34 @@ export function findEmitters(parts: { geometry: THREE.BufferGeometry; material: 
 
 const POOL_VERT = /* glsl */ `
 attribute float aLight;
+attribute float aBright;
 varying float vLight;
+varying float vBright;
 void main() {
   vLight = aLight;
+  vBright = aBright;
   gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
 }
 `;
 
+// uKnee (LDR pool): soft knee at s = 1 / b − 1, where a surface of moonlit
+// brightness b reaches white; uSkipBright (LDR fill): none on snow-bright
+// ground, which it would push past white; uMark (HDR pool): lamp-lit mark
+// added to the target's alpha (render/grade.ts).
 const POOL_FRAG = /* glsl */ `
 precision mediump float;
 uniform vec3 uColor;
 uniform float uGain;
+uniform float uKnee;
+uniform float uSkipBright;
+uniform float uMark;
 varying float vLight;
+varying float vBright;
 void main() {
-  gl_FragColor = vec4( uColor * ( vLight * uGain ), 1.0 );
+  vec3 s = uColor * ( vLight * uGain * ( 1.0 - uSkipBright * smoothstep( 0.45, 0.6, vBright ) ) );
+  vec3 x = s * ( uKnee * vBright / ( 1.0 - vBright ) );
+  s /= sqrt( sqrt( 1.0 + x * x * x * x ) );
+  gl_FragColor = vec4( s, vLight * uMark );
 }
 `;
 
@@ -307,7 +369,7 @@ export class NightLights {
       name: 'props/lightPool',
       vertexShader: POOL_VERT,
       fragmentShader: POOL_FRAG,
-      uniforms: { uColor: { value: lin.clone() }, uGain: { value: 0 } },
+      uniforms: { uColor: { value: lin.clone() }, uGain: { value: 0 }, uKnee: { value: 0 }, uSkipBright: { value: 0 }, uMark: { value: 0 } },
       transparent: true,
       depthWrite: false,
       depthTest: true,
@@ -318,12 +380,12 @@ export class NightLights {
       polygonOffset: true,
       polygonOffsetFactor: -0.5,
       polygonOffsetUnits: -2,
-      // dst × (1 + s) (HDR) or dst × (1 + s − dst) (LDR), see configureBlend
+      // colour: dst × (1 + s); alpha: + lamp-lit mark
       blending: THREE.CustomBlending,
       blendEquation: THREE.AddEquation,
       blendSrc: THREE.DstColorFactor,
       blendDst: THREE.OneFactor,
-      blendSrcAlpha: THREE.ZeroFactor,
+      blendSrcAlpha: THREE.OneFactor,
       blendDstAlpha: THREE.OneFactor,
     });
     this.haloMat = new THREE.ShaderMaterial({
@@ -353,9 +415,10 @@ export class NightLights {
     this.fillMat.blendSrc = THREE.OneFactor;
     this.fillMat.blendDst = THREE.OneFactor;
     this.fillMat.uniforms.uColor.value.copy(WARM);
+    this.fillMat.uniforms.uSkipBright.value = 1;
     this.fill = new THREE.Mesh(this.pools.geometry, this.fillMat);
     this.fill.name = 'lamp-light-fill';
-    // before the pools, so their shoulder also rolls off the fill
+    // before the pools, which then scale it like the ground
     this.fill.renderOrder = -2;
     this.fill.visible = false;
     this.fill.onBeforeRender = () => {
@@ -387,9 +450,10 @@ export class NightLights {
   private configureBlend(renderer: THREE.WebGLRenderer): void {
     const hdr = renderer.getRenderTarget() !== null;
     const m = this.poolMat;
-    // HDR: plain multiply in linear light (the tone curve rolls off highlights);
-    // LDR: the shoulder blend dst × (1 + s − dst) (header), which rolls off instead of clipping
-    m.blendDst = hdr ? THREE.OneFactor : THREE.OneMinusDstColorFactor;
+    // HDR: linear light, the tone curve rolls off highlights; LDR: display
+    // space, the knee keeps bright surfaces under white (header)
+    m.uniforms.uKnee.value = hdr ? 0 : 1;
+    m.uniforms.uMark.value = hdr ? this.night : 0;
     m.uniforms.uGain.value = this.night * (hdr ? POOL_GAIN_HDR : POOL_GAIN_LDR);
     m.uniforms.uColor.value.copy(hdr ? WARM_HDR : WARM_LDR);
   }
@@ -467,12 +531,17 @@ export class NightLights {
         all.push(em);
         if (em.kind === 'lamp') lamps++;
       }
-    const grid = buildPoolGrid(all, (x, z) => Math.max(this.world.walkHeightAt(x, z), WATER_LEVEL + 0.02) + POOL_LIFT);
+    const grid = buildPoolGrid(
+      all,
+      (x, z) => Math.max(this.world.walkHeightAt(x, z), WATER_LEVEL + 0.02) + POOL_LIFT,
+      (x, z) => surfaceBrightness(this.world, x, z),
+    );
     const old = this.pools.geometry;
     const g = new THREE.BufferGeometry();
     if (grid.index.length) {
       g.setAttribute('position', new THREE.BufferAttribute(grid.position, 3));
       g.setAttribute('aLight', new THREE.BufferAttribute(grid.light, 1));
+      g.setAttribute('aBright', new THREE.BufferAttribute(grid.bright, 1));
       g.setIndex(grid.light.length > 65535 ? new THREE.Uint32BufferAttribute(grid.index, 1) : new THREE.Uint16BufferAttribute(grid.index, 1));
       g.computeBoundingSphere();
     }

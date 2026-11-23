@@ -16,7 +16,7 @@ export interface DockHost {
   catalog: Category[];
   selectItem(item: CatalogItem): void;
   exitTool(): void;
-  drawerOpened(): void;
+  drawerOpened(id: CategoryId): void;
   rotate(): void;
   setFenceMode(m: 'rect' | 'line'): void;
   setPathStraight(on: boolean): void;
@@ -144,6 +144,11 @@ export class Dock {
     return this.openCat;
   }
 
+  /** Category of the tool in hand (null for Inspect and for moving something). */
+  get toolCategory(): CategoryId | null {
+    return this.activeCat;
+  }
+
   // elements the first-run tour points at (null when not on screen)
   categoryButton(id: CategoryId): HTMLElement | null {
     return this.catBtns.get(id) ?? null;
@@ -183,7 +188,7 @@ export class Dock {
     if (this.openCat === null) cue('open');
     else if (this.openCat !== id) cue('tap');
     this.openCat = id;
-    this.host.drawerOpened();
+    this.host.drawerOpened(id);
     setText(this.drawerTitle, cat.name);
     setText(this.drawerSub, cat.hint);
     this.row.textContent = '';
@@ -197,6 +202,7 @@ export class Dock {
       this.row.append(this.card(item));
     }
     this.drawer.classList.remove('hidden');
+    this.syncActions();
     this.refreshCats();
     this.refreshAffordability();
     // Start at the first item, or centre the active one. Only after un-hiding: a scrollLeft write
@@ -211,6 +217,7 @@ export class Dock {
     cue('close');
     this.openCat = null;
     this.drawer.classList.add('hidden');
+    this.syncActions();
     this.refreshCats();
   }
 
@@ -290,7 +297,7 @@ export class Dock {
     }
     if (tool.kind === 'select') {
       this.activeCat = null;
-      this.toolbar.classList.add('hidden');
+      this.syncActions();
       this.refreshCats();
       return;
     }
@@ -301,7 +308,7 @@ export class Dock {
     const name = label?.name ?? item?.name;
     if (name) setText(this.tbName, name);
     this.buildOptions();
-    toggleClass(this.toolbar, 'hidden', this.pendingShown);
+    this.syncActions();
     this.refreshCats();
   }
 
@@ -384,14 +391,20 @@ export class Dock {
   }
 
   // ------------------------------------------------------------ confirm bar
+  /**
+   * One compact row over the dock: the confirm bar replaces the tool bar while a decision is
+   * pending, but not while a build drawer is open (a stray tap there must not buy anything).
+   */
+  private syncActions(): void {
+    const confirm = this.pendingShown && this.openCat === null;
+    toggleClass(this.confirmEl, 'hidden', !confirm);
+    toggleClass(this.toolbar, 'hidden', confirm || this.tool.kind === 'select');
+  }
+
   showPending(p: PendingAction | null): void {
-    // one compact row: the confirm bar replaces the tool bar while a decision is pending
     this.pendingShown = !!p;
-    toggleClass(this.toolbar, 'hidden', !!p || this.tool.kind === 'select');
-    if (!p) {
-      this.confirmEl.classList.add('hidden');
-      return;
-    }
+    this.syncActions();
+    if (!p) return;
     this.cfRotate.style.display = this.tool.kind === 'object' ? '' : 'none';
     setText(this.cfTitle, p.title);
     const refund = p.cost < 0;
@@ -399,7 +412,7 @@ export class Dock {
     let sub = p.note ?? '';
     let kind: 'bad' | 'warn' | '' = p.noteKind ?? '';
     if (!sub) {
-      sub = refund ? 'Refund on removal' : this.tool.kind === 'staff' ? 'Daily wage' : 'Tap ✓ to confirm';
+      sub = refund ? 'Refund on removal' : this.tool.kind === 'staff' ? 'Wage paid at day end (first day pro rata)' : `Tap ${p.verb} to confirm`;
       kind = '';
     }
     setText(this.cfSub, sub);
@@ -408,7 +421,6 @@ export class Dock {
     this.cfOk.disabled = !p.ok;
     toggleClass(this.cfOk, 'remove', p.verb === 'Remove');
     toggleClass(this.cfOk, 'risky', !!p.risky);
-    this.confirmEl.classList.remove('hidden');
   }
 
   shake(): void {
