@@ -8,7 +8,6 @@ import { createAudio } from './audio';
 import { CLOSE_HOUR, OPEN_HOUR, QUALITY_KEY, SAVE_KEY, SOUND_KEY } from './core/constants';
 import type { QualityLevel } from './core/contracts';
 import { EventBus } from './core/events';
-import { SPECIES } from './data/species';
 import { createCreatureFactory } from './models';
 import { createPropsLayer } from './props';
 import { createRenderContext, detectQuality } from './render';
@@ -71,12 +70,24 @@ async function boot() {
   const events = new EventBus();
   const sim = createSimulation(events);
   let loaded = false;
+  // Message shown once the UI exists, when Continue could not load the save.
+  let loadFailure: string | null = null;
+  // False while an unreadable save could not be backed up: autosave must not overwrite it.
+  let mayWriteSave = true;
   if (choice === 'continue' && saveText) {
     try {
       sim.load(JSON.parse(saveText));
       loaded = true;
     } catch (err) {
       console.error('[save] failed to load save, starting a new zoo', err);
+      // Keep the player's zoo: copy it to a backup slot before anything can overwrite it.
+      const backupKey = `${SAVE_KEY}-unreadable`;
+      const prev = storageGet(backupKey);
+      const key = prev === null || prev === saveText ? backupKey : `${backupKey}-${Date.now()}`;
+      mayWriteSave = storageSet(key, saveText);
+      loadFailure = mayWriteSave
+        ? 'Your saved zoo could not be loaded, so a new zoo was started. The old save was kept as a backup.'
+        : 'Your saved zoo could not be loaded. This new zoo will not be saved, so the old save is kept.';
     }
   }
   if (!loaded) sim.newGame();
@@ -115,14 +126,10 @@ async function boot() {
   await nextFrame();
   const creatures = createCreatureFactory(ctx.quality);
   ctx.scene.add(creatures.root);
+  // Build only the species already in the zoo; others are built when first bought.
   const present = new Set<string>();
   for (const a of sim.animals.values()) present.add(a.speciesId);
-  // Build the species already in the zoo first, then a few popular ones so the shop is snappy.
-  const preloadList = [...present, ...SPECIES.map((s) => s.id).filter((id) => !present.has(id))].slice(
-    0,
-    Math.max(present.size, ctx.quality.level === 'low' ? 3 : 6),
-  );
-  await creatures.preload(preloadList, (f) => loader.setProgress(0.4 + 0.45 * f, 'Welcoming the animals…'));
+  await creatures.preload([...present], (f) => loader.setProgress(0.4 + 0.45 * f, 'Welcoming the animals…'));
 
   loader.setProgress(0.88, 'Opening the gates…');
   await nextFrame();
@@ -136,6 +143,7 @@ async function boot() {
 
   const save = () => {
     if (demo) return; // never overwrite the player's save with the showcase zoo
+    if (!mayWriteSave) return; // the unreadable save could not be backed up: keep it
     try {
       const ok = storageSet(SAVE_KEY, JSON.stringify(sim.serialize()));
       if (!ok) events.emit('notify', { text: 'Could not save the game (storage full?)', kind: 'bad' });
@@ -177,23 +185,67 @@ async function boot() {
   events.on('litterRemoved', () => (litterDirty = true));
   events.on('worldReset', () => (litterDirty = true));
 
+  // Compile every shader program behind the loading screen: props, creatures,
+  // night lights and the selection ring all exist now. One night frame and one
+  // frame at the loaded time also build the shadow-depth and night-only program
+  // variants, so the first minutes of play and the first dusk don't stall.
+  loader.setProgress(0.985, 'Opening the gates…');
+  await nextFrame();
+  const drawWarmupFrame = (minute: number) => {
+    ctx.setTimeOfDay(minute, sim.day);
+    ctx.settle();
+    creatures.update(ctx.camera);
+    props.update(0, ctx.nightFactor, ctx.camera);
+    ctx.update(0);
+    ctx.render();
+  };
+  try {
+    await ctx.renderer.compileAsync(ctx.scene, ctx.camera);
+    drawWarmupFrame(22 * 60);
+    await nextFrame();
+  } catch (err) {
+    console.warn('[boot] shader warm-up failed', err);
+  }
   // Start with exposure and sky lighting already adapted to the loaded time.
-  ctx.setTimeOfDay(sim.minuteOfDay, sim.day);
-  ctx.settle();
+  drawWarmupFrame(sim.minuteOfDay);
 
   loader.setProgress(1, 'Welcome to Wildhaven!');
   await nextFrame();
   loader.hide();
+  if (loadFailure) events.emit('notify', { text: loadFailure, kind: 'bad' });
 
   // ------------------------------------------------------------ main loop
   let last = performance.now();
   let running = true;
+  let rafId = 0; // the one pending animation frame (0 = none); never start a second loop
   let autosaveTimer = 0;
   const AUTOSAVE_SECONDS = 90;
 
+  // Frame-rate governor: a slow-paced management game doesn't need 90/120 Hz,
+  // and low-tier phones keep steadier pacing (and cooler) at 30 fps. While the
+  // game is paused and nobody touches the screen, a few frames a second suffice.
+  let lastInput = performance.now();
+  const noteInput = () => (lastInput = performance.now());
+  for (const type of ['pointerdown', 'pointermove', 'wheel', 'keydown'] as const) {
+    window.addEventListener(type, noteInput, { passive: true, capture: true });
+  }
+  const IDLE_MS = 2000;
+  const frameInterval = (now: number): number => {
+    if (sim.speed === 0 && now - lastInput > IDLE_MS) return 1000 / 10;
+    return 1000 / (ctx.quality.level === 'low' ? 30 : 60);
+  };
+  let nextRender = 0;
+
   const frame = (now: number) => {
+    rafId = 0;
     if (!running) return;
-    requestAnimationFrame(frame);
+    rafId = requestAnimationFrame(frame);
+    const interval = frameInterval(now);
+    // 3 ms slack so a 60 Hz display isn't skipping frames at a 60 fps target.
+    if (now < nextRender - 3) return;
+    // Keep the cadence (a 90 Hz display renders 2 of 3 frames for 60 fps), but
+    // after a stall start over from now instead of rendering a burst to catch up.
+    nextRender = Math.max(nextRender + interval, now + interval / 2);
     const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
     last = now;
     try {
@@ -220,19 +272,24 @@ async function boot() {
       save();
     }
   };
-  requestAnimationFrame(frame);
+  rafId = requestAnimationFrame(frame);
 
   // Pause when the app goes to the background (Android home button / screen off) and save.
+  // The browser holds the frame queued before hiding and runs it on resume, so it
+  // is cancelled here; otherwise every background/foreground cycle adds a loop.
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
       save();
       audio.suspend();
       running = false;
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = 0;
     } else if (!running) {
       running = true;
       audio.resume();
       last = performance.now();
-      requestAnimationFrame(frame);
+      nextRender = 0;
+      if (!rafId) rafId = requestAnimationFrame(frame);
     }
   });
   window.addEventListener('pagehide', save);

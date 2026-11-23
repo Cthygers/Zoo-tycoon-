@@ -70,6 +70,32 @@ export function createEntityViews(
   let ringPulse = 0;
 
   // ---------------------------------------------------------------- create / remove
+  // Species whose meshes are built. Building one takes a long task (up to a few
+  // hundred ms on a phone), so an animal of a new species bought during play is
+  // created after the next frame instead of inside the tap / sim event.
+  const builtSpecies = new Set<string>();
+  const pendingSpecies = new Map<string, Promise<void>>();
+  const afterNextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+
+  function createAnimalSoon(id: number): void {
+    const a = sim.animals.get(id);
+    if (!a) return;
+    if (builtSpecies.has(a.speciesId)) return create('animal', id);
+    let p = pendingSpecies.get(a.speciesId);
+    if (!p) {
+      const speciesId = a.speciesId;
+      p = afterNextFrame()
+        .then(() => creatures.preload([speciesId]))
+        .catch((err) => console.error(`[views] failed to build ${speciesId}`, err))
+        .finally(() => {
+          builtSpecies.add(speciesId);
+          pendingSpecies.delete(speciesId);
+        });
+      pendingSpecies.set(speciesId, p);
+    }
+    void p.then(() => create('animal', id));
+  }
+
   function create(kind: Kind, id: number): void {
     const k = key(kind, id);
     if (views.has(k)) return;
@@ -81,6 +107,7 @@ export function createEntityViews(
         const a = sim.animals.get(id);
         if (!a) return;
         model = creatures.createAnimal(a.speciesId, { seed: a.seed, sex: a.sex, growth: a.growth });
+        builtSpecies.add(a.speciesId);
         heading = a.heading;
         growth = a.growth;
       } else if (kind === 'guest') {
@@ -133,7 +160,7 @@ export function createEntityViews(
   }
 
   const offs = [
-    sim.events.on('animalAdded', (e) => create('animal', e.id)),
+    sim.events.on('animalAdded', (e) => createAnimalSoon(e.id)),
     sim.events.on('animalRemoved', (e) => remove('animal', e.id)),
     sim.events.on('guestAdded', (e) => create('guest', e.id)),
     sim.events.on('guestRemoved', (e) => remove('guest', e.id)),
@@ -145,7 +172,7 @@ export function createEntityViews(
   // Periodic reconcile in case an event was missed (e.g. load before views existed).
   let reconcileTimer = 0;
   function reconcile(): void {
-    for (const id of sim.animals.keys()) if (!views.has(key('animal', id))) create('animal', id);
+    for (const id of sim.animals.keys()) if (!views.has(key('animal', id))) createAnimalSoon(id);
     for (const id of sim.guests.keys()) if (!views.has(key('guest', id))) create('guest', id);
     for (const id of sim.staff.keys()) if (!views.has(key('staff', id))) create('staff', id);
     for (const v of Array.from(views.values())) {
@@ -244,12 +271,15 @@ export function createEntityViews(
       v.animDt += scaled;
       const lod = v.model.lod ?? -1;
       const interval = !onScreen ? 0.5 : lod >= 3 || dist > 90 ? 1 / 12 : lod === 2 ? 1 / 20 : 0;
-      if (v.lodTimer > interval) v.lodTimer = interval; // came closer / on screen: catch up now
+      // Came closer / on screen: catch up soon, at a random phase so creatures
+      // that switch rate together still re-pose on different frames.
+      if (v.lodTimer > interval) v.lodTimer = interval * Math.random();
       v.lodTimer -= dt;
       if (v.lodTimer <= 0) {
         v.model.update(v.animDt, v.anim);
         v.animDt = 0;
-        v.lodTimer = interval;
+        // Advance by one interval (not reset to it) so each creature keeps its phase.
+        v.lodTimer = interval > 0 ? Math.max(0, v.lodTimer + interval) : 0;
       }
     }
 
