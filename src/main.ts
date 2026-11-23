@@ -127,6 +127,12 @@ async function boot() {
   loader.setProgress(0.88, 'Opening the gates…');
   await nextFrame();
   const views = createEntityViews(sim, ctx, creatures, props);
+  // Create every creature model now and build their distance LODs while the
+  // loading screen is up, so the first frames don't draw full meshes everywhere.
+  views.update(0);
+  if (creatures.warmLods) {
+    await creatures.warmLods((f) => loader.setProgress(0.88 + 0.1 * f, 'Opening the gates…'));
+  }
 
   const save = () => {
     if (demo) return; // never overwrite the player's save with the showcase zoo
@@ -143,7 +149,7 @@ async function boot() {
     save();
   };
 
-  const audio = createAudio(sim, events);
+  const audio = createAudio(sim, events, { lowSpec: ctx.quality.level === 'low' });
   audio.setEnabled(storageGet(SOUND_KEY) !== '0');
   // Mobile browsers only start audio from a user gesture.
   const unlockAudio = () => audio.resume();
@@ -170,6 +176,10 @@ async function boot() {
   events.on('litterAdded', () => (litterDirty = true));
   events.on('litterRemoved', () => (litterDirty = true));
   events.on('worldReset', () => (litterDirty = true));
+
+  // Start with exposure and sky lighting already adapted to the loaded time.
+  ctx.setTimeOfDay(sim.minuteOfDay, sim.day);
+  ctx.settle();
 
   loader.setProgress(1, 'Welcome to Wildhaven!');
   await nextFrame();

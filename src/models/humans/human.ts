@@ -465,4 +465,11 @@ export class HumanFactory {
   lodStats(): { key: string; triangles: number[] }[] {
     return [...this.assets.values()].map((a) => ({ key: a.key, triangles: a.lod?.triangles ?? [] }));
   }
+
+  /** LOD chains of every body built so far (for warming LODs during loading). */
+  lodChains(): LodChain[] {
+    const out: LodChain[] = [];
+    for (const a of this.assets.values()) if (a.lod) out.push(a.lod);
+    return out;
+  }
 }

@@ -823,6 +823,7 @@ export class MockRenderContext implements IRenderContext {
   }
 
   setTimeOfDay(): void {}
+  settle(): void {}
   setFocus(): void {}
   update(): void {}
 

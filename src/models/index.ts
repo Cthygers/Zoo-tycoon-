@@ -24,7 +24,7 @@ import { HumanFactory } from './humans/human';
 import { itemMaterial } from './humans/items';
 import { CrowdRenderer, type BatchSpec, type BatchedModel, type CrowdStats } from './crowd/crowd';
 import { ANIMAL_LOOK_TEXELS, batchedAnimalMaterials } from './crowd/materials';
-import { LodChain } from './lod/lod';
+import { LOD_LEVELS, LodChain } from './lod/lod';
 import type { SpeciesModel } from './types';
 
 export type { CreatureDesign, SpeciesModel, CoatSample, AnimCtx, AnimDriver } from './types';
@@ -139,6 +139,31 @@ export class CreatureFactory implements ICreatureFactory {
 
   crowdStats(): CrowdStats {
     return this.crowd.stats;
+  }
+
+  /**
+   * Build every LOD level of every mesh created so far, in small async slices
+   * (loading screen). Without this, LODs build lazily over the first seconds of
+   * play and creatures draw their full meshes until then.
+   */
+  async warmLods(onProgress?: (fraction: number) => void): Promise<void> {
+    const chains: LodChain[] = [];
+    for (const a of this.assets.values()) if (a.lod) chains.push(a.lod);
+    chains.push(...this.humans.lodChains());
+    const jobs: [LodChain, number][] = [];
+    for (const c of chains) for (let l = 1; l < LOD_LEVELS; l++) if (!c.has(l)) jobs.push([c, l]);
+    onProgress?.(0);
+    let t0 = performance.now();
+    for (let i = 0; i < jobs.length; i++) {
+      const [c, l] = jobs[i];
+      while (!c.step(l)) {
+        if (performance.now() - t0 > 24) {
+          await yieldToBrowser();
+          t0 = performance.now();
+        }
+      }
+      onProgress?.((i + 1) / jobs.length);
+    }
   }
 
   dispose(): void {

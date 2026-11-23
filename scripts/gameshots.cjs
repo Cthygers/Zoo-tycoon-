@@ -13,6 +13,7 @@ const { chromium } = require('playwright');
   const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
   const ctx = await browser.newContext({ viewport: { width: w, height: h }, deviceScaleFactor: 1, isMobile: mobile, hasTouch: mobile });
   const page = await ctx.newPage();
+  page.setDefaultTimeout(300000); // SwiftShader frames at medium/high can take tens of seconds
   const errors = [];
   const logs = [];
   page.on('console', (m) => { const t = `[${m.type()}] ${m.text()}`; if (m.type() === 'error' || m.type() === 'warning') errors.push(t); else logs.push(t); });
@@ -36,7 +37,7 @@ const { chromium } = require('playwright');
         if (a) g.ui.camera.setView(a.x, a.z, v.d ?? 14, (v.yaw ?? 30) * D, (v.pitch ?? 25) * D);
       }, v);
     }
-    if (v.time) { await page.evaluate((t) => { const [h, m] = t.split(':').map(Number); window.__game.sim.minuteOfDay = h * 60 + m; }, v.time); }
+    if (v.time) { await page.evaluate((t) => { const [h, m] = t.split(':').map(Number); const g = window.__game; g.sim.minuteOfDay = h * 60 + m; g.ctx.setTimeOfDay(g.sim.minuteOfDay, g.sim.day); g.ctx.settle(); }, v.time); }
     if (v.eval) { const r = await page.evaluate(v.eval); if (r !== undefined) console.log(v.name, 'eval:', JSON.stringify(r).slice(0, 2000)); }
     await page.waitForTimeout(v.wait ?? 4000);
     const info = await page.evaluate(() => { const r = window.__game.ctx.renderer.info; return { calls: r.render.calls, tris: r.render.triangles, geos: r.memory.geometries, tex: r.memory.textures }; });

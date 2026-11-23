@@ -26,6 +26,8 @@ interface EntityView {
   anim: CreatureAnim;
   /** Seconds until the next off-screen animation tick (cheap LOD). */
   lodTimer: number;
+  /** Scaled time accumulated since the model was last animated. */
+  animDt: number;
 }
 
 const TWO_PI = Math.PI * 2;
@@ -107,6 +109,7 @@ export function createEntityViews(
       growth,
       anim: { action: 'idle', speed: 0, swimming: false, actionTime: 0, holding: 'none' },
       lodTimer: Math.random() * 0.2,
+      animDt: 0,
     };
     views.set(k, v);
     sync(v, 0, true);
@@ -175,9 +178,10 @@ export function createEntityViews(
       heading = a.heading;
       anim.action = a.action;
       anim.speed = a.speed;
-      // The sim puts swimmers' origin at the water surface; the model sinks itself.
-      anim.swimming =
-        a.action === 'swim' || (a.y <= WATER_LEVEL + 1e-3 && sim.world.heightAt(a.x, a.z) < WATER_LEVEL - 0.05);
+      // The sim sets action 'swim' and puts the origin exactly at the water
+      // surface while swimming (the model sinks itself). Waders stand on the
+      // pond bed below WATER_LEVEL and must not be treated as swimmers.
+      anim.swimming = a.action === 'swim' || Math.abs(a.y - WATER_LEVEL) < 1e-3;
       anim.actionTime = a.actionTime;
       if (Math.abs(a.growth - v.growth) > 0.01) {
         v.growth = a.growth;
@@ -234,23 +238,18 @@ export function createEntityViews(
       sphere.radius = Math.max(v.model.radius, v.model.height * 0.6) + 0.5;
       const onScreen = frustum.intersectsSphere(sphere);
       const dist = camPos.distanceTo(obj.position);
-      if (onScreen) {
-        // Far-away creatures animate at a reduced rate to save CPU (skinning is the cost).
-        if (dist > 90) {
-          v.lodTimer -= dt;
-          if (v.lodTimer <= 0) {
-            v.model.update(scaled + 0.1 * SPEED_MULTIPLIERS[sim.speed], v.anim);
-            v.lodTimer = 0.1;
-          }
-        } else {
-          v.model.update(scaled, v.anim);
-        }
-      } else {
-        v.lodTimer -= dt;
-        if (v.lodTimer <= 0) {
-          v.model.update(scaled + 0.5 * SPEED_MULTIPLIERS[sim.speed], v.anim);
-          v.lodTimer = 0.5;
-        }
+      // Animation (bone matrices) is the main per-creature CPU cost. Distant and
+      // coarse-LOD creatures animate at a reduced rate; their position and
+      // heading still update every frame (the factory reads object transforms).
+      v.animDt += scaled;
+      const lod = v.model.lod ?? -1;
+      const interval = !onScreen ? 0.5 : lod >= 3 || dist > 90 ? 1 / 12 : lod === 2 ? 1 / 20 : 0;
+      if (v.lodTimer > interval) v.lodTimer = interval; // came closer / on screen: catch up now
+      v.lodTimer -= dt;
+      if (v.lodTimer <= 0) {
+        v.model.update(v.animDt, v.anim);
+        v.animDt = 0;
+        v.lodTimer = interval;
       }
     }
 

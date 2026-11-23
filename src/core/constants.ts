@@ -32,7 +32,7 @@ export const DECK_Y = WATER_LEVEL + 0.25;
 export const ENTRANCE_TILE = { x: Math.floor(MAP_W / 2), z: MAP_H - 1 };
 
 /** Game clock: game-minutes that pass per simulated second at 1x speed. */
-export const GAME_MINUTES_PER_SECOND = 4; // a full day ≈ 6 real minutes at 1x
+export const GAME_MINUTES_PER_SECOND = 3; // a full day ≈ 8 real minutes at 1x (opening hours ≈ 4 min)
 export const MINUTES_PER_DAY = 24 * 60;
 export const OPEN_HOUR = 8;
 export const CLOSE_HOUR = 20;

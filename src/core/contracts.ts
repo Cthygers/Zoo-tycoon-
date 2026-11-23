@@ -160,7 +160,10 @@ export interface QualitySettings {
   shadowMapSize: number;
   /** 0..1 multiplier for instanced grass blades / ground clutter. */
   grassDensity: number;
-  /** Post-processing (colour grading, AO, bloom) enabled. */
+  /**
+   * HDR post chain (night bloom) enabled. Colour grading is part of tone
+   * mapping on every tier; there is no screen-space AO.
+   */
   postFX: boolean;
   /** Max distance (m) at which small props / grass are drawn. */
   detailDistance: number;
@@ -180,6 +183,11 @@ export interface IRenderContext {
 
   /** Update sky, sun/moon light, fog and exposure for the game clock. */
   setTimeOfDay(minuteOfDay: number, day: number): void;
+  /**
+   * Snap exposure adaptation and the sky environment map to the current time
+   * of day (after loading a save or jumping the clock).
+   */
+  settle(): void;
   /**
    * Tell the renderer where the camera is looking (ground point) and roughly
    * how much ground is visible, so the shadow frustum / grass field follow.
@@ -220,6 +228,12 @@ export interface CreatureModel {
   readonly height: number;
   /** Approximate radius in metres (for picking / selection rings). */
   readonly radius: number;
+  /**
+   * Current level of detail chosen by the factory each frame (0 = full mesh,
+   * higher = coarser, -1 / undefined = unknown or not batched). Views use it to
+   * animate distant creatures at a lower rate.
+   */
+  readonly lod?: number;
   update(dt: number, anim: CreatureAnim): void;
   /** Change age scaling (0..1 = baby..adult). */
   setGrowth(growth: number): void;
@@ -242,6 +256,11 @@ export interface ICreatureFactory {
   setQuality(quality: QualitySettings): void;
   /** Build (and cache) the meshes for these species up front. */
   preload(speciesIds: string[], onProgress?: (fraction: number) => void): Promise<void>;
+  /**
+   * Optional: build every level of detail for the meshes created so far
+   * (loading screen), so the first frames don't draw full meshes everywhere.
+   */
+  warmLods?(onProgress?: (fraction: number) => void): Promise<void>;
   createAnimal(speciesId: string, opts: { seed: number; sex: 'M' | 'F'; growth: number }): CreatureModel;
   createHuman(appearance: HumanAppearance, role: 'guest' | StaffRole, seed: number): CreatureModel;
 }

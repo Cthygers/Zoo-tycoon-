@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ENTRANCE_TILE, MAP_W, START_MONEY, TILE, WATER_LEVEL } from '../src/core/constants';
+import { ENTRANCE_TILE, GAME_MINUTES_PER_SECOND, MAP_W, START_MONEY, TILE, WATER_LEVEL } from '../src/core/constants';
 import { EventBus, type GameEvents } from '../src/core/events';
 import { PathType, Terrain } from '../src/core/types';
 import { buildDemoZoo } from '../src/demo';
@@ -409,11 +409,11 @@ describe('simulation over several days', () => {
     expect(sim.minuteOfDay).toBe(m0);
     sim.setSpeed(1);
     sim.update(0.5);
-    expect(sim.minuteOfDay).toBeCloseTo(m0 + 2, 5);
+    expect(sim.minuteOfDay).toBeCloseTo(m0 + 0.5 * GAME_MINUTES_PER_SECOND, 5);
     sim.setSpeed(3);
     sim.update(0.25); // 1 simulated second in 0.1 s sub-steps
-    expect(sim.minuteOfDay).toBeCloseTo(m0 + 6, 5);
-    expect(sim.isOpen()).toBe(false); // 07:36
+    expect(sim.minuteOfDay).toBeCloseTo(m0 + 1.5 * GAME_MINUTES_PER_SECOND, 5);
+    expect(sim.isOpen()).toBe(false); // still before opening
   });
 
   it('grows babies and lets them follow their mother', () => {
@@ -658,7 +658,7 @@ describe('persistence', () => {
     expect(buildDemoZoo(sim).failures).toEqual([]);
     sim.setSpeed(3);
     sim.minuteOfDay = 7 * 60 + 50;
-    while (sim.minuteOfDay < 14 * 60) sim.update(0.1);
+    while (sim.minuteOfDay < 15 * 60) sim.update(0.1);
     expect(sim.guests.size).toBeGreaterThan(100);
     const save = sim.serialize() as unknown as Record<string, unknown> & { world: Record<string, unknown> };
     const text = JSON.stringify(save);

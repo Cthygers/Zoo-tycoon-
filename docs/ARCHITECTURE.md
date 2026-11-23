@@ -20,7 +20,7 @@ binary art assets in the repo.
 | `src/props` | `IPropsLayer` | trees, plants, rocks, shelters, feeders, shops, amenities, fences, litter |
 | `src/views` | `IEntityViews` | binds sim entities to creature models each frame, picking, selection |
 | `src/ui` | `IGameUI` | mobile HUD, build menus, info panels, tools + ghost previews, touch camera |
-| `src/audio` | `IAudio` | procedural WebAudio ambience, animal calls, UI cues (no audio files) |
+| `src/audio` | `IAudio` | procedural WebAudio ambience, animal calls, UI cues (no audio files); `harness/audio.html` renders and analyses every sound |
 | `src/main.ts` | — | loading screen, wiring, main loop, autosave, Android lifecycle |
 
 Modules communicate only through `src/core/contracts.ts`, the shared types in

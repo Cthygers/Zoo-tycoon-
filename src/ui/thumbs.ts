@@ -22,7 +22,7 @@ import { disposeOwned } from './preview';
  * enough that cached images from an older build would look wrong. Keys also
  * hash the item's catalogue entry, so data edits invalidate single entries.
  */
-export const THUMB_CACHE_VERSION = 4;
+export const THUMB_CACHE_VERSION = 5;
 const DB_NAME = 'wildhaven-thumbs';
 const DB_STORE = 'thumbs';
 

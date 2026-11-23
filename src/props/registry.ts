@@ -7,7 +7,11 @@ import type { QualitySettings } from '../core/contracts';
 /**
  * Material userData conventions understood by the props layer:
  *  - material.userData.sway = number        → wind sway amplitude (metres at 1 m height, scaled by vertex height)
- *  - material.userData.nightEmissive = number → emissiveIntensity at full night (lamps, windows)
+ *  - material.userData.nightEmissive = number → emissiveIntensity at full night (lamps, windows).
+ *      Night glows are absolute (night exposure rises ~20×): the emissive colour already carries
+ *      the strength, and nightEmissive ≥ 3 (lamp glass, bulbs) marks a lamp (halo + light pool).
+ *  - material.userData.foliage = true       → leaves / fronds / stems: dithered near-camera fade
+ *  - material.userData.fadeNear = boolean   → bark etc. also fades near the camera (true) or never (false)
  * Mesh userData conventions:
  *  - mesh.userData.noShadow = true          → never cast shadows (tiny details, glass)
  */

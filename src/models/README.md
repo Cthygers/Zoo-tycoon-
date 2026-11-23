@@ -32,6 +32,10 @@ Reference implementations: **`species/zebra.ts`** (hoofed, stripes, mane) and
 **`species/lion.ts`** (big cat, sexual dimorphism, shaggy mane, custom roar).
 The other 12 files are placeholders built with `kit/generic.ts` — replace them.
 
+Rendering in the game is batched (GPU-instanced skinning) with distance LODs: see
+[`crowd/README.md`](crowd/README.md) for batches, LOD levels, per-instance data and
+extension points. The harness `wire=1` option needs `&standalone=1`.
+
 ## Conventions
 
 * Metres, model space, **+Y up, facing +Z**, feet on `y = 0`, origin on the

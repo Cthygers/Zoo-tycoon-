@@ -49,6 +49,8 @@ export function buildDemoZoo(sim: ISimulation, seed = 4242): DemoReport {
       for (let z = Math.min(z0, z1); z <= Math.max(z0, z1); z++) path.push({ x, z });
   };
   line(8, avenueZ, 63, avenueZ); // southern promenade
+  line(9, avenueZ - 1, 62, avenueZ - 1); // …two tiles wide along the viewing fences
+  line(ex - 1, avenueZ + 1, ex - 1, ez - 1); // entrance spine, two tiles wide
   line(8, 10, 8, avenueZ); // west walk
   line(63, 10, 63, avenueZ); // east walk
   line(8, 10, 63, 10); // northern walk
@@ -59,6 +61,8 @@ export function buildDemoZoo(sim: ISimulation, seed = 4242): DemoReport {
     const ter = w.getTerrain(t.x, t.z);
     return ter === Terrain.Water || ter === Terrain.DeepWater;
   };
+  // clear wild trees / rocks from the starter map where the new walks go
+  for (const t of path) if (w.objectAt(t.x, t.z)) sim.bulldoze({ x0: t.x, z0: t.z, x1: t.x, z1: t.z });
   ok('paths', sim.placePaths(path.filter((t) => !isWet(t)), PathType.Paved));
   const wet = path.filter(isWet);
   if (wet.length) ok('boardwalk', sim.placePaths(wet, PathType.Boardwalk));
@@ -207,7 +211,8 @@ export function buildDemoZoo(sim: ISimulation, seed = 4242): DemoReport {
     // clear the ground (wild trees / rocks from the starter map)
     sim.bulldoze(r);
     // terrain
-    ok(`${p.name} base`, sim.paintTerrain(r, p.base));
+    const painted = sim.paintTerrain(r, p.base);
+    if (!painted.ok && !/already/i.test(painted.reason ?? '')) ok(`${p.name} base`, painted);
     for (const patch of p.patches) {
       for (let z = r.z0; z <= r.z1; z++)
         for (let x = r.x0; x <= r.x1; x++) {
@@ -266,20 +271,27 @@ export function buildDemoZoo(sim: ISimulation, seed = 4242): DemoReport {
   }
 
   // ------------------------------------------------------- guest facilities
+  // rot: 0 faces +Z (south), 1 +X, 2 −Z (north), 3 −X. Shop fronts face the path.
   const guestObjects: { id: string; x: number; z: number; rot: number }[] = [
-    { id: 'shop_snack', x: ex + 2, z: avenueZ + 1, rot: 0 },
-    { id: 'shop_drinks', x: ex - 2, z: avenueZ + 1, rot: 0 },
-    { id: 'shop_icecream', x: ex - 4, z: avenueZ + 1, rot: 0 },
-    { id: 'restroom', x: ex + 4, z: avenueZ + 1, rot: 0 },
-    { id: 'shop_gift', x: ex - 8, z: avenueZ + 1, rot: 0 },
+    { id: 'shop_snack', x: ex + 2, z: avenueZ + 1, rot: 2 },
+    { id: 'shop_drinks', x: ex - 3, z: avenueZ + 1, rot: 2 },
+    { id: 'shop_icecream', x: ex - 5, z: avenueZ + 1, rot: 2 },
+    { id: 'restroom', x: ex + 5, z: avenueZ + 1, rot: 2 },
+    { id: 'shop_gift', x: ex - 9, z: avenueZ + 1, rot: 2 },
     { id: 'fountain', x: ex + 1, z: avenueZ + 6, rot: 0 },
-    { id: 'picnic_table', x: ex - 1, z: avenueZ + 4, rot: 1 },
-    { id: 'picnic_table', x: ex - 1, z: avenueZ + 6, rot: 1 },
+    { id: 'picnic_table', x: ex - 2, z: avenueZ + 4, rot: 1 },
+    { id: 'picnic_table', x: ex - 2, z: avenueZ + 6, rot: 1 },
     { id: 'info_sign', x: 20, z: avenueZ + 1, rot: 2 },
     { id: 'info_sign', x: 48, z: avenueZ + 1, rot: 2 },
     { id: 'donation_box', x: 30, z: avenueZ + 1, rot: 2 },
-    { id: 'shop_drinks', x: 37, z: 18, rot: 1 },
+    // spread food, drink and restrooms around the loop so guests don't all
+    // converge on the entrance plaza
+    { id: 'shop_drinks', x: 37, z: 18, rot: 3 },
     { id: 'restroom', x: 64, z: 40, rot: 3 },
+    { id: 'shop_snack', x: 64, z: 14, rot: 3 },
+    { id: 'restroom', x: 6, z: 30, rot: 1 },
+    { id: 'shop_icecream', x: 37, z: 28, rot: 2 },
+    { id: 'shop_drinks', x: 7, z: 45, rot: 1 },
   ];
   for (const g of guestObjects) {
     const res = sim.placeObject(g.id, g.x, g.z, g.rot);
