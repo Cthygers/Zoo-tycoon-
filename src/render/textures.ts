@@ -89,42 +89,63 @@ vec4 blades(vec2 uv, float n, float len, float wid, float seed) {
 vec3 grassBladeColor(float r, float t, bool dry) {
   vec3 c;
   if (!dry) {
-    vec3 g1 = srgb(58.0, 78.0, 30.0), g2 = srgb(92.0, 114.0, 46.0), g3 = srgb(130.0, 138.0, 66.0);
+    // fresh lawn: olive → spring green, a few blue-green and yellowed / dead blades
+    vec3 g1 = srgb(82.0, 104.0, 50.0), g2 = srgb(110.0, 134.0, 64.0), g3 = srgb(142.0, 154.0, 84.0);
     c = mix(g1, g2, smoothstep(0.0, 0.7, r));
-    c = mix(c, g3, smoothstep(0.75, 1.0, r));
-    if (fract(r * 13.7) > 0.94) c = srgb(150.0, 140.0, 92.0);
+    c = mix(c, g3, smoothstep(0.78, 1.0, r));
+    float k = fract(r * 13.7);
+    if (k > 0.93) c = srgb(168.0, 156.0, 104.0);
+    else if (k < 0.08) c = srgb(86.0, 116.0, 78.0);
   } else {
-    vec3 s1 = srgb(150.0, 128.0, 82.0), s2 = srgb(192.0, 172.0, 120.0), s3 = srgb(128.0, 122.0, 100.0);
+    vec3 s1 = srgb(158.0, 138.0, 96.0), s2 = srgb(198.0, 180.0, 132.0), s3 = srgb(136.0, 130.0, 108.0);
     c = mix(s1, s2, smoothstep(0.0, 0.8, r));
     if (fract(r * 7.31) > 0.8) c = mix(c, s3, 0.7);
-    if (fract(r * 17.3) > 0.9) c = srgb(122.0, 124.0, 70.0);
+    if (fract(r * 17.3) > 0.9) c = srgb(128.0, 130.0, 78.0);
   }
-  return c * (0.72 + 0.45 * t);
+  return c * (0.8 + 0.3 * t);
 }
 
 Surf grassLike(vec2 uv, bool dry) {
   Surf s;
   float macro = pfbm(uv, 3.0, 4, dry ? 3.0 : 1.0);
-  vec3 soil = dry ? srgb(122.0, 104.0, 76.0) : srgb(40.0, 52.0, 24.0);
-  soil *= 0.8 + 0.4 * (0.5 + 0.5 * pfbm(uv, 24.0, 3, 4.0));
+  // thatch / soil between the blades (seldom visible, never black)
+  vec3 soil = dry ? srgb(128.0, 110.0, 80.0) : srgb(74.0, 74.0, 46.0);
+  soil *= 0.85 + 0.3 * (0.5 + 0.5 * pfbm(uv, 24.0, 3, 4.0));
   s.alb = soil;
   s.h = 0.1 + 0.1 * pfbm(uv, 12.0, 3, 2.0);
-  float n0 = dry ? 44.0 : 60.0;
+  float n0 = dry ? 44.0 : 52.0;
+  // sparse areas show more thatch
+  float thin = smoothstep(0.25, 0.6, pfbm(uv, 6.0, 3, dry ? 8.0 : 9.0));
   for (int k = 0; k < 3; k++) {
     float fk = float(k);
-    float n = n0 * (1.0 + fk * 0.55);
-    vec4 b = blades(uv, floor(n), dry ? 1.25 : 1.05, dry ? 0.15 : 0.19, 13.0 * fk + (dry ? 50.0 : 0.0));
+    float n = n0 * (1.0 + fk * 0.6);
+    vec4 b = blades(uv, floor(n), dry ? 1.25 : 1.15, dry ? 0.15 : 0.2, 13.0 * fk + (dry ? 50.0 : 0.0));
     if (dry && k == 2 && hash12(vec2(b.z, 3.0)) > 0.6) continue;
+    if (k == 2 && hash12(vec2(b.z, 5.0)) < thin * 0.7) continue;
     float hh = 0.25 + 0.75 * b.y - fk * 0.04;
     if (b.x > 0.0 && hh > s.h) {
-      vec3 bc = grassBladeColor(fract(b.z + macro * 0.25), b.w, dry);
+      vec3 bc = grassBladeColor(fract(b.z + macro * 0.3), b.w, dry);
       s.alb = mix(s.alb, bc, b.x);
       s.h = mix(s.h, hh, b.x);
     }
   }
-  s.alb *= 0.92 + 0.16 * macro;
-  s.rough = dry ? 0.92 : 0.88;
-  s.ao = mix(0.55, 1.0, smoothstep(0.1, 0.6, s.h));
+  if (!dry) {
+    // clover patches: round trifoliate leaves, flatter and bluer than the grass
+    float clover = smoothstep(0.18, 0.42, pfbm(uv, 5.0, 3, 17.0));
+    vec4 v = pvoronoi(uv, 46.0, 0.9, 18.0);
+    float leaf = (1.0 - smoothstep(0.26, 0.36, v.x)) * step(0.35, v.z) * clover;
+    vec3 lc = mix(srgb(78.0, 112.0, 62.0), srgb(96.0, 128.0, 70.0), fract(v.z * 7.0));
+    s.alb = mix(s.alb, lc * (0.86 + 0.2 * sqrt(max(0.0, 1.0 - v.x / 0.36))), leaf);
+    s.h = mix(s.h, 0.55, leaf * 0.8);
+    // the odd daisy
+    vec4 fl = pvoronoi(uv, 30.0, 0.8, 19.0);
+    float daisy = (1.0 - smoothstep(0.08, 0.12, fl.x)) * step(0.965, fl.z);
+    s.alb = mix(s.alb, fl.x < 0.04 ? srgb(220.0, 180.0, 60.0) : srgb(232.0, 230.0, 220.0), daisy);
+    s.h = max(s.h, 0.9 * daisy);
+  }
+  s.alb *= 0.94 + 0.12 * macro;
+  s.rough = dry ? 0.92 : 0.86;
+  s.ao = mix(0.68, 1.0, smoothstep(0.1, 0.6, s.h));
   return s;
 }
 
@@ -482,6 +503,92 @@ void main() {
 }
 `;
 
+const FOLIAGE_FRAG = /* glsl */ `
+precision highp float;
+in vec2 vUv;
+out vec4 outColor;
+uniform float uRes;
+${GLSL_HASH}
+${GLSL_PNOISE}
+
+// Nearest jittered feature point: xy = offset from the point to p (cell units),
+// z = distance, w = cell hash.
+vec4 vor(vec2 p, float seed) {
+  vec2 i = floor(p);
+  vec2 f = p - i;
+  float best = 9.0;
+  vec2 bo = vec2(0.0);
+  float id = 0.0;
+  for (int y = -1; y <= 1; y++)
+    for (int x = -1; x <= 1; x++) {
+      vec2 o = vec2(float(x), float(y));
+      vec2 r = o + 0.15 + 0.7 * hash22(i + o + seed * 13.1) - f;
+      float d = dot(r, r);
+      if (d < best) { best = d; bo = r; id = hash12(i + o + seed * 7.7); }
+    }
+  return vec4(-bo, sqrt(best), id);
+}
+
+// One foliage clump seen from the side: x = albedo brightness, yz = normal xy
+// (sprite plane, 0.5 + n/2), w = coverage.
+// Broadleaf leaf mass: lumpy round clump of leaf clusters.
+vec4 leafClump(vec2 uv, float seed) {
+  vec2 p = uv * 2.0 - 1.0;
+  float r = length(p);
+  float ang = atan(p.y, p.x) / 6.2831853 + 0.5;
+  float R = 0.64 + 0.1 * pnoise(vec2(ang * 5.0, seed * 3.1), vec2(5.0, 4096.0)) + 0.06 * pnoise(vec2(ang * 11.0, seed * 1.7 + 5.0), vec2(11.0, 4096.0));
+  vec4 c1 = vor(p * 6.5 + seed * 3.7, seed);
+  float dome1 = sqrt(clamp(1.0 - c1.z / 0.65, 0.0, 1.0));
+  vec4 c2 = vor(p * 17.5 + seed * 1.3, seed + 4.0);
+  float dome2 = sqrt(clamp(1.0 - c2.z / 0.62, 0.0, 1.0));
+  float fn = pnoise(p * 9.0 + seed * 5.3, vec2(4096.0));
+  float edge = R - r + 0.12 * (dome1 - 0.55) + 0.1 * (dome2 - 0.5) + 0.035 * fn;
+  float a = smoothstep(-0.01, 0.01, edge);
+  // a few small see-through gaps between leaf masses
+  float gap = pfbm(uv + seed * 0.37, 6.0, 3, seed + 9.0);
+  a *= smoothstep(-0.52, -0.42, gap - 0.25 * (1.0 - smoothstep(0.0, 0.5, R - r)));
+  vec2 n = clamp(p / max(R, 0.3) * 0.45 + c1.xy * 0.75 * 0.5 + c2.xy * 0.2, vec2(-0.95), vec2(0.95));
+  float bright = (0.7 + 0.3 * c1.w) * (0.66 + 0.34 * dome1) * (0.78 + 0.22 * dome2) * (0.9 + 0.1 * fn);
+  bright *= 0.72 + 0.28 * smoothstep(0.15, 0.9, r / max(R, 0.3));
+  return vec4(bright, n * 0.5 + 0.5, a);
+}
+
+// Conifer branch tier: pointed tip at +0.9, ragged drooping base at -0.75,
+// base half-width 0.82, serrated sides made of hanging branch ends.
+vec4 needleTier(vec2 uv, float seed) {
+  vec2 p = uv * 2.0 - 1.0;
+  float w = 0.82 * clamp((0.9 - p.y) / 1.65, 0.0, 1.0);
+  vec4 c2 = vor(p * vec2(14.0, 20.0) + seed * 1.3, seed + 4.0);
+  float dome2 = sqrt(clamp(1.0 - c2.z / 0.62, 0.0, 1.0));
+  float saw = 0.5 + 0.5 * sin(p.y * 24.0 + seed * 2.0 + abs(p.x) * 5.0);
+  float side = w - abs(p.x) + 0.07 * (saw - 0.5) * smoothstep(0.05, 0.3, w) + 0.05 * (dome2 - 0.5);
+  // drooping lower edge: lower at the middle, curling up toward the tips
+  float bottom = p.y + 0.75 - 0.18 * (abs(p.x) / 0.82) + 0.05 * (dome2 - 0.5);
+  float edge = min(side, bottom * 0.8);
+  float a = smoothstep(-0.01, 0.01, edge);
+  a *= 1.0 - smoothstep(0.9, 0.97, max(abs(p.x), abs(p.y)));
+  vec2 n = clamp(vec2(p.x / max(w, 0.15) * 0.65, 0.3 - 0.4 * smoothstep(0.0, 0.25, -bottom + 0.25)) + c2.xy * 0.25, vec2(-0.95), vec2(0.95));
+  float bright = (0.72 + 0.28 * c2.w) * (0.68 + 0.32 * dome2);
+  bright *= 0.84 + 0.16 * (0.5 + 0.5 * sin(p.x * 70.0 + c2.w * 6.28 + p.y * 9.0));
+  bright *= 0.75 + 0.25 * smoothstep(0.0, 0.5, w - abs(p.x) < 0.12 ? 1.0 : 0.3); // tips catch more light
+  return vec4(bright, n * 0.5 + 0.5, a);
+}
+
+vec4 clump(vec2 uv, float seed, bool needle) {
+  return needle ? needleTier(uv, seed) : leafClump(uv, seed);
+}
+
+void main() {
+  vec2 uv = (floor(vUv * uRes) + 0.5) / uRes;
+  // 2×2 atlas: 0,1 broadleaf clumps; 2,3 conifer clumps
+  vec2 t = floor(uv * 2.0);
+  vec2 lu = fract(uv * 2.0);
+  float v = t.x + 2.0 * t.y;
+  vec4 c = clump(lu, 1.0 + v * 2.3, v >= 2.0);
+  outColor = vec4(clamp(c.rgb, 0.0, 1.0), c.a);
+}
+`;
+
 export interface GroundTextureSet {
   /** sqrt(albedo).rgb + height, one layer per GroundLayer. */
   readonly albedo: THREE.DataArrayTexture;
@@ -491,6 +598,8 @@ export interface GroundTextureSet {
   readonly noise: THREE.Texture;
   /** Tileable wave slope map: rg = slope (0.5 + s/2), b = height. */
   readonly waves: THREE.Texture;
+  /** 2×2 foliage clump atlas (distant trees): r = albedo, gb = normal xy, a = coverage. */
+  readonly foliage: THREE.Texture;
 }
 
 /** Owns and (re)generates the procedural ground textures. */
@@ -499,6 +608,7 @@ export class GroundTextures implements GroundTextureSet {
   private detailRT: THREE.WebGLArrayRenderTarget;
   private noiseRT: THREE.WebGLRenderTarget;
   private wavesRT: THREE.WebGLRenderTarget;
+  private foliageRT: THREE.WebGLRenderTarget;
   private quadScene = new THREE.Scene();
   private quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
   private quad: THREE.Mesh;
@@ -506,6 +616,7 @@ export class GroundTextures implements GroundTextureSet {
   private detailMat: THREE.RawShaderMaterial;
   private noiseMat: THREE.RawShaderMaterial;
   private wavesMat: THREE.RawShaderMaterial;
+  private foliageMat: THREE.RawShaderMaterial;
 
   constructor(
     private renderer: THREE.WebGLRenderer,
@@ -543,6 +654,8 @@ export class GroundTextures implements GroundTextureSet {
     };
     this.noiseRT = new THREE.WebGLRenderTarget(256, 256, flatOpts);
     this.wavesRT = new THREE.WebGLRenderTarget(256, 256, { ...flatOpts, anisotropy });
+    const fRes = resolution >= 512 ? 512 : 256;
+    this.foliageRT = new THREE.WebGLRenderTarget(fRes, fRes, { ...flatOpts, wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping });
 
     const tri = new THREE.BufferGeometry();
     tri.setAttribute('position', new THREE.BufferAttribute(new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]), 3));
@@ -587,6 +700,14 @@ export class GroundTextures implements GroundTextureSet {
       depthTest: false,
       depthWrite: false,
     });
+    this.foliageMat = new THREE.RawShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      vertexShader: VERT,
+      fragmentShader: FOLIAGE_FRAG,
+      uniforms: { uRes: { value: fRes } },
+      depthTest: false,
+      depthWrite: false,
+    });
     this.quad = new THREE.Mesh(tri, this.groundMat);
     this.quad.frustumCulled = false;
     this.quadScene.add(this.quad);
@@ -604,6 +725,9 @@ export class GroundTextures implements GroundTextureSet {
   get waves(): THREE.Texture {
     return this.wavesRT.texture;
   }
+  get foliage(): THREE.Texture {
+    return this.foliageRT.texture;
+  }
 
   /** Render every texture. Call once at start-up and after a context restore. */
   generate(): void {
@@ -619,6 +743,9 @@ export class GroundTextures implements GroundTextureSet {
     r.render(this.quadScene, this.quadCam);
     this.quad.material = this.wavesMat;
     r.setRenderTarget(this.wavesRT);
+    r.render(this.quadScene, this.quadCam);
+    this.quad.material = this.foliageMat;
+    r.setRenderTarget(this.foliageRT);
     r.render(this.quadScene, this.quadCam);
 
     for (let pass = 0; pass < 2; pass++) {
@@ -645,6 +772,8 @@ export class GroundTextures implements GroundTextureSet {
     this.detailRT.dispose();
     this.noiseRT.dispose();
     this.wavesRT.dispose();
+    this.foliageRT.dispose();
+    this.foliageMat.dispose();
     this.groundMat.dispose();
     this.detailMat.dispose();
     this.noiseMat.dispose();

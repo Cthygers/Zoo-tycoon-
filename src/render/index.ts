@@ -15,7 +15,8 @@ import { RenderContext } from './context';
 
 export { detectQuality, qualitySettings } from './quality';
 export { RenderContext } from './context';
-export { DECK_Y } from './boardwalk';
+/** Re-exported for compatibility; the source of truth is core/constants. */
+export { DECK_Y } from '../core/constants';
 
 /**
  * Create the renderer and the natural environment. Resolves once the

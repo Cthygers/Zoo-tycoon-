@@ -4,7 +4,7 @@
 
 import * as THREE from 'three';
 import { TILE, WATER_LEVEL } from '../core/constants';
-import type { IPropsLayer } from '../core/contracts';
+import type { CreatureModel, ICreatureFactory, IPropsLayer } from '../core/contracts';
 import type { EdgeRef, World } from '../core/world';
 
 export type RGBA = [number, number, number, number];
@@ -299,9 +299,15 @@ const _s = new THREE.Vector3(1, 1, 1);
 const _c = new THREE.Color();
 const UP = new THREE.Vector3(0, 1, 0);
 
-export type EdgeState = 'new' | 'blocked' | 'same';
+export type EdgeState = 'new' | 'blocked' | 'same' | 'remove';
 
-/** Instanced, tinted ghost fence segments (one InstancedMesh per segment part). */
+const _sRemove = new THREE.Vector3(1.0, 1.04, 1.3);
+
+/**
+ * Instanced, tinted ghost fence segments (one InstancedMesh per segment part).
+ * Tone 'build' shows planned segments; tone 'remove' draws a red, slightly
+ * inflated overlay on existing segments that are about to be removed.
+ */
 export class FenceGhosts {
   readonly group = new THREE.Group();
   private fenceId = 0;
@@ -312,8 +318,9 @@ export class FenceGhosts {
   constructor(
     private world: World,
     private props: IPropsLayer,
+    private tone: 'build' | 'remove' = 'build',
   ) {
-    this.group.name = 'ui-fence-ghosts';
+    this.group.name = this.tone === 'remove' ? 'ui-fence-remove' : 'ui-fence-ghosts';
   }
 
   private build(fenceId: number, cap: number): void {
@@ -334,15 +341,16 @@ export class FenceGhosts {
       const src = o as THREE.Mesh;
       if (!src.isMesh) return;
       const mats = Array.isArray(src.material) ? src.material : [src.material];
+      const remove = this.tone === 'remove';
       for (const m of mats) {
         m.transparent = true;
-        m.opacity = 0.8;
-        m.depthWrite = true;
+        m.opacity = remove ? 0.55 : 0.8;
+        m.depthWrite = !remove;
         const sm = m as THREE.MeshStandardMaterial;
         if (sm.emissive) {
           // lift the ghost so thin / see-through fence types still read clearly
-          sm.emissive.setHex(0x2c4a1e);
-          sm.emissiveIntensity = 0.7;
+          sm.emissive.setHex(remove ? 0x8a1a0c : 0x2c4a1e);
+          sm.emissiveIntensity = remove ? 1.0 : 0.7;
         }
         m.needsUpdate = true;
       }
@@ -401,8 +409,9 @@ export class FenceGhosts {
       const cz = e.dir === 'h' ? e.z * TILE : (e.z + 0.5) * TILE;
       _p.set(cx, this.world.heightAt(cx, cz), cz);
       _q.setFromAxisAngle(UP, e.dir === 'h' ? 0 : -Math.PI / 2);
-      _m.compose(_p, _q, _s);
+      _m.compose(_p, _q, st === 'remove' ? _sRemove : _s);
       if (st === 'new') _c.setRGB(0.62, 1.35, 0.55);
+      else if (st === 'remove') _c.setRGB(1.7, 0.36, 0.3);
       else _c.setRGB(1.6, 0.42, 0.36);
       for (const part of this.parts) {
         part.mesh.setMatrixAt(k, _m2.multiplyMatrices(_m, part.local));
@@ -496,4 +505,146 @@ export function tintGhost(obj: THREE.Object3D, ok: boolean): void {
       }
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+/**
+ * Translucent preview of an animal for the adopt tool.
+ *
+ * The creature factory batches every model whose object sits in the game scene
+ * into its opaque crowd renderer, so the preview model is kept in a detached
+ * holder (where it renders standalone as a SkinnedMesh) and the ghost draws
+ * two meshes of our own that share the model's geometry and skeleton:
+ * a depth-only pre-pass (so only the front-most surface shows) and a tinted,
+ * translucent colour pass with cloned materials that this class owns.
+ * If the model has no skinned mesh (mock factories), its meshes get our
+ * translucent materials directly.
+ */
+export class AnimalGhost {
+  readonly root = new THREE.Group();
+  readonly speciesId: string;
+  private holder = new THREE.Group();
+  private model: CreatureModel;
+  private owned: THREE.Material[] = [];
+  private tinted: THREE.MeshStandardMaterial[] = [];
+  /** Fallback path: original materials to restore before the model is disposed. */
+  private restore: { mesh: THREE.Mesh; mat: THREE.Material | THREE.Material[] }[] = [];
+  private ok: boolean | null = null;
+  private t = 0;
+
+  constructor(creatures: ICreatureFactory, speciesId: string) {
+    this.speciesId = speciesId;
+    this.root.name = 'ui-animal-ghost';
+    this.model = creatures.createAnimal(speciesId, { seed: 4711, sex: 'F', growth: 1 });
+    this.holder.add(this.model.object); // detached → standalone rendering
+    this.model.update(1 / 60, { action: 'idle', speed: 0 });
+    this.holder.updateMatrixWorld(true);
+    let skinned: THREE.SkinnedMesh | null = null;
+    this.model.object.traverse((o) => {
+      const sm = o as THREE.SkinnedMesh;
+      if (!skinned && sm.isSkinnedMesh) skinned = sm;
+    });
+    if (skinned) this.buildSkinned(skinned);
+    else this.buildFallback();
+  }
+
+  private ghostMaterial(src: THREE.Material): THREE.Material {
+    const m = src.clone();
+    // keep shader extensions (coat patterns) — Material.clone() drops these hooks
+    m.onBeforeCompile = src.onBeforeCompile;
+    m.customProgramCacheKey = src.customProgramCacheKey;
+    m.transparent = true;
+    m.opacity = 0.58;
+    m.depthWrite = false;
+    m.depthFunc = THREE.LessEqualDepth;
+    const sm = m as THREE.MeshStandardMaterial;
+    if (sm.isMeshStandardMaterial) this.tinted.push(sm);
+    this.owned.push(m);
+    return m;
+  }
+
+  private buildSkinned(src: THREE.SkinnedMesh): void {
+    const srcMats = Array.isArray(src.material) ? src.material : [src.material];
+    const colour = srcMats.map((m) => this.ghostMaterial(m));
+    const depth = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: true, transparent: true });
+    this.owned.push(depth);
+    const mk = (mat: THREE.Material | THREE.Material[], order: number) => {
+      const m = new THREE.SkinnedMesh(src.geometry, mat);
+      m.bind(src.skeleton, src.bindMatrix);
+      m.frustumCulled = false;
+      m.castShadow = false;
+      m.receiveShadow = false;
+      m.renderOrder = order;
+      this.root.add(m);
+    };
+    mk(depth, 6);
+    mk(colour.length === 1 ? colour[0] : colour, 7);
+  }
+
+  private buildFallback(): void {
+    const meshes: THREE.Mesh[] = [];
+    this.model.object.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.isMesh) meshes.push(m);
+    });
+    const map = new Map<THREE.Material, THREE.Material>();
+    const conv = (src: THREE.Material) => {
+      let c = map.get(src);
+      if (!c) map.set(src, (c = this.ghostMaterial(src)));
+      (c as THREE.Material).depthWrite = true;
+      return c;
+    };
+    for (const mesh of meshes) {
+      this.restore.push({ mesh, mat: mesh.material });
+      mesh.material = Array.isArray(mesh.material) ? mesh.material.map(conv) : conv(mesh.material);
+      mesh.castShadow = false;
+      mesh.renderOrder = 7;
+    }
+    // not a batched model: it can live in the scene directly
+    this.root.add(this.model.object);
+  }
+
+  get visible(): boolean {
+    return this.root.visible;
+  }
+
+  set visible(v: boolean) {
+    this.root.visible = v;
+  }
+
+  place(x: number, y: number, z: number, heading: number): void {
+    const target = this.restore.length ? this.model.object : this.holder;
+    target.position.set(x, y, z);
+    target.rotation.set(0, heading, 0);
+    this.holder.updateMatrixWorld(true);
+  }
+
+  setOk(ok: boolean): void {
+    if (ok === this.ok) return;
+    this.ok = ok;
+    for (const m of this.tinted) {
+      m.emissive.setHex(ok ? 0x2f7a1c : 0xa02a18);
+      m.emissiveIntensity = ok ? 0.28 : 0.7;
+    }
+  }
+
+  update(dt: number): void {
+    this.t += dt;
+    this.model.update(dt, { action: 'idle', speed: 0 });
+    // the holder is outside the scene graph: keep the bones' world matrices current
+    this.holder.updateMatrixWorld(true);
+    const a = 0.5 + 0.08 * Math.sin(this.t * 3.2);
+    for (const m of this.owned) if (m.colorWrite) m.opacity = a;
+  }
+
+  dispose(): void {
+    this.root.removeFromParent();
+    for (const r of this.restore) r.mesh.material = r.mat;
+    this.restore = [];
+    this.root.clear();
+    this.model.dispose();
+    for (const m of this.owned) m.dispose();
+    this.owned = [];
+    this.tinted = [];
+  }
 }

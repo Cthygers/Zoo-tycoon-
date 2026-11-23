@@ -3,10 +3,10 @@
 
 import * as THREE from 'three';
 import { Noise, Rng } from '../../core/rng';
-import { atlas, cellUV, hedgeTextures, soilTextures } from './atlases';
+import { atlas, cellUV, hedgeTextures, leafMaterial, soilTextures } from './atlases';
 import { barkMat } from './barks';
 import { addRibbon, addTube, CardSet, type Ellipsoid, ellipsoidNormal, groupOf, MeshData, v3, type V3 } from './geo';
-import { barkMaterial, cachedMaterial, detail, foliageMaterial } from './mats';
+import { barkMaterial, cachedMaterial, detail, natureQuality } from './mats';
 import { graniteMaterial } from './rocks';
 import { sstep } from './tex';
 import { crownOf, growTree, leafAO, meshBark, placeLeaves, type TreeSpec } from './treegen';
@@ -18,6 +18,7 @@ function stemMaterial(sway: number): THREE.MeshStandardMaterial {
   return cachedMaterial(`stem:${sway}`, () => {
     const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0 });
     m.userData.sway = sway;
+    m.userData.foliage = true;
     return m;
   });
 }
@@ -26,6 +27,15 @@ function stemMaterial(sway: number): THREE.MeshStandardMaterial {
 // Thorn bush — multi-stemmed, flat-topped dry-country shrub
 
 export function buildThornBush(variant: number): THREE.Group {
+  return thornBush(variant, false);
+}
+
+/** Distant thorn bush: main stems only (3-sided), a quarter of the cards, larger. */
+export function buildThornBushLod(variant: number): THREE.Group {
+  return thornBush(variant, true);
+}
+
+function thornBush(variant: number, lod: boolean): THREE.Group {
   const rng = new Rng(12100 + variant * 7919);
   const H = [1.8, 1.5, 2.0, 1.65][variant % 4];
   const spec: TreeSpec = {
@@ -59,18 +69,23 @@ export function buildThornBush(variant: number): THREE.Group {
     aspect: 1,
     orient: 'outward',
     tilt: 0.7,
-    tintA: [0.85, 0.86, 0.8],
-    tintB: [1.0, 0.98, 0.88],
+    // dusty grey-green (the acacia sprites × 0xd8dccb in linear terms)
+    tintA: [0.58, 0.62, 0.48],
+    tintB: [0.69, 0.7, 0.53],
     minY: 0.25,
   });
   const crown = crownOf(cards);
   const bark = new MeshData();
-  meshBark(sk, bark, { spec, crown });
+  if (lod) meshBark(sk, bark, { spec, crown, maxLevel: 0, radialMul: 0.6, thinFrom: 0, noCaps: true });
+  else meshBark(sk, bark, { spec, crown });
   const leaves = new MeshData();
-  cards.emit(leaves, crown, 0.75, leafAO(0.45));
+  const n = cards.length;
+  const lodCards = (k: number) => cards.lodSet(Math.max(12, n * k), Math.min(2, Math.sqrt(1 / k) * 0.8), crown, () => rng.float(), 0.5);
+  (lod ? lodCards(0.25) : cards).emit(leaves, crown, 0.75, leafAO(0.45));
   const g = groupOf([
-    [bark, barkMat('acacia', 0.01), 'bark'],
-    [leaves, foliageMaterial('thorn', atlas('acacia').tex, { sway: 0.03, translucency: 0.35, color: 0xd8dccb }), 'leaves'],
+    // tree acacia bark / shared tree foliage: no extra batches for bushes
+    [bark, barkMat('acacia', 0.003), 'bark'],
+    [leaves, leafMaterial('trees'), 'leaves'],
   ]);
   g.userData.tris = bark.tris + leaves.tris;
   return g;
@@ -102,7 +117,8 @@ export function buildFern(variant: number): THREE.Group {
       az += 2.39996 + rng.range(-0.25, 0.25);
       const elev = rng.range(0.95, 1.38);
       const len = size * rng.range(0.75, 1.05);
-      const n = 8;
+      // frond segments: 8 high, 6 medium, 5 low
+      const n = natureQuality() === 'high' ? 8 : natureQuality() === 'medium' ? 6 : 5;
       const d = v3(Math.cos(az) * Math.cos(elev), Math.sin(elev), Math.sin(az) * Math.cos(elev));
       const p = c.clone().add(v3(0, 0.03, 0));
       const pts: V3[] = [];
@@ -135,7 +151,7 @@ export function buildFern(variant: number): THREE.Group {
       });
     }
   }
-  const g = groupOf([[md, foliageMaterial('fern', fa.tex, { sway: 0.05, translucency: 0.55, roughness: 0.75 }), 'fronds']]);
+  const g = groupOf([[md, leafMaterial('ground'), 'fronds']]);
   g.userData.tris = md.tris;
   return g;
 }
@@ -184,7 +200,7 @@ export function buildTallGrass(variant: number): THREE.Group {
   const crown: Ellipsoid = { c: v3(0, 0.0, 0), r: v3(1.2, 1.3, 1.2) };
   const md = new MeshData();
   cards.emit(md, crown, 0.55, (p) => 0.55 + 0.45 * sstep(0.0, 0.7, p.y));
-  const g = groupOf([[md, foliageMaterial('grass', ga.tex, { sway: 0.09, translucency: 0.6, roughness: 0.85 }), 'grass']]);
+  const g = groupOf([[md, leafMaterial('ground'), 'grass']]);
   g.userData.tris = md.tris;
   return g;
 }
@@ -249,7 +265,7 @@ export function buildReeds(variant: number): THREE.Group {
   const md = new MeshData();
   cards.emit(md, crown, 0.45, (p) => 0.5 + 0.5 * sstep(0.0, 1.2, p.y));
   const g = groupOf([
-    [md, foliageMaterial('reed', ra.tex, { sway: 0.05, translucency: 0.55, roughness: 0.7 }), 'reeds'],
+    [md, leafMaterial('ground'), 'reeds'],
     [stems, stemMaterial(0.04), 'stems'],
   ]);
   g.userData.tris = md.tris + stems.tris;
@@ -259,7 +275,7 @@ export function buildReeds(variant: number): THREE.Group {
 // ---------------------------------------------------------------------------
 // Columnar cactus — ribbed stems with areoles & spines (saguaro / organ pipe)
 
-function cactusStem(md: MeshData, path0: V3[], R: number, ribs: number, noise: Noise): void {
+function cactusStem(md: MeshData, path0: V3[], R: number, ribs: number, noise: Noise, lod = false): void {
   // densify the last stretch so the crown is a rounded dome, not a cone
   const path = path0.slice(0, -1);
   const a = path0[path0.length - 2];
@@ -271,22 +287,24 @@ function cactusStem(md: MeshData, path0: V3[], R: number, ribs: number, noise: N
   const flatEnd = b.clone().addScaledVector(dir, -domeLen);
   path.push(flatEnd);
   const radii = path.map((_p, i) => R * (1 - 0.05 * (i / path.length)));
-  const k = 4;
+  const k = lod ? 2 : 3;
   for (let i = 1; i <= k; i++) {
     const t = i / k;
     const ang = t * Math.PI * 0.5 * 0.92;
     path.push(flatEnd.clone().addScaledVector(dir, Math.sin(ang) * domeLen));
     radii.push(R * 0.95 * Math.cos(ang));
   }
-  const radial = ribs * 2;
+  // crest + groove per rib; the low tier has fewer ribs
+  const nr = Math.max(6, Math.round(ribs * Math.min(1, detail().seg + 0.1)));
+  const radial = lod ? Math.max(5, Math.round(ribs * 0.6)) : nr * 2;
   addTube(md, path, radii, {
     radial,
-    uRepeat: ribs,
+    uRepeat: nr,
     vPerMetre: 1 / 0.05,
     capEnd: true,
-    radiusMod: (_i, ang, p) => {
+    radiusMod: lod ? () => 0.93 : (_i, ang, p) => {
       // crest on odd vertices (u = k + 0.5), groove on even
-      const ph = (ang / (Math.PI * 2)) * ribs;
+      const ph = (ang / (Math.PI * 2)) * nr;
       const f = ph - Math.floor(ph);
       const crest = 1 - Math.abs(f - 0.5) * 2;
       return 0.86 + 0.14 * crest + noise.noise3(p.x * 3, p.y * 3, p.z * 3) * 0.015;
@@ -299,11 +317,12 @@ function cactusStem(md: MeshData, path0: V3[], R: number, ribs: number, noise: N
 }
 
 function bentPath(base: V3, segments: [V3, number][]): V3[] {
-  // segments: [direction, length] with intermediate points every ~0.25 m
+  // segments: [direction, length] with intermediate points every ~0.65 m
+  // (straight runs need no rings; bends get one per segment)
   const out: V3[] = [base.clone()];
   const p = base.clone();
   for (const [d, len] of segments) {
-    const n = Math.max(1, Math.round(len / 0.45));
+    const n = Math.max(1, Math.round(len / 0.65));
     for (let i = 0; i < n; i++) {
       p.addScaledVector(d, len / n);
       out.push(p.clone());
@@ -313,6 +332,15 @@ function bentPath(base: V3, segments: [V3, number][]): V3[] {
 }
 
 export function buildCactus(variant: number): THREE.Group {
+  return cactus(variant, false);
+}
+
+/** Distant cactus: smooth 5–7-sided stems, short domes. */
+export function buildCactusLod(variant: number): THREE.Group {
+  return cactus(variant, true);
+}
+
+function cactus(variant: number, lod: boolean): THREE.Group {
   const rng = new Rng(12500 + variant * 7919);
   const noise = new Noise(77 + variant);
   const md = new MeshData();
@@ -327,7 +355,7 @@ export function buildCactus(variant: number): THREE.Group {
       const out = v3(Math.cos(a), 0, Math.sin(a));
       const h = rng.range(1.6, 3.0);
       const curve = rng.range(0.15, 0.4);
-      cactusStem(md, bentPath(base, [[out.clone().multiplyScalar(curve).add(UP).normalize(), 0.5], [out.clone().multiplyScalar(0.08).add(UP).normalize(), h]]), rng.range(0.075, 0.1), 8, noise);
+      cactusStem(md, bentPath(base, [[out.clone().multiplyScalar(curve).add(UP).normalize(), 0.5], [out.clone().multiplyScalar(0.08).add(UP).normalize(), h]]), rng.range(0.075, 0.1), 7, noise, lod);
     }
   } else {
     // saguaro: main column, 0–3 arms that elbow out then turn up
@@ -335,7 +363,7 @@ export function buildCactus(variant: number): THREE.Group {
     const R = [0.22, 0.2, 0, 0.18][v];
     const lean = v3(rng.range(-0.04, 0.04), 1, rng.range(-0.04, 0.04)).normalize();
     const main = bentPath(v3(0, -0.2, 0), [[lean, H + 0.2]]);
-    cactusStem(md, main, R, 11, noise);
+    cactusStem(md, main, R, 10, noise, lod);
     const arms = [2, 1, 0, 0][v] + (v === 0 ? rng.int(0, 1) : 0);
     let az = rng.range(0, 6.28);
     for (let k = 0; k < arms; k++) {
@@ -354,13 +382,14 @@ export function buildCactus(variant: number): THREE.Group {
           [UP.clone().addScaledVector(out, 0.04).normalize(), rise],
         ]),
         R * rng.range(0.62, 0.75),
-        9,
+        8,
         noise,
+        lod,
       );
     }
     if (v === 3) {
       // a young column beside the older one
-      cactusStem(md, bentPath(v3(0.55, -0.15, 0.3), [[v3(0.05, 1, 0).normalize(), 1.1]]), 0.15, 10, noise);
+      cactusStem(md, bentPath(v3(0.55, -0.15, 0.3), [[v3(0.05, 1, 0).normalize(), 1.1]]), 0.15, 8, noise, lod);
     }
   }
   const g = groupOf([[md, barkMat('cactus', 0), 'cactus']]);
@@ -482,10 +511,10 @@ export function buildFlowerBed(variant: number): THREE.Group {
   const g = new THREE.Group();
   const km = new THREE.Mesh(kg, graniteMaterial());
   km.name = 'kerb';
-  const sm = new THREE.Mesh(sg, barkMaterial('soil', st.map, st.normal, { roughness: 0.95 }));
+  const sm = new THREE.Mesh(sg, barkMaterial('soil', st.map, st.normal, { roughness: 0.95, fade: false }));
   sm.name = 'soil';
   g.add(km, sm);
-  const fm = new THREE.Mesh(flowers.build(), foliageMaterial('flowers', fa.tex, { sway: 0.06, translucency: 0.4, roughness: 0.75 }));
+  const fm = new THREE.Mesh(flowers.build(), leafMaterial('ground'));
   fm.name = 'flowers';
   g.add(fm);
   g.userData.tris = kerb.tris + soil.tris + flowers.tris;
@@ -572,6 +601,8 @@ export function buildHedge(variant: number): THREE.Group {
     const m = new THREE.MeshStandardMaterial({ map: ht.map, normalMap: ht.normal, vertexColors: true, roughness: 0.82, metalness: 0 });
     m.normalScale.set(1.4, 1.4);
     m.userData.sway = 0.004;
+    // waist-high clipped hedge: never hides the view, keep it solid near the camera
+    m.userData.fadeNear = false;
     return m;
   });
   const g = new THREE.Group();

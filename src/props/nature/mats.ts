@@ -18,7 +18,7 @@
 // and released by disposeNatureResources().
 
 import * as THREE from 'three';
-import type { QualityLevel } from '../../core/contracts';
+import type { QualityLevel, QualitySettings } from '../../core/contracts';
 import { clearNoiseCache } from './tex';
 
 // ---------------------------------------------------------------------------
@@ -27,16 +27,47 @@ import { clearNoiseCache } from './tex';
 let quality: QualityLevel = 'medium';
 
 /**
- * Detail tier used by builders created after this call (leaf-card counts,
- * radial segments). Default 'medium'.
+ * Default detail tier for builds that do not pass QualitySettings (legacy
+ * callers / harnesses). Default 'medium'.
  */
 export function setNatureQuality(level: QualityLevel): void {
   quality = level;
 }
 
+/** Current detail tier. */
+export function natureQuality(): QualityLevel {
+  return quality;
+}
+
+/**
+ * Run a builder at the tier of `q` (falls back to the default tier when q is
+ * undefined). Builders read the tier through detail() / texLow().
+ */
+export function withQuality<T>(q: QualitySettings | QualityLevel | undefined, fn: () => T): T {
+  const level = typeof q === 'string' ? q : q?.level;
+  if (!level || level === quality) return fn();
+  const prev = quality;
+  quality = level;
+  try {
+    return fn();
+  } finally {
+    quality = prev;
+  }
+}
+
 /** Multipliers for the current tier. */
 export function detail(): { cards: number; seg: number } {
   return quality === 'low' ? { cards: 0.6, seg: 0.75 } : quality === 'high' ? { cards: 1.25, seg: 1.25 } : { cards: 1, seg: 1 };
+}
+
+/** Low tier: half-resolution bark / surface textures and atlases without their top mip. */
+export function texLow(): boolean {
+  return quality === 'low';
+}
+
+/** Cache-key suffix for tier-dependent textures. */
+export function texTier(): string {
+  return quality === 'low' ? '@lo' : '';
 }
 
 // ---------------------------------------------------------------------------
@@ -55,6 +86,11 @@ export function cachedTexture<T extends THREE.Texture>(key: string, make: () => 
     textures.set(key, t);
   }
   return t;
+}
+
+/** Is a texture with this key cached already? */
+export function hasCachedTexture(key: string): boolean {
+  return textures.has(key);
 }
 
 /** Cached material by key. */
@@ -152,7 +188,7 @@ export class FoliageMaterial extends THREE.MeshStandardMaterial {
 
 /** Foliage material for an atlas (cached by key). */
 export function foliageMaterial(key: string, map: THREE.Texture, opts: { sway: number; translucency?: number; roughness?: number; color?: number; alphaTest?: number }): FoliageMaterial {
-  return cachedMaterial(`leaf:${key}`, () => {
+  return cachedMaterial(`leaf:${key}#${map.uuid.slice(0, 8)}`, () => {
     const m = new FoliageMaterial({
       map,
       translucency: opts.translucency ?? 0.5,
@@ -161,15 +197,33 @@ export function foliageMaterial(key: string, map: THREE.Texture, opts: { sway: n
       alphaTest: opts.alphaTest ?? 0.5,
     });
     m.userData.sway = opts.sway;
+    // near-camera dissolve (props layer) for occluding leaves / fronds
+    m.userData.foliage = true;
     return m;
   });
 }
 
+/**
+ * The two shared foliage materials (see atlases.ts sheets): every tree /
+ * palm / bamboo / thorn-bush card uses `trees`, every fern / grass / reed /
+ * flower card `ground`. One material each = one batch (draw call) each.
+ */
+export const LEAF_PARAMS = {
+  trees: { sway: 0.011, translucency: 0.45, roughness: 0.78 },
+  ground: { sway: 0.065, translucency: 0.55, roughness: 0.78 },
+} as const;
+
 // ---------------------------------------------------------------------------
 // Bark / solid textured surfaces
 
-export function barkMaterial(key: string, map: THREE.Texture, normalMap: THREE.Texture, opts: { sway?: number; roughness?: number; normalScale?: number; color?: number } = {}): THREE.MeshStandardMaterial {
-  return cachedMaterial(`bark:${key}`, () => {
+export function barkMaterial(
+  key: string,
+  map: THREE.Texture,
+  normalMap: THREE.Texture,
+  opts: { sway?: number; roughness?: number; normalScale?: number; color?: number; fade?: boolean } = {},
+): THREE.MeshStandardMaterial {
+  // the texture set (tier resolution) is part of the identity
+  return cachedMaterial(`bark:${key}#${map.uuid.slice(0, 8)}`, () => {
     const m = new THREE.MeshStandardMaterial({
       map,
       normalMap,
@@ -181,6 +235,9 @@ export function barkMaterial(key: string, map: THREE.Texture, normalMap: THREE.T
     const ns = opts.normalScale ?? 1;
     m.normalScale.set(ns, ns);
     if (opts.sway) m.userData.sway = opts.sway;
+    // trunks / stems dissolve near the camera with their foliage; ground-level
+    // surfaces (soil, log ends) opt out
+    m.userData.fadeNear = opts.fade ?? true;
     return m;
   });
 }

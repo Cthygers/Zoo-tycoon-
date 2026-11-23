@@ -1,4 +1,11 @@
 // Quality tiers and device heuristics for the renderer.
+//
+//  low:    1× pixels, no MSAA, 1024² shadows over a short distance, sparse
+//          short grass, ~450 impostor trees, no post-processing.
+//  medium: ≤1.5× pixels, MSAA canvas, 2048² shadows, grass, ~900 trees; still
+//          no post chain (colour grade is part of the tone-mapping curve).
+//  high:   ≤2× pixels, 3072² shadows, dense grass, ~1500 trees, HDR target
+//          with night bloom.
 
 import type { QualityLevel, QualitySettings } from '../core/contracts';
 
@@ -21,7 +28,9 @@ const TIERS: Record<QualityLevel, QualitySettings> = {
     shadows: true,
     shadowMapSize: 2048,
     grassDensity: 0.5,
-    postFX: true,
+    // direct rendering into the MSAA canvas: no float target / resolve /
+    // extra full-screen passes (the grade lives in the tone-mapping curve)
+    postFX: false,
     detailDistance: 40,
     creatureDetail: 1,
   },
@@ -30,7 +39,7 @@ const TIERS: Record<QualityLevel, QualitySettings> = {
     pixelRatio: 2,
     antialias: true,
     shadows: true,
-    shadowMapSize: 4096,
+    shadowMapSize: 3072,
     grassDensity: 1,
     postFX: true,
     detailDistance: 55,

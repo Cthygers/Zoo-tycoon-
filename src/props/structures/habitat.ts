@@ -5,7 +5,8 @@ import * as THREE from 'three';
 import { Noise, Rng } from '../../core/rng';
 import { projectBoxUVs } from '../materials';
 import { registerProp } from '../registry';
-import { box, cyl, displace, gablePlanes, Kit, roof, rod, skillionPlane, V, wall } from './kit';
+import { tiered } from './tiers';
+import { box, cyl, displace, gablePlanes, Kit, kitLod, roof, rod, segs, segScale, skillionPlane, V, wall } from './kit';
 import * as M from './mats';
 import { surfaceNets } from './surfacenets';
 
@@ -13,8 +14,9 @@ import { surfaceNets } from './surfacenets';
 // helpers
 
 /** Lumpy heap (hay / straw / meat): flattened-bottom ellipsoid with noise. */
-function heap(rx: number, h: number, rz: number, seed: number, amp: number, tile: number, segs: [number, number] = [14, 8]): THREE.BufferGeometry {
-  const g = new THREE.SphereGeometry(1, segs[0], segs[1]);
+function heap(rx: number, h: number, rz: number, seed: number, amp: number, tile: number, sg: [number, number] = [14, 8]): THREE.BufferGeometry {
+  const lod = kitLod();
+  const g = new THREE.SphereGeometry(1, lod ? Math.max(6, sg[0] >> 1) : segs(sg[0]), lod ? Math.max(4, sg[1] >> 1) : segs(sg[1]));
   const p = g.getAttribute('position') as THREE.BufferAttribute;
   const n = new Noise(seed);
   for (let i = 0; i < p.count; i++) {
@@ -226,7 +228,9 @@ function buildDen(v: number): THREE.Object3D {
     d += n.noise3(x * 6, y * 6, z * 6) * 0.005;
     return d;
   };
-  const idxG = surfaceNets(sdf, { min: V(-2.05, -0.3, -2.05), max: V(2.05, 2.35, 2.05), cell: 0.19 }, detail);
+  // cell size: tier / LOD (the distant den is a ~4× coarser mesh of the same field)
+  const cell = kitLod() ? 0.36 : 0.19 / Math.sqrt(Math.min(1.1, segScale()));
+  const idxG = surfaceNets(sdf, { min: V(-2.05, -0.3, -2.05), max: V(2.05, 2.35, 2.05), cell }, detail);
   // clamp to the footprint
   const ip = idxG.getAttribute('position') as THREE.BufferAttribute;
   for (let i = 0; i < ip.count; i++) {
@@ -344,12 +348,12 @@ function buildDen(v: number): THREE.Object3D {
 // ---------------------------------------------------------------------------
 // Enrichment ball (0.9 m hard plastic, scuffed)
 
-const BALL_COLORS = [0x2c5577, 0x8a2f26, 0x3c6136];
+export const BALL_COLORS = [0x2c5577, 0x8a2f26, 0x3c6136];
 
 function buildBall(v: number): THREE.Object3D {
   const k = new Kit();
   const r = 0.45;
-  const g = new THREE.SphereGeometry(r, 26, 16);
+  const g = kitLod() ? new THREE.SphereGeometry(r, 12, 8) : new THREE.SphereGeometry(r, segs(26), segs(16));
   g.scale(1, 0.965, 1);
   // a couple of shallow dents
   const n = new Noise(7 + v);
@@ -663,12 +667,12 @@ function buildTrough(v: number): THREE.Object3D {
 // ---------------------------------------------------------------------------
 
 export function registerHabitat(): void {
-  registerProp('shelter_wood', { variants: 3, build: buildShelter });
-  registerProp('shelter_cave', { variants: 2, build: buildDen });
-  registerProp('toy_ball', { variants: 3, build: buildBall, jitter: { yaw: true, scale: [0.95, 1.05] } });
-  registerProp('climbing_frame', { variants: 1, build: buildClimbing });
-  registerProp('feeder_hay', { variants: 2, build: buildHayFeeder });
-  registerProp('feeder_meat', { variants: 2, build: buildMeat });
-  registerProp('water_trough', { variants: 2, build: buildTrough });
+  registerProp('shelter_wood', { variants: 3, ...tiered(buildShelter, false) });
+  registerProp('shelter_cave', { variants: 2, ...tiered(buildDen) });
+  registerProp('toy_ball', { variants: 3, ...tiered(buildBall), jitter: { yaw: true, scale: [0.95, 1.05] } });
+  registerProp('climbing_frame', { variants: 1, ...tiered(buildClimbing) });
+  registerProp('feeder_hay', { variants: 2, ...tiered(buildHayFeeder) });
+  registerProp('feeder_meat', { variants: 2, ...tiered(buildMeat) });
+  registerProp('water_trough', { variants: 2, ...tiered(buildTrough, false) });
 }
 

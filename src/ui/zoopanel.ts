@@ -2,27 +2,27 @@
 // and settings (graphics quality, sound, save, new game). Refreshes at ~2 Hz
 // while open.
 
-import type { IRenderContext, ISimulation, QualityLevel } from '../core/contracts';
+import { QUALITY_KEY, SOUND_KEY } from '../core/constants';
+import type { IAudio, IRenderContext, ISimulation, QualityLevel } from '../core/contracts';
 import type { LedgerEntry } from '../core/types';
-import { button, el, escapeHtml, fmtMoney, fmtPct, setText, storageGet, storageSet, swallowPointer, toggleClass } from './dom';
+import { button, el, escapeHtml, fmtMoney, fmtPct, setText, storageSet, swallowPointer, toggleClass } from './dom';
 import { icon, type IconName } from './icons';
 import { logoSvg } from './screens';
 import { showDialog } from './panels';
+import { cue } from './sound';
 
 export type ZooTab = 'finance' | 'goals' | 'stats' | 'settings';
 
 export interface ZooPanelHost {
   sim: ISimulation;
   ctx: IRenderContext;
+  audio: IAudio;
   uiRoot: HTMLElement;
   save(): void;
   newGame(): void;
   toast(text: string, kind: 'info' | 'good' | 'warn' | 'bad'): void;
   qualityChanged(q: QualityLevel): void;
 }
-
-export const QUALITY_KEY = 'wildhaven-quality';
-export const SOUND_KEY = 'wildhaven-sound';
 
 const INCOME = '#70a24a';
 const EXPENSE = '#b85a40';
@@ -70,13 +70,21 @@ export class ZooPanel {
   }
 
   open(tab: ZooTab = this.tab): void {
+    if (!this.isOpen) cue('open');
     this.root.classList.remove('hidden');
+    this.root.removeAttribute('aria-hidden');
     this.showTab(tab);
   }
 
   close(): void {
+    if (!this.isOpen) return;
+    cue('close');
     this.root.classList.add('hidden');
+    this.root.setAttribute('aria-hidden', 'true');
     this.refreshFn = null;
+    // a focused control inside the hidden modal would keep swallowing key presses
+    const a = document.activeElement as HTMLElement | null;
+    if (a && this.root.contains(a)) a.blur();
   }
 
   update(dt: number): void {
@@ -149,6 +157,7 @@ export class ZooPanel {
       admission,
     );
     let chartKey = '';
+    let lastTodaySub = '';
     return () => {
       setText(cash.v, fmtMoney(sim.money));
       cash.v.className = `wh-stat-v ${sim.money < 0 ? 'bad' : ''}`;
@@ -157,7 +166,12 @@ export class ZooPanel {
       const net = t.income - t.expenses;
       setText(today.v, fmtMoney(net, { sign: true }));
       today.v.className = `wh-stat-v ${net < 0 ? 'bad' : 'good'}`;
-      setText(today.s, `${fmtMoney(t.income)} in · ${fmtMoney(t.expenses)} out`);
+      // wrap between the two amounts, never inside one
+      const sub = `<span style="white-space:nowrap">${fmtMoney(t.income)} in</span> · <span style="white-space:nowrap">${fmtMoney(t.expenses)} out</span>`;
+      if (sub !== lastTodaySub) {
+        lastTodaySub = sub;
+        today.s.innerHTML = sub;
+      }
       const y = sim.ledger[sim.ledger.length - 1];
       if (y) {
         const yn = y.income - y.expenses;
@@ -270,12 +284,17 @@ export class ZooPanel {
       }),
     );
     seg.append(...qBtns);
-    const soundOn = storageGet(SOUND_KEY) !== 'off';
-    const sw = button(`wh-switch ${soundOn ? 'on' : ''}`, null, null, () => {
-      const on = !sw.classList.contains('on');
+    const audio = this.host.audio;
+    const sw = button(`wh-switch ${audio.enabled ? 'on' : ''}`, null, null, () => {
+      const on = !audio.enabled;
+      audio.setEnabled(on);
+      if (on) audio.resume();
       toggleClass(sw, 'on', on);
-      storageSet(SOUND_KEY, on ? 'on' : 'off');
+      sw.setAttribute('aria-checked', String(on));
+      storageSet(SOUND_KEY, on ? '1' : '0');
     }, 'Sound');
+    sw.setAttribute('role', 'switch');
+    sw.setAttribute('aria-checked', String(audio.enabled));
     const row = (title: string, sub: string, ctrl: HTMLElement) =>
       el('div', 'wh-setting', [el('div', { class: 'wh-setting-t', html: `<b>${escapeHtml(title)}</b><span>${escapeHtml(sub)}</span>` }), ctrl]);
     this.body.append(
@@ -305,7 +324,13 @@ export class ZooPanel {
           }
         }),
       ),
-      el('div', { class: 'wh-note', attrs: { style: 'margin-top:14px' }, text: 'Wildhaven Zoo · camera: drag to pan, pinch to zoom, twist to rotate, two-finger drag up/down to tilt. Mouse: right-drag rotates, wheel zooms, WASD/QE.' }),
+      el('div', {
+        class: 'wh-note',
+        attrs: { style: 'margin-top:14px' },
+        html:
+          '<span class="wh-only-touch">Camera: drag to pan, pinch to zoom, twist with two fingers to rotate, slide two fingers up or down to tilt. Android back closes panels.</span>' +
+          '<span class="wh-only-mouse">Camera: drag to pan, right-drag to rotate, wheel to zoom, WASD / QE to move and turn. Esc closes panels, R rotates, Space pauses.</span>',
+      }),
     );
   }
 
@@ -322,11 +347,12 @@ function statHtml(k: string, v: string, ic: IconName, cls = ''): string {
 function barChart(days: LedgerEntry[], today: number, tip: HTMLElement): SVGSVGElement {
   const W = 360,
     H = 150,
-    padL = 34,
     padB = 18,
     padT = 8;
   const max = Math.max(100, ...days.map((d) => Math.max(d.income, d.expenses)));
   const nice = niceMax(max);
+  // room for the widest axis label ("$2.5M", "$250k" …) at 10 px
+  const padL = 12 + Math.max(shortMoney(nice).length, shortMoney(nice / 2).length) * 6;
   const plotW = W - padL - 4,
     plotH = H - padB - padT;
   const n = Math.max(days.length, 7);

@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { ENTRANCE_TILE, MAP_W, START_MONEY, TILE } from '../src/core/constants';
+import { ENTRANCE_TILE, MAP_W, START_MONEY, TILE, WATER_LEVEL } from '../src/core/constants';
 import { EventBus, type GameEvents } from '../src/core/events';
 import { PathType, Terrain } from '../src/core/types';
 import { buildDemoZoo } from '../src/demo';
+import { OBJECTS_BY_ID } from '../src/data/objects';
+import { SPECIES_BY_ID } from '../src/data/species';
 import { createSimulation } from '../src/sim';
+import { QP_INSIDE, QP_SERVE } from '../src/sim/queues';
 import type { Simulation } from '../src/sim/simulation';
 
 const EX = ENTRANCE_TILE.x;
@@ -82,9 +85,11 @@ describe('commands', () => {
     const money = sim.money;
     const r = sim.paintTerrain({ x0: 2, z0: 2, x1: 4, z1: 4 }, Terrain.Sand, true);
     expect(r.ok).toBe(true);
-    expect(r.cost).toBe(9 * 4);
+    expect(r.cost).toBe(9 * sim.terrainCost(Terrain.Sand));
     const w = sim.paintTerrain({ x0: 2, z0: 2, x1: 3, z1: 3 }, Terrain.Water, true);
-    expect(w.cost).toBe(4 * 12);
+    expect(w.cost).toBe(4 * sim.terrainCost(Terrain.Water));
+    expect(sim.terrainCost(Terrain.Water)).toBeGreaterThan(sim.terrainCost(Terrain.Grass));
+    expect(sim.terrainCost(Terrain.DeepWater)).toBeGreaterThan(sim.terrainCost(Terrain.Water));
     expect(sim.placeFences(sim.world.edgesAroundRect({ x0: 2, z0: 2, x1: 4, z1: 4 }), 1, true).cost).toBe(12 * 30);
     expect(sim.world.revision).toBe(rev);
     expect(sim.money).toBe(money);
@@ -170,6 +175,117 @@ describe('commands', () => {
     expect(() => {
       for (let i = 0; i < 100; i++) sim.update(0.1);
     }).not.toThrow();
+  });
+});
+
+describe('object, habitat and pricing commands', () => {
+  it('removes a single object with a partial refund, leaving paths and fences', () => {
+    const { sim, events } = newSim(12);
+    const hid = buildZoo(sim);
+    const w = sim.world;
+    const feeder = [...w.objects.values()].find((o) => o.defId === 'feeder_hay')!;
+    expect(w.habitats.get(hid)!.objects).toContain(feeder.id);
+    const fences = w.hFence.reduce((n, f) => n + (f ? 1 : 0), 0) + w.vFence.reduce((n, f) => n + (f ? 1 : 0), 0);
+    const paths = w.path.reduce((n, p) => n + (p ? 1 : 0), 0);
+    const removed: number[] = [];
+    events.on('objectRemoved', (e) => removed.push(e.id));
+    const rev = w.revision;
+    const m0 = sim.money;
+    const dry = sim.removeObject(feeder.id, true);
+    expect(dry.ok).toBe(true);
+    expect(dry.cost).toBe(-Math.round(OBJECTS_BY_ID.feeder_hay.cost * 0.4));
+    expect(w.revision).toBe(rev);
+    expect(sim.money).toBe(m0);
+    const r = sim.removeObject(feeder.id);
+    expect(r.ok).toBe(true);
+    expect(sim.money).toBe(m0 - dry.cost);
+    expect(w.objects.has(feeder.id)).toBe(false);
+    expect(removed).toEqual([feeder.id]);
+    expect(w.habitats.get(hid)!.objects).not.toContain(feeder.id);
+    expect(w.hFence.reduce((n, f) => n + (f ? 1 : 0), 0) + w.vFence.reduce((n, f) => n + (f ? 1 : 0), 0)).toBe(fences);
+    expect(w.path.reduce((n, p) => n + (p ? 1 : 0), 0)).toBe(paths);
+    expect(sim.removeObject(feeder.id).ok).toBe(false);
+    const gate = [...w.objects.values()].find((o) => o.defId === 'entrance_gate')!;
+    expect(sim.removeObject(gate.id).ok).toBe(false);
+    expect(w.objects.has(gate.id)).toBe(true);
+  });
+
+  it('sends guests elsewhere when the shop they queue at is removed', () => {
+    const { sim } = newSim(13);
+    buildZoo(sim);
+    buyHerd(sim, 'zebra', 4);
+    hire(sim);
+    sim.setSpeed(3);
+    sim.minuteOfDay = 9 * 60;
+    let shop = 0;
+    for (let i = 0; i < 6000 && !shop; i++) {
+      sim.update(0.1);
+      for (const p of sim.guestSys.queues.points.values()) if (p.line.length >= 1 && p.service !== 'restroom' && p.serving.some(Boolean)) shop = p.obj;
+    }
+    expect(shop).toBeGreaterThan(0);
+    const users = [...sim.guests.values()].filter((g) => g.qObj === shop);
+    expect(users.length).toBeGreaterThan(0);
+    expect(sim.removeObject(shop).ok).toBe(true);
+    sim.update(0.01);
+    expect(sim.guestSys.queues.points.has(shop)).toBe(false);
+    for (const g of users) {
+      expect(g.qObj).not.toBe(shop);
+      if (!g.qObj) expect(g.hidden).toBe(false);
+    }
+    expect(() => {
+      for (let i = 0; i < 300; i++) sim.update(0.1);
+    }).not.toThrow();
+  });
+
+  it('renames habitats with validation', () => {
+    const { sim, events } = newSim(14);
+    const hid = buildZoo(sim);
+    let changed = 0;
+    events.on('habitatsChanged', () => changed++);
+    const r = sim.renameHabitat(hid, '   Zebra   Flats  ');
+    expect(r.ok).toBe(true);
+    expect(r.cost).toBe(0);
+    expect(sim.world.habitats.get(hid)!.name).toBe('Zebra Flats');
+    expect(changed).toBeGreaterThan(0);
+    expect(sim.renameHabitat(hid, '   ').ok).toBe(false);
+    expect(sim.world.habitats.get(hid)!.name).toBe('Zebra Flats');
+    expect(sim.renameHabitat(9999, 'Nowhere').ok).toBe(false);
+    sim.renameHabitat(hid, 'A very long habitat name that goes on and on forever');
+    expect(sim.world.habitats.get(hid)!.name.length).toBeLessThanOrEqual(32);
+    sim.renameHabitat(hid, 'Tab\tand\nnewline');
+    expect(sim.world.habitats.get(hid)!.name).toBe('Tab and newline');
+    // names survive save/load
+    const sim2 = createSimulation(new EventBus(), 2) as Simulation;
+    sim2.newGame();
+    sim2.load(JSON.parse(JSON.stringify(sim.serialize())));
+    expect(sim2.world.habitats.get(hid)!.name).toBe('Tab and newline');
+  });
+
+  it('prices staff and terrain', () => {
+    const { sim } = newSim();
+    expect(sim.staffWage('keeper')).toBe(40);
+    expect(sim.staffWage('groundskeeper')).toBe(30);
+    expect(sim.staffWage('vet')).toBe(60);
+    const before = sim.money;
+    expect(sim.hireStaff('vet', (EX + 0.5) * TILE, (AVENUE + 0.5) * TILE).ok).toBe(true);
+    expect(before - sim.money).toBe(sim.staffWage('vet'));
+    for (const t of [Terrain.Grass, Terrain.DryGrass, Terrain.Dirt, Terrain.Sand, Terrain.Rock, Terrain.Snow, Terrain.Mud, Terrain.Water, Terrain.DeepWater])
+      expect(sim.terrainCost(t)).toBeGreaterThan(0);
+  });
+
+  it('turns shops so their counter opens onto the path', () => {
+    const { sim } = newSim(15);
+    // south of the avenue: only the north side (-Z) touches the path
+    expect(sim.placeObject('shop_drinks', EX - 3, AVENUE + 1, 0).ok).toBe(true);
+    const o = [...sim.world.objects.values()].find((x) => x.defId === 'shop_drinks')!;
+    expect(o.rot).toBe(2);
+    const p = sim.guestSys.queues;
+    sim.update(0.01);
+    const sp = p.points.get(o.id)!;
+    expect(sp).toBeTruthy();
+    // line places stand on walkable path tiles
+    for (let i = 0; i < sp.lx.length; i++) expect(sim.world.isPath(Math.floor(sp.lx[i] / TILE), Math.floor(sp.lz[i] / TILE))).toBe(true);
+    expect(sp.lx.length).toBeGreaterThanOrEqual(5);
   });
 });
 
@@ -348,6 +464,158 @@ describe('simulation over several days', () => {
   });
 });
 
+describe('guests: queues and families', () => {
+  it('queues in order, one customer per counter, with bounded lines and restroom capacity', () => {
+    const { sim } = newSim(31);
+    buildZoo(sim);
+    buyHerd(sim, 'zebra', 5);
+    hire(sim);
+    sim.setSpeed(3);
+    sim.minuteOfDay = 9 * 60;
+    let maxLine = 0,
+      lines = 0,
+      served = 0,
+      maxInside = 0;
+    const seenServe = new Set<number>();
+    for (let i = 0; i < 9000 && sim.day <= 2; i++) {
+      sim.update(0.1);
+      for (const p of sim.guestSys.queues.points.values()) {
+        maxLine = Math.max(maxLine, p.line.length);
+        expect(p.line.length).toBeLessThanOrEqual(p.maxQueue);
+        if (p.line.length) lines++;
+        // place numbers match the order in line
+        p.line.forEach((g, k) => expect(g.qPos).toBe(k));
+        for (let k = 0; k < p.serving.length; k++) {
+          const g = p.serving[k];
+          if (!g) continue;
+          expect(g.qPos).toBe(QP_SERVE + k);
+          seenServe.add(g.id);
+        }
+        if (p.mode === 'enter') {
+          maxInside = Math.max(maxInside, p.busy());
+          expect(p.busy()).toBeLessThanOrEqual(p.capacity);
+          for (const g of p.inside) expect(g.qPos).toBe(QP_INSIDE);
+        }
+      }
+      served = seenServe.size;
+    }
+    expect(served).toBeGreaterThan(8);
+    expect(lines).toBeGreaterThan(5);
+    expect(maxLine).toBeGreaterThanOrEqual(2);
+    expect(maxInside).toBeGreaterThan(0);
+    expect(sim.today.shopIncome + (sim.ledger.at(-1)?.shopIncome ?? 0)).toBeGreaterThan(0);
+  });
+
+  it('children arrive with a parent, follow them and leave together', () => {
+    const { sim } = newSim(32);
+    buildZoo(sim);
+    buyHerd(sim, 'zebra', 5);
+    hire(sim);
+    sim.setSpeed(3);
+    sim.minuteOfDay = 9 * 60;
+    let children = 0,
+      orphans = 0,
+      far = 0,
+      samples = 0;
+    const left = new Map<number, number>();
+    sim.events.on('guestRemoved', (e) => left.set(e.id, sim.time));
+    const leaderOf = new Map<number, number>();
+    for (let i = 0; i < 9000 && sim.day === 1; i++) {
+      sim.update(0.1);
+      if (i % 20) continue;
+      for (const g of sim.guests.values()) {
+        if (!g.appearance.child) continue;
+        samples++;
+        if (!g.leader) {
+          orphans++;
+          continue;
+        }
+        leaderOf.set(g.id, g.leader);
+        const l = sim.guests.get(g.leader)!;
+        expect(l.party).toContain(g.id);
+        expect(l.appearance.child).toBe(false);
+        if (!l.hidden && !g.hidden && g.fstate === 0 && Math.hypot(l.x - g.x, l.z - g.z) > 5) far++;
+      }
+    }
+    children = leaderOf.size;
+    expect(children).toBeGreaterThan(4);
+    expect(orphans).toBe(0);
+    expect(far / samples).toBeLessThan(0.03);
+    // children left within moments of their parent
+    let together = 0,
+      both = 0;
+    for (const [kid, parent] of leaderOf) {
+      if (!left.has(kid) || !left.has(parent)) continue;
+      both++;
+      if (Math.abs(left.get(kid)! - left.get(parent)!) < 6) together++;
+    }
+    expect(both).toBeGreaterThan(4);
+    expect(together / both).toBeGreaterThan(0.9);
+  });
+
+  it('spreads a busy day: no rush to capacity at opening, visitors leave through the evening', () => {
+    const events = new EventBus();
+    const sim = createSimulation(events, 42) as Simulation;
+    sim.newGame();
+    buildDemoZoo(sim);
+    sim.setSpeed(3);
+    sim.minuteOfDay = 7 * 60 + 50;
+    const at = new Map<number, number>();
+    while (sim.minuteOfDay < 21 * 60) {
+      sim.update(0.1);
+      const h = Math.floor(sim.minuteOfDay / 60);
+      if (!at.has(h)) at.set(h, sim.guests.size);
+    }
+    expect(at.get(9)!).toBeLessThan(45);
+    expect(at.get(11)!).toBeGreaterThan(35);
+    expect(at.get(11)!).toBeLessThan(120);
+    expect(at.get(16)!).toBeGreaterThan(100);
+    expect(at.get(21)!).toBeLessThan(at.get(18)! * 0.75);
+    expect(sim.guestsToday).toBeGreaterThan(130);
+    expect(sim.stats().avgGuestHappiness).toBeGreaterThan(0.45);
+  });
+});
+
+describe('animals and water', () => {
+  it('non-swimmers only wade shallows; swimmers float in deep water; big bodies stay inside fences', () => {
+    const events = new EventBus();
+    const sim = createSimulation(events, 42) as Simulation;
+    sim.newGame();
+    buildDemoZoo(sim);
+    sim.setSpeed(3);
+    sim.minuteOfDay = 8 * 60;
+    const w = sim.world;
+    let wading = 0,
+      swimming = 0,
+      tooDeep = 0,
+      noseOut = 0;
+    for (let i = 0; i < 1200; i++) {
+      sim.update(0.1);
+      if (i < 50) continue;
+      for (const a of sim.animals.values()) {
+        const sp = SPECIES_BY_ID[a.speciesId];
+        const depth = WATER_LEVEL - w.heightAt(a.x, a.z);
+        const h = sp.height * (0.45 + 0.55 * a.growth);
+        if (!sp.swims && depth > 0.05) {
+          wading++;
+          if (depth > 0.36 * h) tooDeep++;
+        }
+        if (a.action === 'swim') {
+          swimming++;
+          expect(sp.swims).toBe(true);
+          expect(a.y).toBe(WATER_LEVEL);
+        }
+        const L = sp.length * 0.4 * (0.45 + 0.55 * a.growth);
+        if (w.segmentCrossesFence(a.x, a.z, a.x + Math.sin(a.heading) * L, a.z + Math.cos(a.heading) * L)) noseOut++;
+      }
+    }
+    expect(wading).toBeGreaterThan(100); // flamingos stand in the lagoon margins
+    expect(tooDeep).toBe(0);
+    expect(swimming).toBeGreaterThan(50); // penguins / tigers swim
+    expect(noseOut).toBe(0);
+  });
+});
+
 describe('persistence', () => {
   it('save → load restores an identical game that continues identically', () => {
     const { sim } = newSim(21);
@@ -372,12 +640,44 @@ describe('persistence', () => {
     expect(sim2.guests.size).toBe(sim.guests.size);
     expect(sim2.money).toBe(sim.money);
 
-    // both copies evolve identically from here
+    // saves are rounded to the millimetre, so reload the original from the same save:
+    // from there both copies evolve identically
+    sim.load(JSON.parse(text));
+    expect(sim.serialize()).toEqual(save);
     for (let i = 0; i < 400; i++) {
       sim.update(0.1);
       sim2.update(0.1);
     }
     expect(JSON.stringify(sim2.serialize())).toBe(JSON.stringify(sim.serialize()));
+  });
+
+  it('keeps the save compact and loads old saves without stored habitat ids', () => {
+    const events = new EventBus();
+    const sim = createSimulation(events, 42) as Simulation;
+    sim.newGame();
+    expect(buildDemoZoo(sim).failures).toEqual([]);
+    sim.setSpeed(3);
+    sim.minuteOfDay = 7 * 60 + 50;
+    while (sim.minuteOfDay < 14 * 60) sim.update(0.1);
+    expect(sim.guests.size).toBeGreaterThan(100);
+    const save = sim.serialize() as unknown as Record<string, unknown> & { world: Record<string, unknown> };
+    const text = JSON.stringify(save);
+    expect(text.length).toBeLessThan(140_000);
+    // no float carries more than 3 decimals
+    expect(/\d\.\d{4,}/.test(text)).toBe(false);
+    const ids = [...sim.world.habitats.values()].map((h) => [h.id, h.name] as const);
+    // an old-format save: no habitatRle in the world, a sample tile per habitat instead
+    const old = JSON.parse(text);
+    delete old.world.habitatRle;
+    old.habitatIds = [...sim.world.habitats.values()].map((h) => [h.id, h.tiles[h.tiles.length >> 1]]);
+    const sim2 = createSimulation(new EventBus(), 1) as Simulation;
+    sim2.newGame();
+    sim2.load(old);
+    expect([...sim2.world.habitats.values()].map((h) => [h.id, h.name] as const).sort()).toEqual(ids.slice().sort());
+    for (const a of sim2.animals.values()) expect(sim2.world.habitats.has(a.habitatId!)).toBe(true);
+    expect(() => {
+      for (let i = 0; i < 50; i++) sim2.update(0.1);
+    }).not.toThrow();
   });
 
   it('newGame resets everything', () => {

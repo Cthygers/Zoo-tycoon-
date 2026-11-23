@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import type { NotifyKind } from '../core/events';
 import { el, escapeHtml, fmtMoney, setText, swallowPointer } from './dom';
 import { icon, type IconName } from './icons';
+import { cue } from './sound';
 
 const KIND_ICON: Record<NotifyKind, IconName> = { info: 'info', good: 'good', warn: 'warn', bad: 'bad' };
 
@@ -49,6 +50,7 @@ export class Toasts {
     const rec: ToastRec = { root, text, count: 1, countEl, timer: 0 };
     root.addEventListener('click', (ev) => {
       ev.stopPropagation();
+      cue('tap');
       if (focus) this.onFocus(focus.x, focus.z);
       this.remove(rec);
     });
@@ -175,7 +177,8 @@ export class CostLabel {
     this.root.style.display = 'block';
   }
 
-  update(width: number, height: number): void {
+  /** `maxY`: lowest screen y the label's anchor may sit at (keeps it above the dock / confirm bar). */
+  update(width: number, height: number, maxY = height - 30): void {
     if (!this.anchor) return;
     _v.copy(this.anchor).project(this.camera);
     if (_v.z > 1) {
@@ -189,7 +192,7 @@ export class CostLabel {
     }
     const m = this.halfW + 8;
     const sx = Math.min(width - m, Math.max(m, (_v.x * 0.5 + 0.5) * width));
-    const sy = Math.min(height - 30, Math.max(30, (1 - (_v.y * 0.5 + 0.5)) * height));
+    const sy = Math.min(Math.min(height - 30, maxY), Math.max(100, (1 - (_v.y * 0.5 + 0.5)) * height));
     this.root.style.transform = `translate3d(${sx.toFixed(1)}px, ${sy.toFixed(1)}px, 0) translate(-50%, -135%)`;
   }
 }

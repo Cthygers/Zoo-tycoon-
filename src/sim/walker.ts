@@ -2,9 +2,8 @@
 // with a right-hand lane offset so two-way traffic does not overlap.
 
 import { MAP_W, TILE } from '../core/constants';
-import { PathType } from '../core/types';
 import type { World } from '../core/world';
-import { DECK_Y, type Walker } from './state';
+import type { Walker } from './state';
 
 const TWO_PI = Math.PI * 2;
 const TURN_RATE = 7; // rad/s
@@ -21,13 +20,9 @@ export function turnTowards(w: Walker, target: number, dt: number, rate = TURN_R
   w.heading = Math.abs(d) <= m ? target : wrap(w.heading + Math.sign(d) * m);
 }
 
-/** Ground height for a person (boardwalk decks over water are raised). */
+/** Height of the surface a person stands on (boardwalk decks over water are raised). */
 export function personY(world: World, x: number, z: number): number {
-  const tx = Math.floor(x / TILE),
-    tz = Math.floor(z / TILE);
-  const g = world.heightAt(x, z);
-  if (world.inBounds(tx, tz) && world.path[tz * MAP_W + tx] === PathType.Boardwalk) return Math.max(g, DECK_Y);
-  return g;
+  return world.walkHeightAt(x, z);
 }
 
 /**

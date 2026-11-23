@@ -11,6 +11,7 @@
 // `setupWindMesh(mesh)`. BatchedMesh (batchingMatrix) is supported too.
 
 import * as THREE from 'three';
+import { preFadeHooks } from './lod/fade';
 
 /** Shared uniforms (one object, referenced by every patched program). */
 export const windUniforms = {
@@ -166,8 +167,10 @@ export function updateWind(dt: number, strength?: number): void {
 export function cloneWithHooks<T extends THREE.Material>(material: T): T {
   const c = material.clone() as T;
   const w = windData.get(material);
-  c.onBeforeCompile = w ? w.prev : material.onBeforeCompile;
-  c.customProgramCacheKey = w ? w.prevKey : material.customProgramCacheKey;
+  // the layer's near-camera fade is applied after the wind patch: strip it too
+  const f = preFadeHooks(material);
+  c.onBeforeCompile = w ? w.prev : f ? f.prev : material.onBeforeCompile;
+  c.customProgramCacheKey = w ? w.prevKey : f ? f.prevKey : material.customProgramCacheKey;
   if (hasSway(c)) applyWind(c);
   return c;
 }

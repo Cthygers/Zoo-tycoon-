@@ -2,7 +2,6 @@
 // from core/types with AI bookkeeping. Everything here is plain JSON data so the
 // whole entity can be serialized verbatim and restored exactly.
 
-import { WATER_LEVEL } from '../core/constants';
 import type { AnimalAction, AnimalState, GuestState, StaffState } from '../core/types';
 
 export type AnimalGoal =
@@ -65,8 +64,11 @@ export interface AnimalSim extends AnimalState {
 export const NO_FACE = 99;
 
 export type GuestGoal = 'enter' | 'wander' | 'view' | 'shop' | 'restroom' | 'sit' | 'donate' | 'leave';
-/** 0 walk the path grid, 1 approach a spot inside the tile, 2 perform the action, 3 walk out through the gate. */
-export type WalkPhase = 0 | 1 | 2 | 3;
+/**
+ * 0 walk the path grid, 1 approach a spot inside the tile, 2 perform the action,
+ * 3 walk out through the gate, 4 follow the party leader (children / companions).
+ */
+export type WalkPhase = 0 | 1 | 2 | 3 | 4;
 
 export interface Walker {
   x: number;
@@ -123,6 +125,21 @@ export interface GuestSim extends GuestState, Walker {
   viewed: number[];
   /** 0..1 scenery around the guest (smoothed). */
   scenic: number;
+  /** Shop / restroom object the guest is walking to or queueing at (0 = none). */
+  qObj: number;
+  /** -1 walking to the line; 0.. place in line; QP_SERVE+k at counter / door k; QP_INSIDE inside. */
+  qPos: number;
+  /** Seconds spent waiting in the current line. */
+  qWait: number;
+  /** Party leader's id for companions and children (0 = leads the party / alone). */
+  leader: number;
+  /** Ids of the companions following this guest (leaders only). */
+  party: number[];
+  /** Companion sub-state: 0 follow, 1 walking to a seat, 2 seated. */
+  fstate: number;
+  /** A shop whose queue was too long, avoided until `avoidUntil` (simulated seconds). */
+  avoidObj: number;
+  avoidUntil: number;
 }
 
 export type StaffJob = 'none' | 'service' | 'litter' | 'heal' | 'recapture' | 'patrol';
@@ -148,9 +165,6 @@ export interface HabitatRuntime {
   /** Game minutes since a keeper last serviced it. */
   sinceService: number;
 }
-
-/** Y of boardwalk decks over water (must match src/render/boardwalk.ts DECK_Y). */
-export const DECK_Y = WATER_LEVEL + 0.25;
 
 export const ANIMAL_ACTION_FOR_GOAL: Record<AnimalGoal, AnimalAction> = {
   idle: 'idle',

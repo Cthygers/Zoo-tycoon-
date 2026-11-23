@@ -1,15 +1,15 @@
 // Timber deck for boardwalk path tiles that cross water: individual planks at
-// WATER_LEVEL + 0.25 (ramping up to meet the bank), stringers, posts down to
+// DECK_Y (core/constants; ramping up to meet the bank), stringers, posts down to
 // the lake bed and a simple post-and-rail handrail along open water edges.
 // Boardwalk tiles on dry land are drawn by the ground shader.
 
 import * as THREE from 'three';
-import { MAP_H, MAP_W, TILE, WATER_LEVEL } from '../core/constants';
+import { DECK_Y, MAP_H, MAP_W, TILE } from '../core/constants';
 import { Noise, hashFloat } from '../core/rng';
 import { PathType, isWater, type Terrain } from '../core/types';
 import type { World } from '../core/world';
 
-export const DECK_Y = WATER_LEVEL + 0.25;
+export { DECK_Y };
 const PLANKS = 13;
 const PLANK_T = 0.035;
 

@@ -6,8 +6,9 @@ import type { Tool } from '../core/types';
 import { BIOME_NAME, toolKey, type Category, type CategoryId, type CatalogItem } from './catalog';
 import { button, el, fmtMoney, iconEl, setText, swallowPointer, toggleClass } from './dom';
 import { icon } from './icons';
+import { cue } from './sound';
 import type { ThumbnailService } from './thumbs';
-import type { PendingAction } from './tools';
+import type { BulldozeMode, PendingAction } from './tools';
 
 export interface DockHost {
   sim: ISimulation;
@@ -19,6 +20,7 @@ export interface DockHost {
   rotate(): void;
   setFenceMode(m: 'rect' | 'line'): void;
   setPathStraight(on: boolean): void;
+  setBulldozeMode(m: BulldozeMode): void;
   setBrush(n: number): void;
   confirm(): void;
   cancelPending(): void;
@@ -42,6 +44,7 @@ const TOOL_HINT: Record<string, string> = {
   animal: 'Tap inside a habitat to check it',
   staff: 'Tap a path to hire',
   bulldoze: 'Drag over things to clear them',
+  bulldozeFence: 'Tap a fence run, or drag along fences',
 };
 
 export class Dock {
@@ -70,6 +73,7 @@ export class Dock {
   private tool: Tool = { kind: 'select' };
   private fenceMode: 'rect' | 'line' = 'rect';
   private pathStraight = false;
+  private bulldozeMode: BulldozeMode = 'area';
 
   constructor(private host: DockHost) {
     // ---- category bar
@@ -136,6 +140,8 @@ export class Dock {
   openCategory(id: CategoryId): void {
     const cat = this.host.catalog.find((c) => c.id === id);
     if (!cat) return;
+    if (this.openCat === null) cue('open');
+    else if (this.openCat !== id) cue('tap');
     this.openCat = id;
     this.host.drawerOpened();
     setText(this.drawerTitle, cat.name);
@@ -161,6 +167,7 @@ export class Dock {
 
   closeDrawer(): void {
     if (this.openCat === null) return;
+    cue('close');
     this.openCat = null;
     this.drawer.classList.add('hidden');
     this.refreshCats();
@@ -183,6 +190,7 @@ export class Dock {
     ]);
     root.addEventListener('click', (ev) => {
       ev.stopPropagation();
+      cue('tap');
       this.host.selectItem(item);
     });
     const ref: CardRef = { item, root, price, thumb, loaded: false };
@@ -303,13 +311,23 @@ export class Dock {
       case 'staff':
         hint = TOOL_HINT.staff;
         break;
-      case 'bulldoze':
-        hint = TOOL_HINT.bulldoze;
+      case 'bulldoze': {
+        const area = button(`wh-btn-ghost ${this.bulldozeMode === 'area' ? 'on' : ''}`, 'rect', null, () => this.setBulldozeMode('area'), 'Clear an area');
+        const fence = button(`wh-btn-ghost ${this.bulldozeMode === 'fence' ? 'on' : ''}`, 'fence', null, () => this.setBulldozeMode('fence'), 'Fences only');
+        this.tbOpts.append(area, fence);
+        hint = this.bulldozeMode === 'fence' ? TOOL_HINT.bulldozeFence : TOOL_HINT.bulldoze;
         break;
+      }
       default:
         break;
     }
     setText(this.tbHint, hint);
+  }
+
+  private setBulldozeMode(m: BulldozeMode): void {
+    this.bulldozeMode = m;
+    this.host.setBulldozeMode(m);
+    this.buildOptions();
   }
 
   private setFenceMode(m: 'rect' | 'line'): void {
@@ -341,6 +359,7 @@ export class Dock {
     this.cfSub.className = `wh-cf-sub ${kind}`;
     this.cfOk.innerHTML = `${icon('check')}<span class="wh-btn-label">${p.verb}${amount ? ` ${amount}` : ''}${this.tool.kind === 'staff' && p.cost > 0 ? '/day' : ''}</span>`;
     this.cfOk.disabled = !p.ok;
+    toggleClass(this.cfOk, 'remove', p.verb === 'Remove');
     this.confirmEl.classList.remove('hidden');
   }
 

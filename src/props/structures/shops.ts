@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { projectBoxUVs } from '../materials';
 import { registerProp } from '../registry';
+import { tiered } from './tiers';
 import { door, frame, glazedDoor, glazedWindow, interiorBox, post, signBoard, signFace, wallLantern } from './common';
 import { box, cyl, gableEnd, gablePlanes, hipPlanes, Kit, lathe, mat, quad, rod, roof, skillionPlane, V, wall } from './kit';
 import * as M from './mats';
@@ -224,7 +225,7 @@ function buildDrinks(v: number): THREE.Object3D {
 // Ice-cream cart (1×1): painted cart on two spoked wheels, stainless lids,
 // striped parasol.
 
-const PARASOL: [number, number][] = [
+export const PARASOL: [number, number][] = [
   [0x8e3029, 0xe4d9c0],
   [0x2f6564, 0xe4d9c0],
   [0xb48a35, 0xe7dfca],
@@ -290,7 +291,7 @@ function buildIceCream(v: number): THREE.Object3D {
     pts.push([R * t, 2.34 - 0.36 * Math.pow(t, 1.35)]);
   }
   pts.reverse();
-  const canopy = lathe(pts, gores * 2, { tile: 1 });
+  const canopy = lathe(pts, gores * 2, { tile: 1, fixed: true });
   // flat facets per gore: rebuild as non-indexed with flat normals + stripe UVs
   const cp = canopy.getAttribute('position') as THREE.BufferAttribute;
   const cuv = canopy.getAttribute('uv') as THREE.BufferAttribute;
@@ -311,7 +312,7 @@ function buildIceCream(v: number): THREE.Object3D {
   const fab = M.fabric(ca, cb);
   k.add(fab, canopy.translate(pole.x, 0, pole.z));
   // valance skirt
-  const val = cyl(R * 0.985, R * 0.985, 0.12, gores * 2, { caps: false });
+  const val = cyl(R * 0.985, R * 0.985, 0.12, gores * 2, { caps: false, fixed: true });
   const vuv = val.getAttribute('uv') as THREE.BufferAttribute;
   const vpos = val.getAttribute('position') as THREE.BufferAttribute;
   for (let i = 0; i < vuv.count; i++) {
@@ -428,9 +429,9 @@ function buildGift(v: number): THREE.Object3D {
 // ---------------------------------------------------------------------------
 
 export function registerShops(): void {
-  registerProp('shop_snack', { variants: 2, build: buildSnack });
-  registerProp('shop_drinks', { variants: 2, build: buildDrinks });
-  registerProp('shop_icecream', { variants: 3, build: buildIceCream });
-  registerProp('shop_gift', { variants: 2, build: buildGift });
+  registerProp('shop_snack', { variants: 2, ...tiered(buildSnack) });
+  registerProp('shop_drinks', { variants: 2, ...tiered(buildDrinks) });
+  registerProp('shop_icecream', { variants: 3, ...tiered(buildIceCream) });
+  registerProp('shop_gift', { variants: 2, ...tiered(buildGift) });
 }
 

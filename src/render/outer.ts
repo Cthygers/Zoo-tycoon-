@@ -1,13 +1,15 @@
 // Decorative landscape around the playable map so there is never a visible
 // world edge: rolling meadows rising into hills out to OUTER_RING metres (same
-// ground shader as the map), a coarse far ring that keeps climbing into the
-// haze, an instanced low-poly forest and two ranges of distant mountains with
-// aerial perspective.
+// ground shader as the map; a graded grid, 4 m cells at the border growing to
+// ~12 m), a coarse far ring that keeps climbing into the haze, an impostor
+// forest (forest.ts) with soft ground shadows and two ranges of distant
+// mountains with aerial perspective.
 
 import * as THREE from 'three';
 import { OUTER_RING, WORLD_H, WORLD_W } from '../core/constants';
 import { Noise, clamp, smoothstep } from '../core/rng';
 import type { World } from '../core/world';
+import { DistantForest, type ForestTree } from './forest';
 
 const CELL = 4; // metres per near-ring cell
 const _m4 = new THREE.Matrix4();
@@ -73,35 +75,55 @@ function normalAt(h: OuterHeight, x: number, z: number, e: number, out: THREE.Ve
   return out.set(hl - hr, 2 * e, hd - hu).normalize();
 }
 
-/** Grid ring between the map border and OUTER_RING (shares the ground material). */
+/**
+ * Grid coordinates along one axis: 4 m cells across the map, outside it cells
+ * growing by 0.6 m each step until OUTER_RING is reached.
+ */
+function ringAxis(size: number): number[] {
+  const inner: number[] = [];
+  for (let x = 0; x <= size + 1e-6; x += CELL) inner.push(x);
+  const out: number[] = [];
+  let x = 0,
+    step = CELL;
+  while (x > -OUTER_RING + 1e-6) {
+    x = Math.max(x - step, -OUTER_RING);
+    if (x - -OUTER_RING < step * 0.5) x = -OUTER_RING; // no sliver cell at the end
+    out.push(x);
+    step += 0.6;
+  }
+  const before = out.slice().reverse();
+  const after = out.map((v) => size - v);
+  return [...before, ...inner, ...after];
+}
+
+/** Graded grid ring between the map border and OUTER_RING (shares the ground material). */
 function buildNearRing(h: OuterHeight, world: World): THREE.BufferGeometry {
-  const minC = -Math.ceil(OUTER_RING / CELL) * CELL;
-  const cells = Math.round((WORLD_W + 2 * -minC) / CELL);
-  const cellsZ = Math.round((WORLD_H + 2 * -minC) / CELL);
-  const n = cells + 1,
-    nz = cellsZ + 1;
+  const xs = ringAxis(WORLD_W),
+    zs = ringAxis(WORLD_H);
+  const n = xs.length,
+    nz = zs.length;
   const pos = new Float32Array(n * nz * 3);
   const nrm = new Float32Array(n * nz * 3);
   const v3 = new THREE.Vector3();
   for (let j = 0; j < nz; j++)
     for (let i = 0; i < n; i++) {
-      const x = minC + i * CELL,
-        z = minC + j * CELL;
+      const x = xs[i],
+        z = zs[j];
       const k = (j * n + i) * 3;
       pos[k] = x;
       pos[k + 1] = ringHeight(h, world, x, z);
       pos[k + 2] = z;
-      normalAt(h, x, z, 1.5, v3);
+      normalAt(h, x, z, 1.5 + 0.02 * OuterHeight.outside(x, z), v3);
       nrm[k] = v3.x;
       nrm[k + 1] = v3.y;
       nrm[k + 2] = v3.z;
     }
   const idx: number[] = [];
-  for (let j = 0; j < cellsZ; j++)
-    for (let i = 0; i < cells; i++) {
-      const x0 = minC + i * CELL,
-        z0 = minC + j * CELL;
-      if (x0 >= 0 && x0 + CELL <= WORLD_W && z0 >= 0 && z0 + CELL <= WORLD_H) continue; // inside the map
+  for (let j = 0; j < nz - 1; j++)
+    for (let i = 0; i < n - 1; i++) {
+      const x0 = xs[i],
+        z0 = zs[j];
+      if (x0 >= 0 && xs[i + 1] <= WORLD_W && z0 >= 0 && zs[j + 1] <= WORLD_H) continue; // inside the map
       const a = j * n + i,
         b = a + 1,
         c = a + n,
@@ -119,8 +141,8 @@ function buildNearRing(h: OuterHeight, world: World): THREE.BufferGeometry {
 /** Polar ring from just inside the near ring out to the horizon. */
 function buildFarRing(h: OuterHeight): THREE.BufferGeometry {
   const r0 = WORLD_W / 2 + OUTER_RING - 10;
-  const radial = 22,
-    ang = 120;
+  const radial = 16,
+    ang = 96;
   const pos = new Float32Array((radial + 1) * ang * 3);
   const nrm = new Float32Array((radial + 1) * ang * 3);
   const v3 = new THREE.Vector3();
@@ -161,154 +183,6 @@ function buildFarRing(h: OuterHeight): THREE.BufferGeometry {
 
 // ------------------------------------------------------------------ forest
 
-function crownBlob(rng: () => number, detail: number): THREE.BufferGeometry {
-  const g = new THREE.IcosahedronGeometry(1, detail);
-  const p = g.getAttribute('position') as THREE.BufferAttribute;
-  const v = new THREE.Vector3();
-  const noise = new Noise(Math.floor(rng() * 1e6));
-  for (let i = 0; i < p.count; i++) {
-    v.fromBufferAttribute(p, i);
-    const k = 1 + 0.22 * noise.noise3(v.x * 1.6, v.y * 1.6, v.z * 1.6);
-    v.multiplyScalar(k);
-    if (v.y < 0) v.y *= 0.55;
-    p.setXYZ(i, v.x, v.y, v.z);
-  }
-  g.computeVertexNormals();
-  // soften: blend toward spherical normals
-  const nAttr = g.getAttribute('normal') as THREE.BufferAttribute;
-  const n = new THREE.Vector3();
-  for (let i = 0; i < nAttr.count; i++) {
-    v.fromBufferAttribute(p, i).normalize();
-    n.fromBufferAttribute(nAttr, i).lerp(v, 0.6).normalize();
-    nAttr.setXYZ(i, n.x, n.y, n.z);
-  }
-  return g;
-}
-
-function withColor(g: THREE.BufferGeometry, fn: (y: number) => [number, number, number]): THREE.BufferGeometry {
-  const p = g.getAttribute('position') as THREE.BufferAttribute;
-  const col = new Float32Array(p.count * 3);
-  for (let i = 0; i < p.count; i++) {
-    const c = fn(p.getY(i));
-    col[i * 3] = c[0];
-    col[i * 3 + 1] = c[1];
-    col[i * 3 + 2] = c[2];
-  }
-  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  return g;
-}
-
-function mergeGeos(geos: THREE.BufferGeometry[]): THREE.BufferGeometry {
-  let vCount = 0,
-    iCount = 0;
-  const prepared = geos;
-  for (const g of prepared) {
-    vCount += g.getAttribute('position').count;
-    iCount += g.index ? g.index.count : g.getAttribute('position').count;
-  }
-  const pos = new Float32Array(vCount * 3),
-    nrm = new Float32Array(vCount * 3),
-    col = new Float32Array(vCount * 3);
-  const idx = new Uint32Array(iCount);
-  let vo = 0,
-    io = 0;
-  for (const g of prepared) {
-    const p = g.getAttribute('position') as THREE.BufferAttribute;
-    const n = g.getAttribute('normal') as THREE.BufferAttribute;
-    const c = g.getAttribute('color') as THREE.BufferAttribute;
-    pos.set(p.array as Float32Array, vo * 3);
-    nrm.set(n.array as Float32Array, vo * 3);
-    col.set(c.array as Float32Array, vo * 3);
-    if (g.index) {
-      const gi = g.index.array;
-      for (let i = 0; i < gi.length; i++) idx[io + i] = gi[i] + vo;
-      io += gi.length;
-    } else {
-      for (let i = 0; i < p.count; i++) idx[io + i] = vo + i;
-      io += p.count;
-    }
-    vo += p.count;
-  }
-  const out = new THREE.BufferGeometry();
-  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  out.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
-  out.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  out.setIndex(new THREE.BufferAttribute(idx, 1));
-  for (const g of geos) g.dispose();
-  return out;
-}
-
-/** Point normals of a lump toward the crown centre so overlapping lumps shade as one canopy. */
-function canopyNormals(g: THREE.BufferGeometry, centre: THREE.Vector3, k: number): void {
-  const p = g.getAttribute('position') as THREE.BufferAttribute;
-  const n = g.getAttribute('normal') as THREE.BufferAttribute;
-  const v = new THREE.Vector3(),
-    m = new THREE.Vector3();
-  for (let i = 0; i < p.count; i++) {
-    v.fromBufferAttribute(p, i).sub(centre).normalize();
-    m.fromBufferAttribute(n, i).lerp(v, k).normalize();
-    n.setXYZ(i, m.x, m.y, m.z);
-  }
-}
-
-function broadleafGeometry(seed: number): THREE.BufferGeometry {
-  let s = seed;
-  const rng = () => ((s = (s * 16807) % 2147483647) / 2147483647);
-  const trunk = new THREE.CylinderGeometry(0.18, 0.3, 3.0, 5, 1, true).translate(0, 1.5, 0);
-  const centre = new THREE.Vector3(0, 5.0, 0);
-  const lumps: THREE.BufferGeometry[] = [];
-  const n = 4;
-  for (let i = 0; i < n; i++) {
-    const a = (i / n) * Math.PI * 2 + rng() * 0.8;
-    const top = i === 0;
-    const r = top ? 0 : 1.3 + rng() * 0.5;
-    const sz = top ? 2.3 : 1.7 + rng() * 0.5;
-    const g = crownBlob(rng, 0)
-      .scale(sz, sz * (0.8 + rng() * 0.25), sz)
-      .translate(Math.cos(a) * r, centre.y + (top ? 0.9 : -0.3 + rng() * 0.6), Math.sin(a) * r);
-    canopyNormals(g, centre, 0.82);
-    lumps.push(g);
-  }
-  const col = (y: number): [number, number, number] => {
-    const t = clamp((y - 3.4) / 4.5, 0, 1);
-    return [0.5 + 0.5 * t, 0.56 + 0.44 * t, 0.5 + 0.5 * t];
-  };
-  withColor(trunk, () => [-1, -1, -1]); // marker: trunk (negative = bark colour in shader)
-  for (const c of lumps) withColor(c, col);
-  return mergeGeos([trunk, ...lumps]);
-}
-
-function coniferGeometry(): THREE.BufferGeometry {
-  const trunk = new THREE.CylinderGeometry(0.1, 0.2, 1.4, 5, 1, true).translate(0, 0.7, 0);
-  const tiers: THREE.BufferGeometry[] = [];
-  const levels = 5;
-  for (let i = 0; i < levels; i++) {
-    const t = i / (levels - 1);
-    const rad = 1.9 * (1 - t * 0.78);
-    const h = 2.9 * (1 - t * 0.3);
-    const y = 0.7 + i * 1.75 + h / 2;
-    const c = new THREE.ConeGeometry(rad, h, 8, 1, true).translate(0, y, 0);
-    // jitter the rim so tiers look shaggy rather than geometric
-    const p = c.getAttribute('position') as THREE.BufferAttribute;
-    for (let k = 0; k < p.count; k++) {
-      if (p.getY(k) < y) {
-        const j = 0.82 + 0.3 * Math.abs(Math.sin(k * 2.39 + i * 1.7));
-        p.setXYZ(k, p.getX(k) * j, p.getY(k) - 0.25 * j, p.getZ(k) * j);
-      }
-    }
-    c.computeVertexNormals();
-    canopyNormals(c, new THREE.Vector3(0, y - h * 0.2, 0), 0.62);
-    tiers.push(c);
-  }
-  const col = (y: number): [number, number, number] => {
-    const t = clamp((y - 1.6) / 8, 0, 1);
-    return [0.5 + 0.5 * t, 0.55 + 0.45 * t, 0.5 + 0.5 * t];
-  };
-  withColor(trunk, () => [-1, -1, -1]);
-  for (const c of tiers) withColor(c, col);
-  return mergeGeos([trunk, ...tiers]);
-}
-
 function makeBlobTexture(): THREE.DataTexture {
   const N = 64;
   const d = new Uint8Array(N * N * 4);
@@ -333,6 +207,12 @@ function makeBlobTexture(): THREE.DataTexture {
 
 export interface OuterLandOptions {
   treeCount: number;
+  /** Foliage sprites per detailed / sparse crown. */
+  nearSprites: number;
+  farSprites: number;
+  /** Foliage clump atlas (textures.ts). */
+  foliage: THREE.Texture;
+  msaa: boolean;
 }
 
 export class OuterLand {
@@ -340,7 +220,8 @@ export class OuterLand {
   readonly heights: OuterHeight;
   private near: THREE.Mesh;
   private far: THREE.Mesh;
-  private forest: THREE.InstancedMesh[] = [];
+  forest: DistantForest;
+  private blobPlane = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
   /** x, y, z, height, crown radius per tree (for ground contact shadows). */
   private trees: Float32Array = new Float32Array(0);
   private treeCount = 0;
@@ -349,7 +230,6 @@ export class OuterLand {
   private blobTex: THREE.DataTexture;
   private blobSunElev = -9;
   private blobStrength = -1;
-  private forestMat: THREE.MeshStandardMaterial;
   private mountains: THREE.Mesh;
   private mountainMat: THREE.ShaderMaterial;
   private geos: THREE.BufferGeometry[] = [];
@@ -363,7 +243,6 @@ export class OuterLand {
   constructor(
     private world: World,
     groundMaterial: THREE.Material,
-    noiseTex: THREE.Texture,
     opts: OuterLandOptions,
   ) {
     this.group.name = 'outer-land';
@@ -378,48 +257,6 @@ export class OuterLand {
     this.far.name = 'outer-far';
     this.group.add(this.near, this.far);
 
-    // forest material: vertex colour shading + leafy noise breakup
-    this.forestMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0 });
-    this.forestMat.name = 'outer-forest';
-    const noiseU = { value: noiseTex };
-    this.forestMat.onBeforeCompile = (sh) => {
-      sh.uniforms.uNoise = noiseU;
-      sh.vertexShader = sh.vertexShader
-        .replace('#include <common>', '#include <common>\nvarying vec3 vFPos;\nvarying vec3 vFCol;')
-        .replace(
-          '#include <project_vertex>',
-          `#include <project_vertex>
-          vec4 fwp = modelMatrix * vec4(transformed, 1.0);
-          #ifdef USE_INSTANCING
-            fwp = modelMatrix * instanceMatrix * vec4(transformed, 1.0);
-          #endif
-          vFPos = fwp.xyz;
-          vFCol = vec3(1.0);
-          #ifdef USE_INSTANCING_COLOR
-            vFCol = instanceColor;
-          #endif`,
-        );
-      sh.fragmentShader = sh.fragmentShader
-        .replace('#include <common>', '#include <common>\nuniform sampler2D uNoise;\nvarying vec3 vFPos;\nvarying vec3 vFCol;')
-        .replace(
-          '#include <color_fragment>',
-          `{
-            vec3 vc = vColor.rgb;
-            if (vc.r < 0.0) {
-              diffuseColor.rgb = vec3(0.045, 0.036, 0.028);
-            } else {
-              // leaf clumps: two projections of the noise texture
-              float leaf = texture2D(uNoise, vFPos.xz * 1.3 + vFPos.y * 0.8).b * 0.55
-                         + texture2D(uNoise, vFPos.zy * 1.1 + vFPos.x * 0.3).g * 0.45;
-              // ragged, see-through silhouette toward grazing angles
-              float facing = abs(dot(normalize(vNormal), normalize(vViewPosition)));
-              float lc = smoothstep(0.36, 0.64, leaf);
-              if (lc < (1.0 - facing) * 1.25 - 0.3) discard;
-              diffuseColor.rgb = vc * (0.3 + 1.0 * lc);
-            }
-          }`,
-        );
-    };
     this.blobTex = makeBlobTexture();
     this.blobMat = new THREE.MeshBasicMaterial({
       color: 0x000000,
@@ -432,7 +269,12 @@ export class OuterLand {
       polygonOffsetUnits: -2,
     });
     this.blobMat.name = 'outer-tree-shadow';
-    this.buildForest(opts.treeCount);
+    this.forest = new DistantForest(this.placeTrees(opts.treeCount), opts.foliage, {
+      nearSprites: opts.nearSprites,
+      farSprites: opts.farSprites,
+      msaa: opts.msaa,
+    });
+    this.group.add(this.forest.group);
 
     // mountains
     this.mountainUniforms = {
@@ -484,81 +326,112 @@ export class OuterLand {
     this.group.add(this.mountains);
   }
 
-  private buildForest(count: number) {
+  /**
+   * Scatter the outer trees: an open meadow strip next to the map, then
+   * scattered trees thickening into woodland belts with clearings; conifers
+   * gather in their own stands. Also prepares the blob-shadow instances.
+   */
+  private placeTrees(count: number): ForestTree[] {
     const n = new Noise(this.world.seed + 101);
     let seed = this.world.seed * 13 + 7;
     const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
-    const variants = [broadleafGeometry(11), broadleafGeometry(23), coniferGeometry()];
-    this.geos.push(...variants);
-    // 4 quadrant sectors × 3 variants: compact bounding spheres let frustum
-    // culling drop most of the forest in normal game views
-    const SECT = 4;
-    const lists: THREE.Matrix4[][] = Array.from({ length: 3 * SECT }, () => []);
+    const out: ForestTree[] = [];
     const tdata: number[] = [];
-    const cols: THREE.Color[][] = Array.from({ length: 3 * SECT }, () => []);
-    const m = new THREE.Matrix4(),
-      q = new THREE.Quaternion(),
-      s = new THREE.Vector3(),
-      p = new THREE.Vector3(),
-      up = new THREE.Vector3(0, 1, 0);
-    const maxR = OUTER_RING + 160;
-    let placed = 0,
-      tries = 0;
-    while (placed < count && tries < count * 30) {
+    const maxR = OUTER_RING + 170;
+    const NEAR_BAND = 60;
+    // spatial hash for minimum spacing between trunks
+    const GRID = 8;
+    const grid = new Map<number, number[]>();
+    const key = (gx: number, gz: number) => (gx + 512) * 4096 + (gz + 512);
+    const tooClose = (x: number, z: number, r: number): boolean => {
+      const gx = Math.floor(x / GRID),
+        gz = Math.floor(z / GRID);
+      for (let dz = -1; dz <= 1; dz++)
+        for (let dx = -1; dx <= 1; dx++) {
+          const cell = grid.get(key(gx + dx, gz + dz));
+          if (!cell) continue;
+          for (let i = 0; i < cell.length; i += 3) {
+            const ddx = cell[i] - x,
+              ddz = cell[i + 1] - z;
+            const rr = (r + cell[i + 2]) * 0.55;
+            if (ddx * ddx + ddz * ddz < rr * rr) return true;
+          }
+        }
+      return false;
+    };
+    let tries = 0;
+    while (out.length < count && tries < count * 60) {
       tries++;
-      const x = -maxR + rnd() * (WORLD_W + 2 * maxR);
-      const z = -maxR + rnd() * (WORLD_H + 2 * maxR);
+      // bias candidates toward the map (most views look inward / at the border)
+      const ring = 9 + Math.pow(rnd(), 1.6) * (maxR - 9);
+      const side = rnd() * (2 * (WORLD_W + WORLD_H) + 8 * ring);
+      let x: number, z: number;
+      const W = WORLD_W + 2 * ring,
+        H = WORLD_H + 2 * ring;
+      if (side < W) {
+        x = -ring + side;
+        z = -ring;
+      } else if (side < W + H) {
+        x = WORLD_W + ring;
+        z = -ring + (side - W);
+      } else if (side < 2 * W + H) {
+        x = -ring + (side - W - H);
+        z = WORLD_H + ring;
+      } else {
+        x = -ring;
+        z = -ring + ((side - 2 * W - H) % H);
+      }
+      x += (rnd() - 0.5) * 6;
+      z += (rnd() - 0.5) * 6;
       const d = OuterHeight.outside(x, z);
-      if (d < 10) continue;
-      // density: meadow strip, then scattered trees, then woodland with clearings
-      const wood = n.fbm2(x * 0.012, z * 0.012, 3) * 0.5 + 0.5;
-      let dens = smoothstep(10, 45, d) * (0.25 + 0.75 * smoothstep(0.35, 0.6, wood));
-      dens *= 1 - smoothstep(OUTER_RING + 60, maxR, d) * 0.7;
+      if (d < 9) continue;
+      // woodland patches (≈90 m features) with clearings, plus a few lone trees
+      const wood = n.fbm2(x * 0.011, z * 0.011, 3) * 0.5 + 0.5;
+      let dens = 0.05 + 0.95 * smoothstep(0.42, 0.58, wood);
+      dens *= smoothstep(9, 24, d);
       if (rnd() > dens) continue;
-      const kind = wood > 0.62 && rnd() < 0.7 ? 2 : rnd() < 0.5 ? 0 : 1;
-      const y = this.heights.height(x, z);
-      const sc = (0.75 + rnd() * 0.6) * (kind === 2 ? 1.25 : 1) * (1 + Math.min(d, 200) / 600);
-      p.set(x, y - 0.2, z);
-      q.setFromAxisAngle(up, rnd() * Math.PI * 2);
-      s.set(sc * (0.85 + rnd() * 0.3), sc, sc * (0.85 + rnd() * 0.3));
-      m.compose(p, q, s);
-      const sector = (x < CX ? 0 : 1) + (z < CZ ? 0 : 2);
-      const li = kind * SECT + sector;
-      lists[li].push(m.clone());
-      tdata.push(x, y, z, (kind === 2 ? 10.0 : 7.6) * sc, (kind === 2 ? 1.9 : 3.0) * sc);
-      const hue = kind === 2 ? new THREE.Color(0.035, 0.06, 0.035) : new THREE.Color(0.055, 0.08, 0.03);
-      const v = 0.75 + rnd() * 0.5;
-      hue.multiplyScalar(v);
-      if (kind !== 2 && rnd() < 0.25) hue.lerp(new THREE.Color(0.13, 0.13, 0.05), 0.5);
-      cols[li].push(hue);
-      placed++;
+      const stand = n.fbm2(x * 0.02 + 40, z * 0.02 - 13, 2) * 0.5 + 0.5;
+      const kind: 0 | 1 = stand > 0.57 && rnd() < 0.85 ? 1 : rnd() < 0.07 ? 1 : 0;
+      const grow = 0.8 + 0.4 * smoothstep(0.4, 0.75, wood);
+      const h = (kind === 1 ? 15 + rnd() * 9 : 10 + rnd() * 7) * grow;
+      const width = 0.85 + rnd() * 0.35;
+      const crownR = (kind === 1 ? 0.16 : 0.3) * h * width;
+      if (tooClose(x, z, crownR)) continue;
+      const gx = Math.floor(x / GRID),
+        gz = Math.floor(z / GRID);
+      const cell = grid.get(key(gx, gz)) ?? [];
+      cell.push(x, z, crownR);
+      grid.set(key(gx, gz), cell);
+      const y = this.heights.height(x, z) - 0.15;
+      // linear foliage albedo: broadleaves fresh → olive (a few yellowing),
+      // conifers dark blue-green
+      const c = new THREE.Color();
+      if (kind === 1) {
+        c.setRGB(0.036, 0.06, 0.034).multiplyScalar(0.85 + rnd() * 0.4);
+      } else {
+        const t = rnd();
+        c.setRGB(0.056, 0.1, 0.036).lerp(new THREE.Color(0.085, 0.1, 0.04), t * t);
+        if (rnd() < 0.1) c.lerp(new THREE.Color(0.12, 0.095, 0.04), 0.45);
+        c.multiplyScalar(0.85 + rnd() * 0.35);
+      }
+      out.push({ x, y, z, h, kind, rot: rnd() * Math.PI * 2, width, color: c, near: d < NEAR_BAND });
+      tdata.push(x, y, z, h, crownR);
     }
     this.trees = new Float32Array(tdata);
     this.treeCount = tdata.length / 5;
-    const plane = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
-    this.geos.push(plane);
-    this.blobs = new THREE.InstancedMesh(plane, this.blobMat, Math.max(1, this.treeCount));
+    if (this.blobs) {
+      this.group.remove(this.blobs);
+      this.blobs.dispose();
+    }
+    this.blobSunElev = -9;
+    this.blobStrength = -1;
+    this.blobs = new THREE.InstancedMesh(this.blobPlane, this.blobMat, Math.max(1, this.treeCount));
     this.blobs.count = this.treeCount;
     this.blobs.frustumCulled = false;
     this.blobs.renderOrder = 1;
     this.blobs.name = 'outer-tree-shadows';
     this.group.add(this.blobs);
-    for (let k = 0; k < lists.length; k++) {
-      if (!lists[k].length) continue;
-      const im = new THREE.InstancedMesh(variants[Math.floor(k / SECT)], this.forestMat, lists[k].length);
-      for (let i = 0; i < lists[k].length; i++) {
-        im.setMatrixAt(i, lists[k][i]);
-        im.setColorAt(i, cols[k][i]);
-      }
-      im.instanceMatrix.needsUpdate = true;
-      if (im.instanceColor) im.instanceColor.needsUpdate = true;
-      im.computeBoundingSphere();
-      im.castShadow = false;
-      im.receiveShadow = false;
-      im.name = 'outer-forest';
-      this.forest.push(im);
-      this.group.add(im);
-    }
+    return out;
   }
 
   private buildMountains(): THREE.BufferGeometry {
@@ -611,11 +484,23 @@ export class OuterLand {
     return g;
   }
 
-  /** Objects that should stay out of screen-space AO (thin / distant / transparent). */
-  aoExcluded(): THREE.Object3D[] {
-    const out: THREE.Object3D[] = [...this.forest, this.mountains];
-    if (this.blobs) out.push(this.blobs);
-    return out;
+  /** Rebuild the impostor forest for another quality tier (lighting uniforms are kept). */
+  setForest(opts: OuterLandOptions): void {
+    const old = this.forest;
+    this.group.remove(old.group);
+    this.forest = new DistantForest(this.placeTrees(opts.treeCount), opts.foliage, {
+      nearSprites: opts.nearSprites,
+      farSprites: opts.farSprites,
+      msaa: opts.msaa,
+    });
+    for (const k of Object.keys(old.uniforms)) {
+      const v = old.uniforms[k].value as unknown;
+      const dst = this.forest.uniforms[k];
+      if (v && typeof (v as { clone?: unknown }).clone === 'function' && !(v as THREE.Texture).isTexture) (dst.value as { copy(o: unknown): void }).copy(v);
+      else dst.value = v;
+    }
+    this.group.add(this.forest.group);
+    old.dispose();
   }
 
   /** Re-sample heights next to the map border after terrain edits near the edge. */
@@ -639,7 +524,7 @@ export class OuterLand {
     const strengthChanged = Math.abs(strength - this.blobStrength) > 0.04;
     if (Math.abs(elev - this.blobSunElev) < 0.03 && !strengthChanged) return;
     this.blobStrength = strength;
-    this.blobMat.opacity = 0.55 * strength;
+    this.blobMat.opacity = 0.28 * strength;
     blobs.visible = strength > 0.02;
     if (!blobs.visible) return;
     if (Math.abs(elev - this.blobSunElev) < 0.03) return;
@@ -683,11 +568,11 @@ export class OuterLand {
 
   dispose(): void {
     for (const g of this.geos) g.dispose();
-    for (const f of this.forest) f.dispose();
+    this.forest.dispose();
+    this.blobPlane.dispose();
     this.blobs?.dispose();
     this.blobMat.dispose();
     this.blobTex.dispose();
-    this.forestMat.dispose();
     this.mountainMat.dispose();
   }
 }

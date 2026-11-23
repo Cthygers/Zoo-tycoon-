@@ -2,7 +2,7 @@
 // through fences unless breaking out), swimming, herding, breeding, health,
 // predators, escapes and dung.
 
-import { GAME_MINUTES_PER_SECOND, MAP_W, TILE, WATER_LEVEL } from '../core/constants';
+import { GAME_MINUTES_PER_SECOND, MAP_H, MAP_W, TILE, WATER_LEVEL } from '../core/constants';
 import { Terrain, type SpeciesDef } from '../core/types';
 import { OBJECTS_BY_ID } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
@@ -32,10 +32,28 @@ export function foodScale(sp: SpeciesDef): number {
 export function bodyRadius(sp: SpeciesDef, growth: number): number {
   return Math.max(0.15, Math.min(1.2, sp.length * 0.24)) * (0.45 + 0.55 * growth);
 }
-/** Minimum distance kept from fences (m). */
-function fenceMargin(sp: SpeciesDef, growth: number): number {
-  return Math.max(0.25, Math.min(0.95, sp.length * 0.32)) * (0.5 + 0.5 * growth);
+/** Linear body scale of a growing animal (matches the models' growth scaling). */
+function growthScale(growth: number): number {
+  return 0.45 + 0.55 * growth;
 }
+/** Deepest water (m) a non-swimming species wades into: about a third of its height. */
+export function wadeDepth(sp: SpeciesDef, growth: number): number {
+  return 0.35 * sp.height * growthScale(growth);
+}
+/** Water depth (m) from which a swimming species swims, origin at the water surface. */
+export function swimDepth(sp: SpeciesDef, growth: number): number {
+  return Math.max(0.25, Math.min(1.2, 0.55 * sp.height)) * growthScale(growth);
+}
+/** Half the body length (nose to rump; a tail may overhang a fence). */
+function halfLength(sp: SpeciesDef, growth: number): number {
+  return sp.length * 0.4 * growthScale(growth);
+}
+/** Half the body width. */
+function halfWidth(sp: SpeciesDef, growth: number): number {
+  return Math.max(0.12, Math.min(0.85, 0.13 * sp.length + 0.1)) * growthScale(growth);
+}
+/** Fence posts / rails stand this far into the tile (m). */
+const FENCE_CLEAR = 0.12;
 function turnRate(sp: SpeciesDef): number {
   return Math.max(1.0, Math.min(4.0, 3.2 / Math.sqrt(Math.max(0.5, sp.length / 1.5))));
 }
@@ -58,8 +76,13 @@ export class AnimalSystem {
   // passability context (avoids allocating closures per query)
   private ctxZone = 0;
   private ctxSwims = false;
-  /** Species may wade into shallow water (swimmers and tall animals). */
-  private ctxWades = false;
+  /** Deepest water the current animal may stand in (Infinity for swimmers). */
+  private ctxWade = Infinity;
+  /** Movement tests use the exact water depth at the position instead of the tile centre. */
+  private ctxLoose = false;
+  /** Water depth at each tile centre (refreshed when the world changes). */
+  private depth = new Float32Array(MAP_W * MAP_H);
+  private depthRev = -1;
   private readonly pass: Passable;
   private readonly enterTest: (t: number) => boolean;
   private tmpRoute: number[] = [];
@@ -132,6 +155,12 @@ export class AnimalSystem {
       sinceCall: rng.range(0, 60),
       face: NO_FACE,
     };
+    // placed in water too deep to stand in: start on the nearest wadeable spot
+    if (!sp.swims && hid) {
+      this.setCtx(a, sp);
+      const t0 = this.tileOf(wx, wz);
+      if (!this.enterable(t0) || this.depthAt(wx, wz) > this.ctxWade) this.unstick(a, sp, t0);
+    }
     this.placeY(a, sp);
     sim.animals.set(id, a);
     return a;
@@ -149,10 +178,28 @@ export class AnimalSystem {
     const w = this.sim.world;
     if (w.habitatOf[t] !== this.ctxZone) return false;
     if (this.solid[t]) return false;
-    const ter = w.terrain[t];
-    if (!this.ctxSwims && ter === Terrain.DeepWater) return false;
-    if (!this.ctxWades && ter === Terrain.Water) return false;
+    if (!this.ctxSwims) {
+      const ter = w.terrain[t];
+      if (ter === Terrain.DeepWater) return false;
+      // route only through shallows whose middle is wadeable (moves check the exact depth)
+      if (ter === Terrain.Water && !this.ctxLoose && this.depth[t] > this.ctxWade) return false;
+    }
     return true;
+  }
+
+  /** Water depth (m) at a point (≤ 0 on dry land). */
+  private depthAt(x: number, z: number): number {
+    return WATER_LEVEL - this.sim.world.heightAt(x, z);
+  }
+
+  private refreshDepth() {
+    const w = this.sim.world;
+    if (this.depthRev === w.revision) return;
+    this.depthRev = w.revision;
+    for (let i = 0; i < this.depth.length; i++) {
+      const t = w.terrain[i];
+      this.depth[i] = t === Terrain.Water || t === Terrain.DeepWater ? WATER_LEVEL - w.heightAt(((i % MAP_W) + 0.5) * TILE, (((i / MAP_W) | 0) + 0.5) * TILE) : 0;
+    }
   }
 
   private passable(from: number, to: number): boolean {
@@ -172,9 +219,11 @@ export class AnimalSystem {
 
   private setCtx(a: AnimalSim, sp: SpeciesDef) {
     this.solid = this.sim.solidMask();
+    this.refreshDepth();
     this.ctxZone = a.escaped ? 0 : a.habitatId ?? 0;
     this.ctxSwims = sp.swims;
-    this.ctxWades = sp.swims || sp.height >= 1.2;
+    this.ctxWade = sp.swims ? Infinity : wadeDepth(sp, a.growth);
+    this.ctxLoose = false;
   }
 
   private tileOf(x: number, z: number): number {
@@ -205,10 +254,39 @@ export class AnimalSystem {
     const goal = this.tileOf(tx, tz);
     a.route.length = 0;
     a.routeIdx = 0;
-    if (start !== goal && !this.lineClear(a.x, a.z, tx, tz)) {
+    // non-swimmers only wade where the water stays below about a third of their height
+    if (this.ctxWade < Infinity && this.depthAt(tx, tz) > this.ctxWade * 0.92) {
+      const wd = this.ctxWade * 0.92;
+      let lo = 0,
+        hi = 1;
+      for (let k = 0; k < 8; k++) {
+        const m = (lo + hi) / 2;
+        if (this.depthAt(a.x + (tx - a.x) * m, a.z + (tz - a.z) * m) <= wd) lo = m;
+        else hi = m;
+      }
+      const nx = a.x + (tx - a.x) * lo,
+        nz = a.z + (tz - a.z) * lo;
+      if (Math.hypot(nx - a.x, nz - a.z) < 0.3) return false;
+      tx = nx;
+      tz = nz;
+      if (!this.enterable(this.tileOf(tx, tz))) return false;
+    }
+    // keep the body clear of fences, facing the way it walks in
+    {
+      const h = (tx - a.x) ** 2 + (tz - a.z) ** 2 > 0.25 ? Math.atan2(tx - a.x, tz - a.z) : a.heading;
+      const c = this.tc2;
+      this.clampBody(sp, a.growth, h, tx, tz, c);
+      if (this.tileOf(c.x, c.z) === this.tileOf(tx, tz) || this.enterable(this.tileOf(c.x, c.z))) {
+        tx = c.x;
+        tz = c.z;
+      }
+    }
+    const goal2 = this.tileOf(tx, tz);
+    if (goal2 !== goal && !this.enterable(goal2)) return false;
+    if (start !== goal2 && !this.lineClear(a.x, a.z, tx, tz)) {
       if (this.routeBudget <= 0) return false;
       this.routeBudget--;
-      const r = this.sim.search.route(start, goal, this.pass, maxNodes, this.tmpRoute);
+      const r = this.sim.search.route(start, goal2, this.pass, maxNodes, this.tmpRoute);
       if (!r) return false;
       // drop the final tile (we walk to the exact target inside it)
       for (let i = 0; i < r.length - 1; i++) a.route.push(r[i]);
@@ -226,6 +304,7 @@ export class AnimalSystem {
     return out;
   }
   private tc = { x: 0, z: 0 };
+  private tc2 = { x: 0, z: 0 };
 
   // ================================================================ update
   update(dt: number, hours: number) {
@@ -282,9 +361,15 @@ export class AnimalSystem {
       const hab = w.habitats.get(hid);
       this.sim.notify(`contain:${a.id}`, `${a.name} the ${sp.name} is safely contained in ${hab?.name ?? 'a habitat'}.`, 'good', { x: a.x, z: a.z }, 30);
     }
-    // never stand inside solid objects or deep water we can't swim in
+    // never stand inside solid objects or water too deep to wade
     this.setCtx(a, sp);
-    if (!this.enterable(t)) this.unstick(a, sp, t);
+    this.ctxLoose = true;
+    const deep = this.ctxWade === Infinity ? 0 : this.depthAt(a.x, a.z) / this.ctxWade;
+    const ok = this.enterable(t) && deep <= 1.35;
+    this.ctxLoose = false;
+    if (!ok) this.unstick(a, sp, t);
+    // standing about in water a little too deep (terrain repainted, old save): wade out
+    else if (deep > 1.02 && !a.moving && a.goal !== 'breakout') this.think(a, sp);
   }
 
   private unstick(a: AnimalSim, sp: SpeciesDef, t: number) {
@@ -757,6 +842,8 @@ export class AnimalSystem {
     if (n.social < 0.45 && rng.chance(0.6) && this.chooseSocial(a, sp, hid)) return;
     if (n.enrichment < 0.5 && rng.chance(0.6) && this.choosePlay(a, sp, hid)) return;
 
+    // wading birds spend much of the day filter-feeding in the shallows
+    if (!sp.swims && (sp.terrain[Terrain.Water] ?? 0) >= 0.3 && tiles && rng.chance(0.45) && this.chooseWade(a, sp, tiles.drink)) return;
     // daytime idle behaviours
     const lazy = sp.diet === 'carnivore' ? 0.45 : 0.22;
     const r = rng.float();
@@ -1008,7 +1095,7 @@ export class AnimalSystem {
         if (!w.inBounds(nx, nz)) continue;
         const nt = w.terrain[w.idx(nx, nz)];
         if ((nt === Terrain.Water || nt === Terrain.DeepWater) && w.habitatOf[w.idx(nx, nz)] === hid && !w.fenceBetween(bx, bz, nx, nz)) {
-          const lean = Math.max(0, 0.95 - fenceMargin(sp, a.growth) * 0.6);
+          const lean = Math.max(0, 0.95 - halfWidth(sp, a.growth));
           tx += (nx - bx) * lean;
           tz += (nz - bz) * lean;
           a.face = Math.atan2(nx - bx, nz - bz);
@@ -1055,6 +1142,28 @@ export class AnimalSystem {
     if (!toy || !this.approachObject(a, sp, toy, false)) return false;
     this.setGoal(a, 'play', this.sim.rng.range(8, 16), true);
     return true;
+  }
+
+  /** Stand in the shallows, the water up to a little below the wading limit. */
+  private chooseWade(a: AnimalSim, sp: SpeciesDef, drink: number[]): boolean {
+    const w = this.sim.world;
+    const rng = this.sim.rng;
+    if (!drink.length) return false;
+    const wd = wadeDepth(sp, a.growth);
+    for (let k = 0; k < 10; k++) {
+      const t = drink[Math.floor(rng.float() * drink.length)];
+      if (w.terrain[t] !== Terrain.Water) continue;
+      const x = ((t % MAP_W) + rng.range(0.1, 0.9)) * TILE,
+        z = (((t / MAP_W) | 0) + rng.range(0.1, 0.9)) * TILE;
+      const d = this.depthAt(x, z);
+      if (d < wd * 0.3 || d > wd * 0.85) continue;
+      if (this.goTo(a, sp, x, z)) {
+        a.face = rng.range(-Math.PI, Math.PI);
+        this.setGoal(a, 'graze', rng.range(10, 25), true);
+        return true;
+      }
+    }
+    return false;
   }
 
   private chooseSwim(a: AnimalSim, sp: SpeciesDef, deep: number[]): boolean {
@@ -1153,7 +1262,7 @@ export class AnimalSystem {
       const dx = obj.cx - this.tc.x,
         dz = obj.cz - this.tc.z;
       const d = Math.hypot(dx, dz) || 1;
-      const lean = nearOnly ? 0 : Math.max(0, 0.95 - fenceMargin(sp, a.growth) * 0.5);
+      const lean = nearOnly ? 0 : Math.max(0, 0.95 - Math.max(halfWidth(sp, a.growth), halfLength(sp, a.growth) * 0.55));
       const tx = this.tc.x + (dx / d) * lean,
         tz = this.tc.z + (dz / d) * lean;
       if (this.goTo(a, sp, tx, tz)) {
@@ -1219,9 +1328,8 @@ export class AnimalSystem {
     const tiles = sim.habitatTiles(hid);
     if (!tiles) return false;
     const pool = tiles.interior.length ? tiles.interior : tiles.land;
+    this.setCtx(a, sp);
     this.ctxZone = hid;
-    this.ctxSwims = sp.swims;
-    this.ctxWades = sp.swims || sp.height >= 1.2;
     const t = this.randomTile(pool);
     if (t < 0) return false;
     this.tileCentre(t, this.tc);
@@ -1266,7 +1374,8 @@ export class AnimalSystem {
         wz = this.tc.z;
         const cur = this.tileOf(a.x, a.z);
         const d2 = (wx - a.x) ** 2 + (wz - a.z) ** 2;
-        if (cur === t || d2 < 0.64) {
+        const reach = Math.max(0.8, halfLength(sp, a.growth) * 0.6);
+        if (cur === t || d2 < reach * reach) {
           a.routeIdx++;
           continue;
         }
@@ -1346,55 +1455,124 @@ export class AnimalSystem {
   /** Move to (nx, nz) if legal, sliding along walls. Returns whether the animal moved. */
   private tryMove(a: AnimalSim, sp: SpeciesDef, nx: number, nz: number): boolean {
     this.setCtx(a, sp);
+    this.ctxLoose = true;
     const ct = this.tileOf(a.x, a.z);
-    let nt = this.tileOf(nx, nz);
-    if (nt !== ct && !this.passable(ct, nt)) {
-      const tx = this.tileOf(nx, a.z);
-      if (tx === ct || this.passable(ct, tx)) {
-        nz = a.z;
-        nt = tx;
-      } else {
-        const tz = this.tileOf(a.x, nz);
-        if (tz === ct || this.passable(ct, tz)) {
-          nx = a.x;
-          nt = tz;
-        } else return false;
+    const here = this.ctxWade < Infinity ? this.depthAt(a.x, a.z) : 0;
+    if (!this.moveOk(ct, here, nx, nz)) {
+      if (this.moveOk(ct, here, nx, a.z)) nz = a.z;
+      else if (this.moveOk(ct, here, a.x, nz)) nx = a.x;
+      else {
+        this.ctxLoose = false;
+        return false;
       }
     }
     const ox = a.x,
       oz = a.z;
     a.x = nx;
     a.z = nz;
-    this.applyMargins(a, sp, nt);
+    this.applyMargins(a, sp);
+    this.ctxLoose = false;
     return Math.abs(a.x - ox) + Math.abs(a.z - oz) > 1e-5;
   }
 
-  /** Keep the body away from fences / blocked tiles around the current tile. */
-  private applyMargins(a: AnimalSim, sp: SpeciesDef, t: number) {
+  /** Can the current animal step to (x, z)? Water deeper than it wades blocks unless it gets shallower. */
+  private moveOk(ct: number, here: number, x: number, z: number): boolean {
+    const t = this.tileOf(x, z);
+    if (t !== ct && !this.passable(ct, t)) return false;
+    if (this.ctxWade < Infinity) {
+      const d = this.depthAt(x, z);
+      if (d > this.ctxWade && d > here + 1e-4) return false;
+    }
+    return true;
+  }
+
+  /** Keep the body (by its length and heading) clear of fences and blocked tiles. */
+  private applyMargins(a: AnimalSim, sp: SpeciesDef) {
+    const c = this.tc2;
+    this.clampBody(sp, a.growth, a.heading, a.x, a.z, c);
+    a.x = c.x;
+    a.z = c.z;
+  }
+
+  /**
+   * Clamp a body centre so an animal of this size facing `h` does not poke
+   * through a fence (or the map edge / another zone), scanning a few tiles along
+   * each axis; solid objects and water it can't enter get a small margin only.
+   */
+  private clampBody(sp: SpeciesDef, growth: number, h: number, x: number, z: number, out: { x: number; z: number }) {
     const w = this.sim.world;
-    const x = t % MAP_W,
-      z = (t / MAP_W) | 0;
-    const m = fenceMargin(sp, a.growth);
-    const ms = Math.min(0.55, m * 0.6);
-    const x0 = x * TILE,
-      z0 = z * TILE;
-    // +x
-    if (x + 1 >= MAP_W || !this.passable(t, t + 1)) {
-      const mm = x + 1 < MAP_W && !w.fenceBetween(x, z, x + 1, z) ? ms : m;
-      if (a.x > x0 + TILE - mm) a.x = x0 + TILE - mm;
+    const L = halfLength(sp, growth),
+      W = halfWidth(sp, growth);
+    const sh = Math.abs(Math.sin(h)),
+      ch = Math.abs(Math.cos(h));
+    const ex = sh * L + ch * W + FENCE_CLEAR,
+      ez = ch * L + sh * W + FENCE_CLEAR;
+    const soft = Math.min(0.55, W * 0.8 + 0.15);
+    const tx = Math.floor(x / TILE),
+      tz = Math.floor(z / TILE);
+    out.x = x;
+    out.z = z;
+    if (tx < 0 || tz < 0 || tx >= MAP_W || tz >= MAP_H) return;
+    const zone = this.ctxZone;
+    const hab = w.habitatOf;
+    let lo = -Infinity,
+      hi = Infinity;
+    // ---- x axis (scan along row tz)
+    for (let k = 0, cx = tx; k < 5; k++, cx++) {
+      const edge = (cx + 1) * TILE;
+      if (edge - x >= Math.max(ex, soft)) break;
+      if (cx + 1 >= MAP_W || w.fenceBetween(cx, tz, cx + 1, tz) || hab[tz * MAP_W + cx + 1] !== zone) {
+        hi = edge - ex;
+        break;
+      }
+      if (!this.passable(tz * MAP_W + cx, tz * MAP_W + cx + 1)) {
+        if (k === 0) hi = edge - soft;
+        break;
+      }
     }
-    if (x - 1 < 0 || !this.passable(t, t - 1)) {
-      const mm = x - 1 >= 0 && !w.fenceBetween(x, z, x - 1, z) ? ms : m;
-      if (a.x < x0 + mm) a.x = x0 + mm;
+    for (let k = 0, cx = tx; k < 5; k++, cx--) {
+      const edge = cx * TILE;
+      if (x - edge >= Math.max(ex, soft)) break;
+      if (cx - 1 < 0 || w.fenceBetween(cx, tz, cx - 1, tz) || hab[tz * MAP_W + cx - 1] !== zone) {
+        lo = edge + ex;
+        break;
+      }
+      if (!this.passable(tz * MAP_W + cx, tz * MAP_W + cx - 1)) {
+        if (k === 0) lo = edge + soft;
+        break;
+      }
     }
-    if (z + 1 >= w.h || !this.passable(t, t + MAP_W)) {
-      const mm = z + 1 < w.h && !w.fenceBetween(x, z, x, z + 1) ? ms : m;
-      if (a.z > z0 + TILE - mm) a.z = z0 + TILE - mm;
+    if (lo > hi) out.x = (lo + hi) / 2;
+    else out.x = Math.max(lo, Math.min(hi, x));
+    // ---- z axis (scan along column tx)
+    lo = -Infinity;
+    hi = Infinity;
+    for (let k = 0, cz = tz; k < 5; k++, cz++) {
+      const edge = (cz + 1) * TILE;
+      if (edge - z >= Math.max(ez, soft)) break;
+      if (cz + 1 >= MAP_H || w.fenceBetween(tx, cz, tx, cz + 1) || hab[(cz + 1) * MAP_W + tx] !== zone) {
+        hi = edge - ez;
+        break;
+      }
+      if (!this.passable(cz * MAP_W + tx, (cz + 1) * MAP_W + tx)) {
+        if (k === 0) hi = edge - soft;
+        break;
+      }
     }
-    if (z - 1 < 0 || !this.passable(t, t - MAP_W)) {
-      const mm = z - 1 >= 0 && !w.fenceBetween(x, z, x, z - 1) ? ms : m;
-      if (a.z < z0 + mm) a.z = z0 + mm;
+    for (let k = 0, cz = tz; k < 5; k++, cz--) {
+      const edge = cz * TILE;
+      if (z - edge >= Math.max(ez, soft)) break;
+      if (cz - 1 < 0 || w.fenceBetween(tx, cz, tx, cz - 1) || hab[(cz - 1) * MAP_W + tx] !== zone) {
+        lo = edge + ez;
+        break;
+      }
+      if (!this.passable(cz * MAP_W + tx, (cz - 1) * MAP_W + tx)) {
+        if (k === 0) lo = edge + soft;
+        break;
+      }
     }
+    if (lo > hi) out.z = (lo + hi) / 2;
+    else out.z = Math.max(lo, Math.min(hi, z));
   }
 
   private arrive(a: AnimalSim) {
@@ -1421,20 +1599,24 @@ export class AnimalSystem {
         a.heading = a.face;
         a.face = NO_FACE;
       } else a.heading = wrapAngle(a.heading + Math.sign(diff) * maxTurn);
+      // turning near a fence: shuffle back so the head stays inside
+      this.setCtx(a, sp);
+      this.ctxLoose = true;
+      this.applyMargins(a, sp);
+      this.ctxLoose = false;
     }
     this.placeY(a, sp);
   }
 
+  /** Ground height, or the water surface for a swimmer in water deeper than it can stand in. */
   private placeY(a: AnimalSim, sp: SpeciesDef) {
-    const w = this.sim.world;
-    const g = w.heightAt(a.x, a.z);
-    if (sp.swims && g < WATER_LEVEL - sp.height * 0.6) a.y = WATER_LEVEL;
-    else a.y = g;
+    const g = this.sim.world.heightAt(a.x, a.z);
+    a.y = sp.swims && WATER_LEVEL - g > swimDepth(sp, a.growth) ? WATER_LEVEL : g;
   }
 
   private updateAction(a: AnimalSim, sp: SpeciesDef, dt: number) {
     let act = a.action;
-    const swimming = sp.swims && a.y === WATER_LEVEL && this.sim.world.heightAt(a.x, a.z) < WATER_LEVEL - sp.height * 0.6;
+    const swimming = sp.swims && a.y === WATER_LEVEL;
     if (swimming) act = 'swim';
     else if (a.moving && a.speed > 0.05) act = a.speed > sp.walkSpeed * 1.45 ? 'run' : 'walk';
     else if (a.moving) act = 'idle';

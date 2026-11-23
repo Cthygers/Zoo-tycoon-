@@ -14,7 +14,8 @@ import { el, toggleClass } from './dom';
 import { Hud } from './hud';
 import { InputController } from './input';
 import { CostLabel, Celebration, MoneyPopups, Toasts } from './notify';
-import { InfoPanel, SpeciesCard } from './panels';
+import { InfoPanel, SpeciesCard, closeTopDialog } from './panels';
+import { bindAudio, cue } from './sound';
 import { ensureStyles } from './styles';
 import { ThumbnailService } from './thumbs';
 import { ToolManager, type PendingAction } from './tools';
@@ -58,6 +59,7 @@ class GameUI implements GameUIHandle {
   private vw = window.innerWidth;
   private vh = window.innerHeight;
   private affordAcc = 0;
+  private bottomTop = window.innerHeight;
   private disposed = false;
   private backArmed = false;
 
@@ -66,6 +68,7 @@ class GameUI implements GameUIHandle {
     private deps: UIDeps,
   ) {
     ensureStyles();
+    bindAudio(deps.audio);
     const { sim, ctx, props, creatures } = deps;
     this.root = el('div', 'wh-ui');
     if (ctx.quality.level === 'low') this.root.classList.add('wh-noblur');
@@ -80,7 +83,7 @@ class GameUI implements GameUIHandle {
     };
 
     // ---- services
-    this.thumbs = new ThumbnailService(ctx.renderer, props, creatures, ctx.scene);
+    this.thumbs = new ThumbnailService(ctx.renderer, props, creatures, ctx.scene, `q-${ctx.quality.level}`);
     this.catalog = buildCatalog(sim);
     this.tools = new ToolManager({
       sim,
@@ -114,6 +117,7 @@ class GameUI implements GameUIHandle {
       rotate: () => this.tools.rotate(),
       setFenceMode: (m) => this.tools.setFenceMode(m),
       setPathStraight: (on) => this.tools.setPathStraight(on),
+      setBulldozeMode: (m) => this.tools.setBulldozeMode(m),
       setBrush: (n) => {
         const t = this.tools.tool;
         if (t.kind === 'terrain') this.setTool({ ...t, brush: n });
@@ -135,6 +139,7 @@ class GameUI implements GameUIHandle {
     this.zoo = new ZooPanel({
       sim,
       ctx,
+      audio: deps.audio,
       uiRoot: this.root,
       save: () => deps.save(),
       newGame: () => deps.newGame(),
@@ -189,7 +194,7 @@ class GameUI implements GameUIHandle {
     // Android back button (WebView history): close the top-most layer instead of leaving the app
     const onPop = () => {
       this.backArmed = false;
-      this.onKey('Escape');
+      this.handleBack();
     };
     window.addEventListener('popstate', onPop);
     this.offs.push(() => window.removeEventListener('popstate', onPop));
@@ -231,6 +236,7 @@ class GameUI implements GameUIHandle {
     const prev = this.selection;
     const same = prev && sel && prev.kind === sel.kind && prev.id === sel.id;
     if (same) return;
+    if (sel) cue('select');
     if (sel && this.tools.active) this.setTool({ kind: 'select' });
     if (sel) this.dock.closeDrawer();
     this.selection = sel;
@@ -315,7 +321,7 @@ class GameUI implements GameUIHandle {
 
   private confirm(): void {
     const r = this.tools.confirm();
-    if (r && !r.ok) this.dock.shake();
+    if (!r || !r.ok) this.dock.shake();
   }
 
   // ------------------------------------------------------------ misc
@@ -336,13 +342,7 @@ class GameUI implements GameUIHandle {
   private onKey(code: string): boolean {
     switch (code) {
       case 'Escape':
-        if (this.zoo.isOpen) this.zoo.close();
-        else if (this.tools.hasPending) this.tools.cancelPending();
-        else if (this.dock.drawerOpen) this.dock.closeDrawer();
-        else if (this.tools.active) this.setTool({ kind: 'select' });
-        else if (this.selection) this.select(null);
-        else return false;
-        return true;
+        return this.handleBack();
       case 'Enter':
       case 'NumpadEnter':
         if (!this.tools.hasPending) return false;
@@ -399,11 +399,13 @@ class GameUI implements GameUIHandle {
     this.info.update(dt);
     this.zoo.update(dt);
     this.popups.update(dt, this.vw, this.vh);
-    this.costLabel.update(this.vw, this.vh);
+    this.costLabel.update(this.vw, this.vh, this.bottomTop - 6);
     this.affordAcc += dt;
-    if (this.affordAcc > 0.5) {
+    if (this.affordAcc > 0.25) {
       this.affordAcc = 0;
       this.dock.refreshAffordability();
+      // top edge of the bottom dock (+ confirm bar / tool bar): a cheap 4 Hz layout read
+      this.bottomTop = this.dock.root.offsetTop || this.vh;
     }
   }
 
@@ -411,8 +413,45 @@ class GameUI implements GameUIHandle {
     return this.camera.target;
   }
 
+  /**
+   * Android back / Escape: close the top-most layer, one per press —
+   * dialog → text field → zoo menu → info panel → build drawer →
+   * pending build (confirm bar + ghost) → active tool (back to Inspect).
+   * Returns false at the top level so main can minimise the app.
+   */
   handleBack(): boolean {
-    // TODO(polish): close panels / cancel tools.
+    if (this.disposed) return false;
+    if (closeTopDialog()) return true;
+    const a = document.activeElement as HTMLElement | null;
+    if (a && a !== document.body && this.root.contains(a) && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')) {
+      a.blur();
+      return true;
+    }
+    if (this.zoo.isOpen) {
+      this.zoo.close();
+      return true;
+    }
+    if (this.selection) {
+      this.select(null);
+      return true;
+    }
+    if (this.dock.drawerOpen) {
+      this.dock.closeDrawer();
+      return true;
+    }
+    if (this.tools.hasPending) {
+      this.tools.cancelPending();
+      return true;
+    }
+    if (this.tools.active) {
+      cue('close');
+      this.setTool({ kind: 'select' });
+      return true;
+    }
+    if (this.camera.following) {
+      this.camera.stopFollow();
+      return true;
+    }
     return false;
   }
 
@@ -428,6 +467,7 @@ class GameUI implements GameUIHandle {
     this.toasts.dispose();
     this.cele.dispose();
     this.root.remove();
+    bindAudio(null);
   }
 }
 

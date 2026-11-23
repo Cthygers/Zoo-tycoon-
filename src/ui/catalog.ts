@@ -1,7 +1,6 @@
 // Build menu catalogue: categories → items (each item maps to a Tool), plus
 // display names/colours for terrain, paths and staff.
 
-import { ENTRANCE_TILE, TILE } from '../core/constants';
 import type { ISimulation } from '../core/contracts';
 import { PathType, Terrain, type Biome, type StaffRole, type Tool } from '../core/types';
 import { FENCES, PATHS } from '../data/fences';
@@ -23,7 +22,7 @@ export type ThumbSpec =
 export interface CatalogItem {
   key: string;
   name: string;
-  /** Price shown on the card (computed lazily: some prices come from sim dry-runs). */
+  /** Price shown on the card (live: wages / terrain prices come from the sim). */
   price: () => number;
   priceSuffix: string;
   tool: Tool;
@@ -83,36 +82,6 @@ const CATEGORY_ICON: Record<string, IconName> = {
   decoration: 'sparkle',
 };
 
-function terrainPricer(sim: ISimulation, t: Terrain): () => number {
-  let cached = -1;
-  return () => {
-    if (cached >= 0) return cached;
-    // find a plain tile that is not already this terrain and dry-run a 1-tile paint
-    const w = sim.world;
-    for (let k = 0; k < 400; k++) {
-      const x = (k * 37) % w.w,
-        z = (k * 53 + 11) % w.h;
-      if (w.getTerrain(x, z) === t || w.isPath(x, z) || w.objectAt(x, z)) continue;
-      const r = sim.paintTerrain({ x0: x, z0: z, x1: x, z1: z }, t, true);
-      if (r.cost > 0) {
-        cached = r.cost;
-        return cached;
-      }
-    }
-    return 0;
-  };
-}
-
-function staffPricer(sim: ISimulation, role: StaffRole): () => number {
-  let cached = -1;
-  return () => {
-    if (cached >= 0) return cached;
-    const r = sim.hireStaff(role, (ENTRANCE_TILE.x + 0.5) * TILE, (ENTRANCE_TILE.z - 0.5) * TILE, true);
-    cached = Math.max(0, r.cost);
-    return cached;
-  };
-}
-
 export function buildCatalog(sim: ISimulation): Category[] {
   const objs = OBJECTS.filter((o) => !o.notBuildable);
   const objItem = (id: string, section: string): CatalogItem => {
@@ -151,7 +120,7 @@ export function buildCatalog(sim: ISimulation): Category[] {
       (t, i): CatalogItem => ({
         key: `terrain:${i}`,
         name: t.name,
-        price: terrainPricer(sim, i as Terrain),
+        price: () => sim.terrainCost(i as Terrain),
         priceSuffix: '/tile',
         tool: { kind: 'terrain', terrain: i as Terrain, brush: 1 },
         thumb: { kind: 'terrain', terrain: i as Terrain },
@@ -169,7 +138,7 @@ export function buildCatalog(sim: ISimulation): Category[] {
       thumb: { kind: 'icon', icon: 'bulldoze' },
       icon: 'bulldoze',
       section: 'Remove',
-      description: 'Clear objects, paths and fences in an area for a partial refund.',
+      description: 'Clear objects, paths and fences in an area, or remove single fence runs, for a partial refund.',
     },
   ];
 
@@ -226,7 +195,7 @@ export function buildCatalog(sim: ISimulation): Category[] {
     (r): CatalogItem => ({
       key: `staff:${r}`,
       name: STAFF_INFO[r].name,
-      price: staffPricer(sim, r),
+      price: () => sim.staffWage(r),
       priceSuffix: '/day',
       tool: { kind: 'staff', role: r },
       thumb: { kind: 'staff', role: r },

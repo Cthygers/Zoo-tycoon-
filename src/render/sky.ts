@@ -37,6 +37,8 @@ uniform float uNight;
 uniform float uTime;
 uniform vec2 uCloudOffset;
 uniform float uCloudCover;
+uniform vec3 uTwilightBlue;
+uniform float uTwilight;
 ${GLSL_HASH}
 
 const float LUT_W = ${SKY_LUT_W.toFixed(1)};
@@ -75,7 +77,11 @@ void main() {
   vec3 d = normalize(vDir);
   float cs = dot(d, uSunDir);
   vec2 uv = lutUV(d);
-  vec3 col = uSunE * (texture2D(uRay, uv).rgb + texture2D(uMie, uv).rgb * miePhase(cs));
+  vec3 ray = texture2D(uRay, uv).rgb;
+  // blue hour: the crude multiple-scattering term leaves the twilight sky
+  // purple; pull the Rayleigh part toward a deep blue of equal luminance
+  ray = mix(ray, vec3(dot(ray, vec3(0.2126, 0.7152, 0.0722))) * uTwilightBlue, uTwilight);
+  vec3 col = uSunE * (ray + texture2D(uMie, uv).rgb * miePhase(cs));
 
   // night sky: faint blue airglow + warm light-dome near the horizon
   float hz = 1.0 - clamp(d.y, 0.0, 1.0);
@@ -87,12 +93,12 @@ void main() {
     vec3 sp = d * 260.0;
     vec3 cell = floor(sp);
     float h = hash13(cell);
-    if (h > 0.955) {
+    if (h > 0.95) {
       vec3 off = (hash33(cell + 3.7) - 0.5) * 0.55;
       float dist = length(fract(sp) - 0.5 - off);
       float px = max(length(fwidth(sp)), 0.05);
       float rad = max(0.09, px * 0.55);
-      float mag = pow((h - 0.955) / 0.045, 3.0);
+      float mag = pow((h - 0.95) / 0.05, 3.0);
       float tw = 0.75 + 0.25 * sin(uTime * (1.5 + h * 6.0) + h * 91.0);
       vec3 sc = mix(vec3(1.0, 0.82, 0.65), vec3(0.75, 0.85, 1.0), fract(h * 37.0));
       float vis = smoothstep(-0.02, 0.25, d.y);
@@ -185,6 +191,8 @@ export interface SkyUniforms {
   uTime: THREE.IUniform<number>;
   uCloudOffset: THREE.IUniform<THREE.Vector2>;
   uCloudCover: THREE.IUniform<number>;
+  uTwilightBlue: THREE.IUniform<THREE.Color>;
+  uTwilight: THREE.IUniform<number>;
 }
 
 export class SkyDome {
@@ -215,6 +223,8 @@ export class SkyDome {
       uTime: { value: 0 },
       uCloudOffset: { value: new THREE.Vector2(0, 0) },
       uCloudCover: { value: 0.56 },
+      uTwilightBlue: { value: new THREE.Color(0.646, 0.999, 2.056) },
+      uTwilight: { value: 0 },
     };
     this.geo = new THREE.SphereGeometry(1, 48, 24);
     const common = {

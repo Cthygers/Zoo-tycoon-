@@ -1,13 +1,24 @@
 // The props layer: renders every placed object, fences, litter, night lights
 // and the selection highlight.
 //
-// Placed objects are drawn through one of two batching back-ends, chosen once:
+// Placed objects are drawn through one of two batching back-ends (see
+// lod/batched.ts), chosen once:
 //  - 'batched' (default when WEBGL_multi_draw exists): one BatchedMesh per
 //    material — every geometry / variant / def sharing a material is a single
-//    multi-draw call with per-instance frustum culling. Scales with the number
-//    of materials instead of meshes × variants.
-//  - 'instanced' (fallback): one InstancedMesh per template mesh (geometry +
-//    material), packed with swap-remove, grown by doubling.
+//    multi-draw call, with our own per-instance culling (frustum, screen-size
+//    distance, LOD level) and shadow-caster selection around the camera focus.
+//  - 'instanced' (fallback): one InstancedMesh per template mesh.
+//
+// Per instance (template part) the layer decides:
+//  - max draw distance: max(tier.minCull, partRadius × tier.cullK), i.e.
+//    parts vanish when they would be a few pixels big (small details of big
+//    buildings go first, flower beds / hedges / boulders stay at overview);
+//  - shadow casting: only parts of props big enough to matter, only within
+//    tier.shadowNear / shadowFar metres of the camera focus;
+//  - LOD: templates whose PropSpec has buildLod get both versions; objects
+//    swap by camera distance with hysteresis (checked every few frames).
+// Vegetation materials get a near-camera dithered fade (lod/fade.ts); lamps
+// and lit windows get ground light pools + halos (lights/nightlights.ts).
 
 import * as THREE from 'three';
 import { TILE } from '../core/constants';
@@ -16,20 +27,37 @@ import type { EventBus, TileRect } from '../core/events';
 import { hashFloat } from '../core/rng';
 import type { Litter, ObjectDef, PlacedObject } from '../core/types';
 import type { World } from '../core/world';
-import { OBJECTS_BY_ID, rotatedSize } from '../data/objects';
-import { createFenceSegment, disposeFenceStyles, FenceRenderer } from './fences';
+import { FENCES } from '../data/fences';
+import { OBJECTS, OBJECTS_BY_ID, rotatedSize } from '../data/objects';
+import { createFenceSegment, disposeFenceStyles, fenceDetail, fenceStyle, FenceRenderer } from './fences';
 import { Highlighter } from './highlight';
+import { findEmitters, NightLights, type LocalEmitter } from './lights/nightlights';
 import { LitterRenderer } from './litter';
+import { frustumToArray, InstancedBatch, MultiBatch, supportsMultiDraw, type CullView, type InstParams, type PropBatch } from './lod/batched';
+import { autoLod } from './lod/autolod';
+import { applyFade, fadeUniforms, updateFade, wantsFade } from './lod/fade';
+import { propsTier, type PropsTier } from './lod/tiers';
 import { concreteMaterial, disposePropMaterials, projectBoxUVs, surfaceTextures } from './materials';
+import * as natureModule from './nature';
 import { PROP_SPECS, type PropSpec } from './registry';
+import * as structuresModule from './structures';
 import { applyWind, cloneWithHooks, disposeWind, hasSway, setupWindMesh, updateWind } from './wind';
 
+export { supportsMultiDraw } from './lod/batched';
+
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
-const LIGHT_COLOR = 0xffc68a;
-/** Candela of a pooled lamp light at full night. */
-const LIGHT_INTENSITY = 3.2;
-const LIGHT_RANGE = 16;
 const DEFAULT_GLOW = new THREE.Color(0xffd9a0);
+/** Frames between LOD passes (also run whenever the camera moved > 2 m). */
+const LOD_INTERVAL = 8;
+/** Far LOD level starts at this multiple of the tier's lodDist. */
+const LOD_FAR = 2.2;
+
+// Optional hooks of the builder modules (looked up by name so a missing one never breaks the layer).
+type ProgressFn = (fraction: number) => void;
+function moduleFn<T extends (...args: never[]) => unknown>(mod: object, name: string): T | null {
+  const f = (mod as Record<string, unknown>)[name];
+  return typeof f === 'function' ? (f as T) : null;
+}
 
 // ---------------------------------------------------------------------------
 // Templates
@@ -39,8 +67,17 @@ interface TemplatePart {
   material: THREE.Material;
   /** Mesh transform relative to the object origin. */
   local: THREE.Matrix4;
+  /** Bounding radius in object space (m, before instance scale). */
+  radius: number;
+  /** May cast shadows at all. */
   cast: boolean;
+  /** Glowing part (lamp glass, windows): kept visible further. */
+  glow: boolean;
+  /** LOD levels it is drawn at: bit 0 = full detail, bit 1 = mid distance, bit 2 = far. */
+  levels: number;
   batch: PropBatch | null;
+  /** Per-instance colour when the part's material was merged into a shared tinted one. */
+  tint: THREE.Color | null;
 }
 
 interface Template {
@@ -48,12 +85,16 @@ interface Template {
   variant: number;
   spec: PropSpec;
   root: THREE.Object3D;
+  /** Cheaper versions (hand-made buildLod, or automatic mid + far for vegetation). */
+  lodRoots: THREE.Object3D[];
+  /** Has distance levels (lodRoots non-empty). */
+  hasLod: boolean;
   parts: TemplatePart[];
   radius: number;
   height: number;
-  small: boolean;
-  /** Local-space position of the light source (lamps / lit windows), if any. */
-  lightAnchor: THREE.Vector3 | null;
+  /** Tall enough that its shadow reads from afar (trees, buildings). */
+  tall: boolean;
+  emitters: LocalEmitter[];
 }
 
 interface Slot {
@@ -65,331 +106,14 @@ interface ObjRec {
   obj: PlacedObject;
   tpl: Template;
   matrix: THREE.Matrix4;
+  scale: number;
   slots: Slot[];
   unique: THREE.Object3D | null;
-  light: THREE.Vector3 | null;
+  /** Current LOD level (0 = full, 1 = mid, 2 = far). */
+  lod: number;
 }
-
-interface SlotRef {
-  rec: ObjRec;
-  part: number;
-}
-
-// ---------------------------------------------------------------------------
-// Batching back-ends
 
 export type PropsBackend = 'auto' | 'instanced' | 'batched';
-
-/** Common surface of the two batching back-ends. */
-interface PropBatch {
-  readonly mesh: THREE.Mesh;
-  dirty: boolean;
-  readonly cullDist: number;
-  /** Add an instance of `geometry`; returns its slot handle. */
-  add(geometry: THREE.BufferGeometry, matrix: THREE.Matrix4, ref: SlotRef): number;
-  set(slot: number, matrix: THREE.Matrix4): void;
-  remove(slot: number): void;
-  clear(): void;
-  /** Push pending changes / distance culling to the GPU. */
-  sync(cam: THREE.Vector3 | null): void;
-  needsCull(cam: THREE.Vector3): boolean;
-  /** Instances currently drawn. */
-  drawn(): number;
-  /** Object id behind a raycast hit on `mesh`. */
-  ownerOf(hit: THREE.Intersection): number | null;
-  setShadows(on: boolean): void;
-  dispose(): void;
-}
-
-let multiDrawSupport: boolean | null = null;
-/** Does this browser expose WEBGL_multi_draw (checked once on a throw-away context)? */
-export function supportsMultiDraw(): boolean {
-  if (multiDrawSupport !== null) return multiDrawSupport;
-  multiDrawSupport = false;
-  try {
-    if (typeof document === 'undefined') return false;
-    const gl = document.createElement('canvas').getContext('webgl2');
-    if (gl) {
-      multiDrawSupport = gl.getExtension('WEBGL_multi_draw') !== null;
-      gl.getExtension('WEBGL_lose_context')?.loseContext();
-    }
-  } catch {
-    multiDrawSupport = false;
-  }
-  return multiDrawSupport;
-}
-
-/** BatchedMesh back-end: every geometry using one material in a single multi-draw. */
-class MultiBatch implements PropBatch {
-  readonly mesh: THREE.BatchedMesh;
-  dirty = false;
-  private geoIds = new Map<THREE.BufferGeometry, number>();
-  private maxV = 4096;
-  private maxI = 8192;
-  private usedV = 0;
-  private usedI = 0;
-  private maxInst = 16;
-  private live = 0;
-  /** Object id per instance id (-1 = free). */
-  private owners: number[] = [];
-  /** Instance positions (xyz per instance id) for distance culling. */
-  private pos: number[] = [];
-  private lastCull = new THREE.Vector3(1e9, 0, 0);
-
-  constructor(
-    material: THREE.Material,
-    private readonly cast: boolean,
-    private readonly receive: boolean,
-    readonly cullDist: number,
-    private readonly parent: THREE.Object3D,
-  ) {
-    const m = new THREE.BatchedMesh(this.maxInst, this.maxV, this.maxI, material);
-    m.sortObjects = false; // saves CPU; opaque overdraw is small for props
-    m.perObjectFrustumCulled = true;
-    m.frustumCulled = false; // per-instance culling replaces the whole-mesh test
-    m.castShadow = cast;
-    m.receiveShadow = receive;
-    m.name = 'prop-multibatch';
-    setupWindMesh(m);
-    this.mesh = m;
-    parent.add(m);
-  }
-
-  add(geometry: THREE.BufferGeometry, matrix: THREE.Matrix4, ref: SlotRef): number {
-    const mesh = this.mesh;
-    let gid = this.geoIds.get(geometry);
-    if (gid === undefined) {
-      const vc = geometry.getAttribute('position').count;
-      const ic = geometry.index ? geometry.index.count : 0;
-      if (this.usedV + vc > this.maxV || this.usedI + ic > this.maxI) {
-        while (this.usedV + vc > this.maxV) this.maxV *= 2;
-        while (this.usedI + ic > this.maxI) this.maxI *= 2;
-        mesh.setGeometrySize(this.maxV, this.maxI);
-      }
-      gid = mesh.addGeometry(geometry);
-      this.usedV += vc;
-      this.usedI += ic;
-      this.geoIds.set(geometry, gid);
-    }
-    if (this.live >= this.maxInst) {
-      this.maxInst *= 2;
-      mesh.setInstanceCount(this.maxInst);
-    }
-    const id = mesh.addInstance(gid);
-    mesh.setMatrixAt(id, matrix);
-    this.live++;
-    this.owners[id] = ref.rec.obj.id;
-    const e = matrix.elements;
-    this.pos[id * 3] = e[12];
-    this.pos[id * 3 + 1] = e[13];
-    this.pos[id * 3 + 2] = e[14];
-    if (this.cullDist !== Infinity) this.dirty = true;
-    return id;
-  }
-
-  set(id: number, matrix: THREE.Matrix4): void {
-    this.mesh.setMatrixAt(id, matrix);
-    const e = matrix.elements;
-    this.pos[id * 3] = e[12];
-    this.pos[id * 3 + 1] = e[13];
-    this.pos[id * 3 + 2] = e[14];
-    if (this.cullDist !== Infinity) this.dirty = true;
-  }
-
-  remove(id: number): void {
-    if (this.owners[id] === undefined || this.owners[id] < 0) return;
-    this.mesh.deleteInstance(id);
-    this.owners[id] = -1;
-    this.live--;
-  }
-
-  clear(): void {
-    for (let id = 0; id < this.owners.length; id++) if (this.owners[id] >= 0) this.remove(id);
-  }
-
-  sync(cam: THREE.Vector3 | null): void {
-    this.dirty = false;
-    if (this.cullDist === Infinity || !cam) return;
-    const d2 = this.cullDist * this.cullDist;
-    const p = this.pos;
-    for (let id = 0; id < this.owners.length; id++) {
-      if (this.owners[id] < 0) continue;
-      const dx = p[id * 3] - cam.x;
-      const dy = p[id * 3 + 1] - cam.y;
-      const dz = p[id * 3 + 2] - cam.z;
-      const vis = dx * dx + dy * dy + dz * dz <= d2;
-      if (this.mesh.getVisibleAt(id) !== vis) this.mesh.setVisibleAt(id, vis);
-    }
-    this.lastCull.copy(cam);
-  }
-
-  needsCull(cam: THREE.Vector3): boolean {
-    return this.cullDist !== Infinity && this.live > 0 && this.lastCull.distanceToSquared(cam) > 9;
-  }
-
-  drawn(): number {
-    return this.live;
-  }
-
-  ownerOf(hit: THREE.Intersection): number | null {
-    const id = hit.batchId;
-    if (id === undefined) return null;
-    const o = this.owners[id];
-    return o !== undefined && o >= 0 ? o : null;
-  }
-
-  setShadows(on: boolean): void {
-    this.mesh.castShadow = on && this.cast;
-    this.mesh.receiveShadow = on && this.receive;
-  }
-
-  dispose(): void {
-    this.parent.remove(this.mesh);
-    this.mesh.dispose();
-  }
-}
-
-/** InstancedMesh back-end: one geometry + material, swap-remove packed storage. */
-class Batch implements PropBatch {
-  mesh: THREE.InstancedMesh;
-  private cap = 0;
-  n = 0;
-  /** Master matrices (all live instances, packed). */
-  private mats: Float32Array;
-  private refs: SlotRef[] = [];
-  /** Object id per drawn instance (after culling). */
-  visOwners: Int32Array;
-  dirty = true;
-  private lastCull = new THREE.Vector3(1e9, 0, 0);
-
-  constructor(
-    private readonly geometry: THREE.BufferGeometry,
-    private readonly material: THREE.Material | THREE.Material[],
-    private readonly cast: boolean,
-    private readonly receive: boolean,
-    readonly cullDist: number,
-    private readonly parent: THREE.Object3D,
-  ) {
-    this.mats = new Float32Array(0);
-    this.visOwners = new Int32Array(0);
-    this.mesh = this.create(8);
-  }
-
-  private create(cap: number): THREE.InstancedMesh {
-    const m = new THREE.InstancedMesh(this.geometry, this.material, cap);
-    m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    m.count = 0;
-    m.visible = false;
-    m.castShadow = this.cast;
-    m.receiveShadow = this.receive;
-    m.name = 'prop-batch';
-    setupWindMesh(m);
-    const mats = new Float32Array(cap * 16);
-    mats.set(this.mats.subarray(0, this.n * 16));
-    this.mats = mats;
-    const vo = new Int32Array(cap);
-    vo.set(this.visOwners.subarray(0, Math.min(this.visOwners.length, cap)));
-    this.visOwners = vo;
-    this.cap = cap;
-    this.parent.add(m);
-    return m;
-  }
-
-  add(_geometry: THREE.BufferGeometry, matrix: THREE.Matrix4, ref: SlotRef): number {
-    if (this.n >= this.cap) {
-      const old = this.mesh;
-      this.mesh = this.create(this.cap * 2);
-      this.parent.remove(old);
-      old.dispose();
-    }
-    const i = this.n++;
-    matrix.toArray(this.mats, i * 16);
-    this.refs[i] = ref;
-    this.dirty = true;
-    return i;
-  }
-
-  set(i: number, matrix: THREE.Matrix4): void {
-    matrix.toArray(this.mats, i * 16);
-    this.dirty = true;
-  }
-
-  remove(i: number): void {
-    const last = --this.n;
-    if (i !== last) {
-      this.mats.copyWithin(i * 16, last * 16, last * 16 + 16);
-      const moved = this.refs[last];
-      this.refs[i] = moved;
-      moved.rec.slots[moved.part].index = i;
-    }
-    this.refs.length = last;
-    this.dirty = true;
-  }
-
-  clear(): void {
-    this.n = 0;
-    this.refs.length = 0;
-    this.dirty = true;
-  }
-
-  /** Copy (and cull) master data into the GPU instance buffer. */
-  sync(cam: THREE.Vector3 | null): void {
-    const mesh = this.mesh;
-    const dst = mesh.instanceMatrix.array as Float32Array;
-    const src = this.mats;
-    let count = 0;
-    if (this.cullDist === Infinity || !cam) {
-      count = this.n;
-      dst.set(src.subarray(0, count * 16));
-      for (let i = 0; i < count; i++) this.visOwners[i] = this.refs[i].rec.obj.id;
-    } else {
-      const d2 = this.cullDist * this.cullDist;
-      for (let i = 0; i < this.n; i++) {
-        const o = i * 16;
-        const dx = src[o + 12] - cam.x;
-        const dy = src[o + 13] - cam.y;
-        const dz = src[o + 14] - cam.z;
-        if (dx * dx + dy * dy + dz * dz > d2) continue;
-        dst.set(src.subarray(o, o + 16), count * 16);
-        this.visOwners[count] = this.refs[i].rec.obj.id;
-        count++;
-      }
-      if (cam) this.lastCull.copy(cam);
-    }
-    mesh.count = count;
-    mesh.visible = count > 0;
-    mesh.instanceMatrix.clearUpdateRanges();
-    mesh.instanceMatrix.addUpdateRange(0, Math.max(count, 1) * 16);
-    mesh.instanceMatrix.needsUpdate = true;
-    mesh.boundingSphere = null;
-    mesh.boundingBox = null;
-    if (count > 0) mesh.computeBoundingSphere();
-    this.dirty = false;
-  }
-
-  needsCull(cam: THREE.Vector3): boolean {
-    return this.cullDist !== Infinity && this.n > 0 && this.lastCull.distanceToSquared(cam) > 9;
-  }
-
-  drawn(): number {
-    return this.mesh.count;
-  }
-
-  ownerOf(hit: THREE.Intersection): number | null {
-    const i = hit.instanceId;
-    return i !== undefined && i < this.mesh.count ? this.visOwners[i] : null;
-  }
-
-  setShadows(on: boolean): void {
-    this.mesh.castShadow = on && this.cast;
-    this.mesh.receiveShadow = on && this.receive;
-  }
-
-  dispose(): void {
-    this.parent.remove(this.mesh);
-    this.mesh.dispose();
-  }
-}
 
 /** Split a multi-material mesh into one geometry per material group. */
 function splitByMaterial(geometry: THREE.BufferGeometry, material: THREE.Material | THREE.Material[]): { geometry: THREE.BufferGeometry; material: THREE.Material }[] {
@@ -458,18 +182,6 @@ function placeholderSpec(def: ObjectDef | undefined): PropSpec {
 }
 
 // ---------------------------------------------------------------------------
-// Point-light pool for lamps near the camera
-
-interface LightSlot {
-  light: THREE.PointLight;
-  anchor: ObjRec | null;
-  /** Fade level 0..1. */
-  level: number;
-  /** The anchor is among the nearest wanted lamps. */
-  want: boolean;
-}
-
-// ---------------------------------------------------------------------------
 
 export class PropsLayer implements IPropsLayer {
   readonly root = new THREE.Group();
@@ -478,10 +190,14 @@ export class PropsLayer implements IPropsLayer {
   private readonly fences: FenceRenderer;
   private readonly litter: LitterRenderer;
   private readonly highlight: Highlighter;
+  private readonly night: NightLights;
 
+  private quality: QualitySettings;
+  private tier: PropsTier;
   private templates = new Map<string, Template>();
   private placeholders = new Map<string, PropSpec>();
-  private sizeClass = new Map<string, { small: boolean; large: boolean }>();
+  /** Per def: size of the first variant built, so all variants share shadow / distance behaviour. */
+  private sizeClass = new Map<string, { h: number; r: number; tall: boolean }>();
   private batches = new Map<string, PropBatch>();
   private batchList: PropBatch[] = [];
   /** Geometries created by splitting multi-material meshes (owned). */
@@ -489,55 +205,71 @@ export class PropsLayer implements IPropsLayer {
   readonly backend: 'instanced' | 'batched';
   private recs = new Map<number, ObjRec>();
   private uniques: ObjRec[] = [];
-  private lightRecs: ObjRec[] = [];
+  private lodRecs: ObjRec[] = [];
   private nightMats: THREE.MeshStandardMaterial[] = [];
   private nightSet = new Set<THREE.Material>();
-  private lights: LightSlot[] = [];
+  private fadeMats = new Set<THREE.Material>();
+  private seenMats = new WeakSet<THREE.Material>();
+  private plainMats = new WeakSet<THREE.Material>();
+  /** Material signature (everything but colour) → shared white-based batch material. */
+  private mergeMats = new Map<string, THREE.MeshStandardMaterial>();
+  private mergedOf = new Map<THREE.Material, { mat: THREE.Material; color: THREE.Color }>();
   private unsub: (() => void)[] = [];
   private highlightId: number | null = null;
   private time = 0;
-  private night = -1;
-  private lightTimer = 0;
+  private nightLevel = -1;
   private disposed = false;
+  private frame = 0;
+  private lodSwitches = 0;
+  private prewarmMs = 0;
+  private lodDirty = true;
+  private cullDirty = true;
+
+  // culling state
+  private readonly view: CullView = {
+    camera: null,
+    cam: new THREE.Vector3(),
+    focus: new THREE.Vector3(),
+    planes: new Float32Array(24),
+    shadows: true,
+  };
+  private readonly lastCamM = new THREE.Matrix4();
+  private readonly lastProjM = new THREE.Matrix4();
+  private readonly lodCam = new THREE.Vector3(1e9, 0, 0);
+  private haveCamera = false;
 
   // scratch
   private readonly tmpM = new THREE.Matrix4();
   private readonly tmpQ = new THREE.Quaternion();
   private readonly tmpP = new THREE.Vector3();
   private readonly tmpS = new THREE.Vector3();
-  private readonly camPos = new THREE.Vector3();
   private readonly camDir = new THREE.Vector3();
-  private readonly focus = new THREE.Vector3();
+  private readonly frustum = new THREE.Frustum();
   private hits: THREE.Intersection[] = [];
-  private nearest: ObjRec[] = [];
-  private nearestD: number[] = [];
 
   constructor(
     private readonly world: World,
     events: EventBus,
     scene: THREE.Scene,
-    private readonly quality: QualitySettings,
+    quality: QualitySettings,
     opts: { backend?: PropsBackend } = {},
   ) {
+    this.quality = quality;
+    this.tier = propsTier(quality);
     const want = opts.backend ?? 'auto';
     this.backend = want === 'auto' ? (supportsMultiDraw() ? 'batched' : 'instanced') : want;
+    moduleFn<(l: string) => void>(natureModule, 'setNatureQuality')?.(quality.level);
     this.root.name = 'props';
     this.objRoot.name = 'objects';
     this.uniqueRoot.name = 'unique-objects';
-    this.fences = new FenceRenderer(world, events, quality);
+    this.fences = new FenceRenderer(world, events, quality, this.backend === 'batched');
+    this.fences.setShadowRange(this.tier.shadowNear, this.tier.shadowFar, this.tier.fenceLod);
     this.litter = new LitterRenderer(world);
     this.highlight = new Highlighter(world);
-    this.root.add(this.objRoot, this.uniqueRoot, this.fences.group, this.litter.group, this.highlight.group);
+    this.night = new NightLights(world);
+    this.night.setPointLights(this.tier.pointLights);
+    this.root.add(this.objRoot, this.uniqueRoot, this.fences.group, this.litter.group, this.highlight.group, this.night.group);
     scene.add(this.root);
-
-    const nLights = quality.level === 'high' ? 4 : quality.level === 'medium' ? 2 : 0;
-    for (let i = 0; i < nLights; i++) {
-      const light = new THREE.PointLight(LIGHT_COLOR, 0, LIGHT_RANGE, 2);
-      light.castShadow = false;
-      light.name = `props-lamp-light-${i}`;
-      this.root.add(light);
-      this.lights.push({ light, anchor: null, level: 0, want: false });
-    }
 
     this.unsub.push(
       events.on('objectAdded', ({ id }) => {
@@ -579,6 +311,16 @@ export class PropsLayer implements IPropsLayer {
     return placeholderSpec(OBJECTS_BY_ID[defId]).build(0, this.quality);
   }
 
+  private buildLod(defId: string, spec: PropSpec, variant: number): THREE.Object3D | null {
+    if (!spec.buildLod) return null;
+    try {
+      return spec.buildLod(variant, this.quality) ?? null;
+    } catch (err) {
+      console.error(`[props] LOD builder for "${defId}" failed`, err);
+      return null;
+    }
+  }
+
   private template(defId: string, variant: number): Template {
     const key = `${defId}#${variant}`;
     let t = this.templates.get(key);
@@ -590,16 +332,51 @@ export class PropsLayer implements IPropsLayer {
     const size = box.isEmpty() ? new THREE.Vector3(1, 1, 1) : box.getSize(new THREE.Vector3());
     const height = box.isEmpty() ? 1 : box.max.y;
     const radius = Math.max(size.x, size.z) * 0.5;
-    // size class is decided once per def (first variant built) so all variants share batches
+    // size class is decided once per def (first variant built) so all variants behave alike
     let cls = this.sizeClass.get(defId);
     if (!cls) {
-      cls = { small: height < 1.25 && radius < 1.05, large: height > 0.7 || radius > 1.0 };
+      // tall ones keep their shadow further from the focus (see partParams for who casts at all)
+      cls = { h: height, r: radius, tall: height > 2.6 || radius > 2.2 };
       this.sizeClass.set(defId, cls);
     }
-    const { small, large } = cls;
+    // distance versions: [root, levels bitmask]
+    const lods: [THREE.Object3D, number][] = [];
+    const hand = this.buildLod(defId, spec, variant);
+    const cat = OBJECTS_BY_ID[defId]?.category;
+    if (hand) lods.push([hand, 6]);
+    else if (!spec.unique && (cat === 'tree' || cat === 'plant')) {
+      // vegetation without a hand-made LOD gets automatic ones (fewer, larger cards; no twigs)
+      const mid = autoLod(root, { cards: 0.45, bark: 0.5 });
+      const far = mid ? autoLod(root, { cards: 0.2, bark: 0.3 }) : null;
+      if (mid) lods.push([mid, far ? 2 : 6]);
+      if (far) lods.push([far, 4]);
+    }
     const parts: TemplatePart[] = [];
-    const glowBox = new THREE.Box3();
-    const tmpBox = new THREE.Box3();
+    this.collectParts(root, lods.length ? 1 : 7, parts);
+    for (const [lr, bits] of lods) {
+      lr.updateMatrixWorld(true);
+      const lod: TemplatePart[] = [];
+      this.collectParts(lr, bits, lod);
+      // pieces shared unchanged between versions are drawn at all their levels
+      for (const lp of lod) {
+        const same = parts.find((fp) => fp.geometry === lp.geometry && fp.material === lp.material && fp.local.equals(lp.local));
+        if (same) same.levels |= lp.levels;
+        else parts.push(lp);
+      }
+    }
+    let emitters = findEmitters(parts.filter((p) => p.levels & 1));
+    if (emitters.length === 0 && OBJECTS_BY_ID[defId]?.light) {
+      // lit def without glowing parts: a soft pool in front (+Z)
+      const front = (OBJECTS_BY_ID[defId].size[1] * TILE) / 2 + 0.1;
+      emitters = [{ pos: new THREE.Vector3(0, Math.min(2.2, height * 0.6), front), kind: 'window', dir: new THREE.Vector2(0, 1) }];
+    }
+    const lodRoots = lods.map((l) => l[0]);
+    t = { defId, variant, spec, root, lodRoots, hasLod: lodRoots.length > 0, parts, radius, height, tall: cls.tall, emitters };
+    this.templates.set(key, t);
+    return t;
+  }
+
+  private collectParts(root: THREE.Object3D, levels: number, out: TemplatePart[]): void {
     root.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh || !mesh.visible || (mesh as THREE.InstancedMesh).isInstancedMesh) return;
@@ -608,56 +385,104 @@ export class PropsLayer implements IPropsLayer {
       for (const m of mats) {
         this.registerMaterial(m);
         if (m.transparent && m.opacity < 0.6) transparent = true;
-        if (typeof m.userData.nightEmissive === 'number') {
-          if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
-          tmpBox.copy(mesh.geometry.boundingBox!).applyMatrix4(mesh.matrixWorld);
-          glowBox.union(tmpBox);
-        }
       }
+      const scale = mesh.matrixWorld.getMaxScaleOnAxis();
       for (const sp of splitByMaterial(mesh.geometry, mesh.material)) {
         if (sp.geometry !== mesh.geometry) this.splitGeos.push(sp.geometry);
-        parts.push({
+        if (!sp.geometry.boundingSphere) sp.geometry.computeBoundingSphere();
+        const r = (sp.geometry.boundingSphere?.radius ?? 0.5) * scale;
+        const m = sp.material;
+        const glow = typeof m.userData.nightEmissive === 'number';
+        out.push({
           geometry: sp.geometry,
-          material: sp.material,
+          material: m,
           local: mesh.matrixWorld.clone(),
-          cast: large && !mesh.userData.noShadow && !(sp.material.transparent && sp.material.opacity < 0.6) && !transparent,
+          radius: r,
+          // tiny details (< 12 cm), glass and glowing bits never cast
+          cast: !mesh.userData.noShadow && !glow && r > 0.12 && !(m.transparent && m.opacity < 0.6) && !transparent,
+          glow,
+          levels,
           batch: null,
+          tint: null,
         });
       }
     });
-    let lightAnchor: THREE.Vector3 | null = null;
-    if (!glowBox.isEmpty()) lightAnchor = glowBox.getCenter(new THREE.Vector3());
-    else if (OBJECTS_BY_ID[defId]?.light) lightAnchor = new THREE.Vector3(0, Math.max(0.5, height - 0.4), 0);
-    t = { defId, variant, spec, root, parts, radius, height, small, lightAnchor };
-    this.templates.set(key, t);
-    return t;
   }
 
   private registerMaterial(m: THREE.Material): void {
+    if (!this.seenMats.has(m)) {
+      this.seenMats.add(m);
+      // a stock MeshStandardMaterial without shader hooks can share a batch with its colour variants
+      if (m.constructor === THREE.MeshStandardMaterial && !Object.prototype.hasOwnProperty.call(m, 'onBeforeCompile')) this.plainMats.add(m);
+    }
     if (hasSway(m)) applyWind(m);
+    if (!this.fadeMats.has(m) && wantsFade(m)) {
+      applyFade(m);
+      this.fadeMats.add(m);
+    }
     const ne = m.userData.nightEmissive;
     if (typeof ne === 'number' && !this.nightSet.has(m) && (m as THREE.MeshStandardMaterial).emissive) {
       const sm = m as THREE.MeshStandardMaterial;
       if (sm.emissive.r + sm.emissive.g + sm.emissive.b === 0) sm.emissive.copy(DEFAULT_GLOW);
-      sm.emissiveIntensity = Math.max(this.night, 0) * ne;
+      sm.emissiveIntensity = Math.max(this.nightLevel, 0) * this.glowOf(ne);
       this.nightSet.add(m);
       this.nightMats.push(sm);
     }
   }
 
-  private batchFor(tpl: Template, part: TemplatePart): PropBatch {
+  /** Emissive intensity at full night for a material's nightEmissive. */
+  private glowOf(ne: number): number {
+    // lamp glass / bulbs: tame on bloom tiers so bloom halos stay soft
+    return ne >= 3 ? ne * this.tier.lampGlow : ne;
+  }
+
+  /**
+   * Colour variants of one stock material (painted metal in five colours,
+   * stained boards…) share one batch: the batch material is a white-based
+   * copy and each instance carries its colour (BatchedMesh per-instance colour).
+   */
+  private mergedFor(m: THREE.Material): { mat: THREE.Material; color: THREE.Color } | null {
+    if (!this.plainMats.has(m)) return null;
+    let r = this.mergedOf.get(m);
+    if (r) return r;
+    const sm = m as THREE.MeshStandardMaterial;
+    const t = (x: THREE.Texture | null) => (x ? x.uuid : '-');
+    const sig = [
+      t(sm.map), t(sm.normalMap), t(sm.roughnessMap), t(sm.metalnessMap), t(sm.aoMap), t(sm.emissiveMap), t(sm.alphaMap), t(sm.bumpMap),
+      t(sm.lightMap), t(sm.displacementMap), t(sm.envMap), sm.roughness, sm.metalness, sm.emissive.getHex(), sm.normalScale.x, sm.normalScale.y,
+      sm.normalMapType, sm.envMapIntensity, sm.aoMapIntensity, sm.bumpScale, sm.displacementScale, sm.transparent, sm.opacity, sm.alphaTest, sm.side,
+      sm.vertexColors, sm.flatShading, sm.depthWrite, sm.depthTest, sm.blending, sm.alphaToCoverage, sm.premultipliedAlpha, sm.toneMapped, sm.fog,
+      sm.wireframe, sm.polygonOffset, sm.polygonOffsetFactor, sm.polygonOffsetUnits, JSON.stringify(sm.userData),
+    ].join('|');
+    let base = this.mergeMats.get(sig);
+    if (!base) {
+      base = sm.clone();
+      base.color.setRGB(1, 1, 1);
+      base.name = `${sm.name || 'material'}+tint`;
+      this.mergeMats.set(sig, base);
+      this.registerMaterial(base);
+    }
+    r = { mat: base, color: sm.color.clone() };
+    this.mergedOf.set(m, r);
+    return r;
+  }
+
+  private batchFor(part: TemplatePart): PropBatch {
     if (part.batch) return part.batch;
-    const cast = part.cast && this.quality.shadows;
-    const cull = tpl.small ? Math.max(this.quality.detailDistance * 2.2, 55) : Infinity;
     const multi = this.backend === 'batched';
-    const key = multi
-      ? `B|${part.material.uuid}|${layoutKey(part.geometry)}|${cast ? 1 : 0}|${cull}`
-      : `I|${part.geometry.uuid}|${part.material.uuid}|${cast ? 1 : 0}|${cull}`;
+    const shadows = this.quality.shadows;
+    let mat = part.material;
+    if (multi) {
+      const mm = this.mergedFor(part.material);
+      if (mm) {
+        mat = mm.mat;
+        part.tint = mm.color;
+      }
+    }
+    const key = multi ? `B|${mat.uuid}|${layoutKey(part.geometry)}` : `I|${part.geometry.uuid}|${mat.uuid}|${part.cast ? 1 : 0}`;
     let b = this.batches.get(key);
     if (!b) {
-      b = multi
-        ? new MultiBatch(part.material, cast, this.quality.shadows, cull, this.objRoot)
-        : new Batch(part.geometry, part.material, cast, this.quality.shadows, cull, this.objRoot);
+      b = multi ? new MultiBatch(mat, shadows, this.objRoot) : new InstancedBatch(part.geometry, mat, part.cast, shadows, this.objRoot);
       this.batches.set(key, b);
       this.batchList.push(b);
     }
@@ -665,9 +490,26 @@ export class PropsLayer implements IPropsLayer {
     return b;
   }
 
+  /** Culling parameters of one part of one placed object. */
+  private partParams(tpl: Template, part: TemplatePart, scale: number, lod: number): InstParams {
+    const T = this.tier;
+    const r = part.radius * scale;
+    let cull = Math.max(T.minCull, r * T.cullK);
+    if (part.glow) cull = Math.max(cull, 180);
+    if (cull > 420) cull = Infinity;
+    let shadow = 0;
+    if (part.cast && this.quality.shadows && this.castsClass(tpl.defId)) {
+      // tall props (trees, buildings) cast up to shadowFar; everything else near the focus only
+      shadow = tpl.tall ? T.shadowFar : T.shadowNear;
+      // small parts of big objects (railings, signs) only close up
+      if (r < 0.45) shadow = Math.min(shadow, T.shadowNear * 0.6);
+    }
+    return { cull, shadow, lodOn: ((part.levels >> lod) & 1) === 1, shadowOn: ((part.levels >> this.shadowLevel(tpl, lod)) & 1) === 1, tint: part.tint };
+  }
+
   // ------------------------------------------------------------ objects
 
-  private computeMatrix(o: PlacedObject, spec: PropSpec, out: THREE.Matrix4): void {
+  private computeMatrix(o: PlacedObject, spec: PropSpec, out: THREE.Matrix4): number {
     const c = this.world.objectCenter(o);
     let yaw = (o.rot * Math.PI) / 2;
     let s = 1;
@@ -680,6 +522,34 @@ export class PropsLayer implements IPropsLayer {
     this.tmpP.set(c.x, c.y, c.z);
     this.tmpS.set(s, s, s);
     out.compose(this.tmpP, this.tmpQ, this.tmpS);
+    return s;
+  }
+
+  /** Is this def big enough to cast shadows on the current tier (tiny props never do)? */
+  private castsClass(defId: string): boolean {
+    const c = this.sizeClass.get(defId);
+    return !c || c.h > this.tier.castH || c.r > this.tier.castR;
+  }
+
+  /** LOD level used by the shadow pass: one coarser than the view on tiers with shadowLodBias. */
+  private shadowLevel(tpl: Template, lod: number): number {
+    return tpl.hasLod ? Math.min(2, lod + this.tier.shadowLodBias) : lod;
+  }
+
+  /** LOD level for an object at matrix `m` from the last known camera position (±8 % hysteresis). */
+  private lodFor(tpl: Template, m: THREE.Matrix4, current: number): number {
+    if (!tpl.hasLod || !this.haveCamera) return 0;
+    const e = m.elements;
+    const c = this.view.cam;
+    const d2 = (e[12] - c.x) ** 2 + (e[13] - c.y) ** 2 + (e[14] - c.z) ** 2;
+    const D1 = this.tier.lodDist;
+    const D2 = D1 * LOD_FAR;
+    let L = current;
+    if (L === 0 && d2 > D1 * D1 * 1.1664) L = 1;
+    if (L === 1 && d2 > D2 * D2 * 1.1664) L = 2;
+    if (L === 2 && d2 < D2 * D2 * 0.8464) L = 1;
+    if (L === 1 && d2 < D1 * D1 * 0.8464) L = 0;
+    return L;
   }
 
   private addObject(o: PlacedObject): void {
@@ -690,8 +560,8 @@ export class PropsLayer implements IPropsLayer {
     }
     const spec = this.specFor(o.defId);
     const tpl = this.template(o.defId, this.variantOf(spec, o.seed));
-    const rec: ObjRec = { obj: o, tpl, matrix: new THREE.Matrix4(), slots: [], unique: null, light: null };
-    this.computeMatrix(o, spec, rec.matrix);
+    const rec: ObjRec = { obj: o, tpl, matrix: new THREE.Matrix4(), scale: 1, slots: [], unique: null, lod: 0 };
+    rec.scale = this.computeMatrix(o, spec, rec.matrix);
     if (spec.unique) {
       // holder carries the placement; the clone keeps the builder's own root transform
       const holder = new THREE.Group();
@@ -703,31 +573,34 @@ export class PropsLayer implements IPropsLayer {
       rec.unique = holder;
       this.uniques.push(rec);
     } else {
-      tpl.parts.forEach((p, i) => {
-        const b = this.batchFor(tpl, p);
+      rec.lod = this.lodFor(tpl, rec.matrix, 0);
+      for (const p of tpl.parts) {
+        const b = this.batchFor(p);
         this.tmpM.multiplyMatrices(rec.matrix, p.local);
-        rec.slots.push({ batch: b, index: b.add(p.geometry, this.tmpM, { rec, part: i }) });
-      });
+        // the slot object is shared with the batch so swap-remove back-ends can re-index it
+        const slot: Slot = { batch: b, index: -1 };
+        rec.slots.push(slot);
+        slot.index = b.add(p.geometry, this.tmpM, { id: o.id, slot }, this.partParams(tpl, p, rec.scale, rec.lod));
+      }
+      if (tpl.hasLod) this.lodRecs.push(rec);
     }
-    if (tpl.lightAnchor) {
-      rec.light = tpl.lightAnchor.clone().applyMatrix4(rec.matrix);
-      this.lightRecs.push(rec);
-    }
+    if (tpl.emitters.length) this.night.setObject(o.id, tpl.emitters, rec.matrix);
     this.recs.set(o.id, rec);
+    this.cullDirty = true;
     if (this.highlightId === o.id) this.showHighlight(rec);
   }
 
   private cloneUnique(tpl: Template): THREE.Object3D {
     const u = tpl.root.clone(true);
-    const cast = this.quality.shadows;
-    const large = this.sizeClass.get(tpl.defId)?.large ?? true;
+    const shadows = this.quality.shadows;
+    const cast = this.castsClass(tpl.defId);
     u.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh) return;
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       const transparent = mats.some((m) => m.transparent && m.opacity < 0.6);
-      mesh.castShadow = cast && large && !mesh.userData.noShadow && !transparent;
-      mesh.receiveShadow = cast;
+      mesh.castShadow = shadows && cast && !mesh.userData.noShadow && !transparent;
+      mesh.receiveShadow = shadows;
       setupWindMesh(mesh);
       for (const m of mats) this.registerMaterial(m);
     });
@@ -737,7 +610,6 @@ export class PropsLayer implements IPropsLayer {
   private removeObject(id: number): void {
     const rec = this.recs.get(id);
     if (!rec) return;
-    // remove slots from the highest index down per batch is not required: swap-remove updates refs
     for (const s of rec.slots) s.batch.remove(s.index);
     rec.slots.length = 0;
     if (rec.unique) {
@@ -745,16 +617,13 @@ export class PropsLayer implements IPropsLayer {
       const i = this.uniques.indexOf(rec);
       if (i >= 0) this.uniques.splice(i, 1);
     }
-    if (rec.light) {
-      const i = this.lightRecs.indexOf(rec);
-      if (i >= 0) this.lightRecs.splice(i, 1);
-      for (const l of this.lights)
-        if (l.anchor === rec) {
-          l.anchor = null;
-          l.want = false;
-        }
+    if (rec.tpl.hasLod) {
+      const i = this.lodRecs.indexOf(rec);
+      if (i >= 0) this.lodRecs.splice(i, 1);
     }
+    this.night.setObject(id, null, null);
     this.recs.delete(id);
+    this.cullDirty = true;
     if (this.highlightId === id) this.highlight.clear();
   }
 
@@ -762,15 +631,13 @@ export class PropsLayer implements IPropsLayer {
     for (const b of this.batchList) b.clear();
     for (const r of this.uniques) if (r.unique) this.uniqueRoot.remove(r.unique);
     this.uniques.length = 0;
-    this.lightRecs.length = 0;
-    for (const l of this.lights) {
-      l.anchor = null;
-      l.want = false;
-    }
+    this.lodRecs.length = 0;
+    this.night.clear();
     this.recs.clear();
     this.highlight.clear();
     for (const o of this.world.objects.values()) this.addObject(o);
     if (this.highlightId !== null && !this.recs.has(this.highlightId)) this.highlightId = null;
+    this.cullDirty = true;
   }
 
   /** Terrain heights changed: re-seat objects whose footprint touches the rect. */
@@ -780,93 +647,98 @@ export class PropsLayer implements IPropsLayer {
       const def = OBJECTS_BY_ID[o.defId];
       const [w, d] = rotatedSize(def, o.rot);
       if (o.tx > r.x1 + 1 || o.tz > r.z1 + 1 || o.tx + w < r.x0 - 1 || o.tz + d < r.z0 - 1) continue;
-      this.computeMatrix(o, rec.tpl.spec, rec.matrix);
+      rec.scale = this.computeMatrix(o, rec.tpl.spec, rec.matrix);
       if (rec.unique) rec.matrix.decompose(rec.unique.position, rec.unique.quaternion, rec.unique.scale);
       rec.slots.forEach((s, i) => {
         this.tmpM.multiplyMatrices(rec.matrix, rec.tpl.parts[i].local);
         s.batch.set(s.index, this.tmpM);
       });
-      if (rec.light && rec.tpl.lightAnchor) rec.light.copy(rec.tpl.lightAnchor).applyMatrix4(rec.matrix);
+      if (rec.tpl.emitters.length) this.night.setObject(o.id, rec.tpl.emitters, rec.matrix);
     }
+    this.night.markDirty();
+    this.cullDirty = true;
   }
 
   // ------------------------------------------------------------ per frame
 
+  /** Ground point at the centre of the view (where the camera looks). */
+  private computeFocus(camera: THREE.Camera, out: THREE.Vector3): void {
+    const cam = this.view.cam;
+    const dir = camera.getWorldDirection(this.camDir);
+    const w = this.world;
+    if (dir.y > -0.03) {
+      out.copy(cam).addScaledVector(dir, 60);
+      out.y = w.heightAt(out.x, out.z);
+      return;
+    }
+    let h = w.heightAt(cam.x, cam.z);
+    let t = 0;
+    for (let i = 0; i < 4; i++) {
+      t = Math.min(Math.max((cam.y - h) / -dir.y, 0), 400);
+      h = w.heightAt(cam.x + dir.x * t, cam.z + dir.z * t);
+    }
+    out.set(cam.x + dir.x * t, h, cam.z + dir.z * t);
+  }
+
   update(dt: number, nightFactor: number, camera: THREE.Camera): void {
     if (this.disposed) return;
     this.time += dt;
+    this.frame++;
     updateWind(dt);
     this.fences.update();
 
     camera.updateMatrixWorld();
-    const cam = this.camPos.setFromMatrixPosition(camera.matrixWorld);
-    for (const b of this.batchList) if (b.dirty || b.needsCull(cam)) b.sync(cam);
+    const view = this.view;
+    view.cam.setFromMatrixPosition(camera.matrixWorld);
+    this.haveCamera = true;
+    const moved = !this.lastCamM.equals(camera.matrixWorld) || !this.lastProjM.equals(camera.projectionMatrix) || view.camera !== camera;
+    if (moved) {
+      this.lastCamM.copy(camera.matrixWorld);
+      this.lastProjM.copy(camera.projectionMatrix);
+      view.camera = camera;
+      this.computeFocus(camera, view.focus);
+      this.tmpM.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      this.frustum.setFromProjectionMatrix(this.tmpM, camera.coordinateSystem);
+      frustumToArray(this.frustum, view.planes);
+      this.cullDirty = true;
+    }
+    view.shadows = this.quality.shadows;
+
+    // LOD: every few frames, or right away after a big camera move
+    if (this.lodRecs.length && (this.lodDirty || this.frame % LOD_INTERVAL === 0 || this.lodCam.distanceToSquared(view.cam) > 4)) this.updateLods();
+
+    for (const b of this.batchList) if (this.cullDirty || b.dirty) b.cull(view);
+    this.fences.cull(view, this.cullDirty);
+    this.cullDirty = false;
 
     // lamps / windows
-    if (Math.abs(nightFactor - this.night) > 0.001) {
-      this.night = nightFactor;
-      for (const m of this.nightMats) m.emissiveIntensity = nightFactor * (m.userData.nightEmissive as number);
+    if (Math.abs(nightFactor - this.nightLevel) > 0.001) {
+      this.nightLevel = nightFactor;
+      for (const m of this.nightMats) m.emissiveIntensity = nightFactor * this.glowOf(m.userData.nightEmissive as number);
     }
 
     // unique props
     for (const r of this.uniques) r.tpl.spec.animate?.(r.unique!.children[0], this.time, nightFactor);
 
-    this.updateLights(dt, nightFactor, camera);
+    this.night.update(dt, nightFactor, view.focus);
+    updateFade(view.cam, view.focus, this.tier.fade);
     this.highlight.update(dt, this.time);
   }
 
-  private updateLights(dt: number, night: number, camera: THREE.Camera): void {
-    if (this.lights.length === 0) return;
-    this.lightTimer -= dt;
-    if (this.lightTimer <= 0 && night > 0.02) {
-      this.lightTimer = 0.4;
-      // ground point the camera looks at
-      camera.getWorldDirection(this.camDir);
-      const f = this.focus.copy(this.camPos);
-      if (this.camDir.y < -0.05) {
-        const t = Math.min((this.camPos.y - 0) / -this.camDir.y, 150);
-        f.addScaledVector(this.camDir, t);
+  private updateLods(): void {
+    this.lodDirty = false;
+    this.lodCam.copy(this.view.cam);
+    for (const rec of this.lodRecs) {
+      const lvl = this.lodFor(rec.tpl, rec.matrix, rec.lod);
+      if (lvl === rec.lod) continue;
+      rec.lod = lvl;
+      this.lodSwitches++;
+      const parts = rec.tpl.parts;
+      const sl = this.shadowLevel(rec.tpl, lvl);
+      for (let i = 0; i < rec.slots.length; i++) {
+        const s = rec.slots[i];
+        s.batch.setLodOn(s.index, ((parts[i].levels >> lvl) & 1) === 1, ((parts[i].levels >> sl) & 1) === 1);
       }
-      // N nearest light anchors (insertion into a tiny sorted list)
-      const N = this.lights.length;
-      const near = this.nearest;
-      const nd = this.nearestD;
-      near.length = 0;
-      nd.length = 0;
-      for (const r of this.lightRecs) {
-        const p = r.light!;
-        const d = (p.x - f.x) * (p.x - f.x) + (p.z - f.z) * (p.z - f.z);
-        if (d > 60 * 60) continue;
-        if (near.length === N && d >= nd[N - 1]) continue;
-        let k = near.length < N ? near.length : N - 1;
-        while (k > 0 && nd[k - 1] > d) {
-          near[k] = near[k - 1];
-          nd[k] = nd[k - 1];
-          k--;
-        }
-        near[k] = r;
-        nd[k] = d;
-      }
-      // slots keep wanted anchors; wanted anchors without a slot take a free (dark) one
-      for (const sl of this.lights) sl.want = sl.anchor !== null && near.indexOf(sl.anchor) >= 0;
-      for (const r of near) {
-        let held = false;
-        for (const sl of this.lights) if (sl.anchor === r) held = true;
-        if (held) continue;
-        let free: LightSlot | null = null;
-        for (const sl of this.lights) if (!sl.want && sl.level <= 0.01) free = sl;
-        if (!free) continue;
-        free.anchor = r;
-        free.level = 0;
-        free.want = true;
-        free.light.position.copy(r.light!);
-      }
-    }
-    for (const sl of this.lights) {
-      const target = sl.want && night > 0.02 ? 1 : 0;
-      sl.level += Math.sign(target - sl.level) * Math.min(Math.abs(target - sl.level), dt * 2.5);
-      if (sl.level <= 0.001 && !sl.want) sl.anchor = null;
-      sl.light.intensity = LIGHT_INTENSITY * night * sl.level;
     }
   }
 
@@ -920,12 +792,12 @@ export class PropsLayer implements IPropsLayer {
   // ------------------------------------------------------------ picking / selection
 
   pickObject(raycaster: THREE.Raycaster): number | null {
-    for (const b of this.batchList) if (b.dirty) b.sync(this.camPos.lengthSq() > 0 ? this.camPos : null);
+    if (this.backend === 'instanced') for (const b of this.batchList) if (b.dirty) b.cull(this.view);
     let best = Infinity;
     let bestId: number | null = null;
     const hits = this.hits;
     for (const b of this.batchList) {
-      if (b.drawn() === 0) continue;
+      if (b.size() === 0) continue;
       hits.length = 0;
       b.mesh.raycast(raycaster, hits);
       for (const h of hits) {
@@ -981,31 +853,144 @@ export class PropsLayer implements IPropsLayer {
   // ------------------------------------------------------------ misc
 
   /** Debug counters (not part of the contract). */
-  debugInfo(): { backend: string; batches: number; liveBatches: number; instances: number; uniques: number; fenceMeshes: number } {
+  debugInfo(): {
+    backend: string;
+    batches: number;
+    liveBatches: number;
+    instances: number;
+    drawn: number;
+    uniques: number;
+    fenceMeshes: number;
+    templates: number;
+    lodObjects: number;
+    lodSwitches: number;
+    fade: number;
+    prewarmMs: number;
+    night: ReturnType<NightLights['stats']>;
+  } {
     let live = 0;
     let inst = 0;
+    let drawn = 0;
     for (const b of this.batchList) {
-      const n = b.drawn();
+      const n = b.size();
       if (n > 0) live++;
       inst += n;
+      drawn += b.drawn();
     }
     return {
       backend: this.backend,
       batches: this.batchList.length,
       liveBatches: live,
       instances: inst,
+      drawn,
       uniques: this.uniques.length,
       fenceMeshes: this.fences.meshes().filter((m) => m.count > 0).length,
+      templates: this.templates.size,
+      lodObjects: this.lodRecs.length,
+      lodSwitches: this.lodSwitches,
+      fade: fadeUniforms.uFadeParams.value.w,
+      prewarmMs: this.prewarmMs,
+      night: this.night.stats(),
     };
   }
 
-  setQuality(_quality: QualitySettings): void {
-    // TODO(polish): re-tier detail distances, shadows, LOD and lights.
+  setQuality(quality: QualitySettings): void {
+    const prev = this.quality;
+    this.quality = quality;
+    this.tier = propsTier(quality);
+    this.fences.setQuality(quality);
+    this.fences.setShadowRange(this.tier.shadowNear, this.tier.shadowFar, this.tier.fenceLod);
+    this.litter.setShadows(quality.shadows);
+    this.night.setPointLights(this.tier.pointLights);
+    for (const b of this.batchList) b.setShadows(quality.shadows);
+    for (const m of this.nightMats) m.emissiveIntensity = Math.max(this.nightLevel, 0) * this.glowOf(m.userData.nightEmissive as number);
+    if (prev.level !== quality.level) {
+      // builders take the tier (leaf-card counts, segments): rebuild templates
+      moduleFn<(l: string) => void>(natureModule, 'setNatureQuality')?.(quality.level);
+      this.disposeTemplates(false);
+    }
+    // re-add every object with the new distances / shadow rules
+    this.rebuildAll();
+    this.lodDirty = true;
+  }
+
+  /** Drop batches + templates (materials stay: they are shared / cached by the builders). */
+  private disposeTemplates(materials: boolean): void {
+    for (const r of this.uniques) if (r.unique) this.uniqueRoot.remove(r.unique);
+    this.uniques.length = 0;
+    this.lodRecs.length = 0;
+    this.recs.clear();
+    for (const b of this.batchList) b.dispose();
+    this.batchList = [];
+    this.batches.clear();
+    const geos = new Set<THREE.BufferGeometry>();
+    const mats = new Set<THREE.Material>();
+    for (const t of this.templates.values())
+      for (const r of [t.root, ...t.lodRoots])
+        r.traverse((o) => {
+          const mesh = o as THREE.Mesh;
+          if (!mesh.isMesh) return;
+          geos.add(mesh.geometry);
+          for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) mats.add(m);
+        });
+    // geometries may be cached by builders: three re-uploads a disposed geometry if it is used again
+    for (const g of geos) g.dispose();
+    for (const g of this.splitGeos) g.dispose();
+    this.splitGeos = [];
+    if (materials) {
+      for (const m of this.mergeMats.values()) mats.add(m);
+      this.mergeMats.clear();
+      this.mergedOf.clear();
+      for (const m of mats) {
+        disposeWind(m);
+        m.dispose();
+      }
+    }
+    this.templates.clear();
+    this.sizeClass.clear();
   }
 
   async prewarm(onProgress?: (fraction: number) => void): Promise<void> {
-    // TODO(polish): build every template ahead of time.
-    onProgress?.(1);
+    const t0 = performance.now();
+    const report = (f: number) => onProgress?.(Math.min(1, Math.max(0, f)));
+    const breathe = () => new Promise<void>((r) => setTimeout(r, 0));
+    report(0);
+    // 1. textures / materials of the builder modules
+    const nat = moduleFn<(cb?: ProgressFn) => Promise<void> | void>(natureModule, 'prewarmNatureAsync');
+    if (nat) await nat((f) => report(0.3 * f));
+    report(0.3);
+    await breathe();
+    if (this.disposed) return;
+    const st = moduleFn<(cb?: ProgressFn) => Promise<void> | void>(structuresModule, 'prewarmStructuresAsync');
+    if (st) await st((f) => report(0.3 + 0.2 * f));
+    report(0.5);
+    await breathe();
+    // 2. every template / variant (+ LOD), time-sliced so the loading bar animates
+    const jobs: [string, number][] = [];
+    for (const def of OBJECTS) {
+      if (def.notBuildable && !PROP_SPECS[def.id]) continue;
+      const spec = this.specFor(def.id);
+      for (let v = 0; v < Math.max(1, spec.variants | 0); v++) jobs.push([def.id, v]);
+    }
+    let slice = performance.now();
+    for (let i = 0; i < jobs.length; i++) {
+      if (this.disposed) return;
+      try {
+        this.template(jobs[i][0], jobs[i][1]);
+      } catch (err) {
+        console.error(`[props] prewarm of "${jobs[i][0]}" failed`, err);
+      }
+      report(0.5 + (0.45 * (i + 1)) / jobs.length);
+      if (performance.now() - slice > 14) {
+        await breathe();
+        slice = performance.now();
+      }
+    }
+    // 3. fence styles at the current detail
+    const detail = fenceDetail(this.quality);
+    for (const f of FENCES) fenceStyle(f.id, detail);
+    this.prewarmMs = Math.round(performance.now() - t0);
+    report(1);
   }
 
   dispose(): void {
@@ -1013,35 +998,17 @@ export class PropsLayer implements IPropsLayer {
     this.disposed = true;
     for (const u of this.unsub) u();
     this.unsub = [];
-    for (const b of this.batchList) b.dispose();
-    this.batchList = [];
-    this.batches.clear();
-    const geos = new Set<THREE.BufferGeometry>();
-    const mats = new Set<THREE.Material>();
-    for (const t of this.templates.values())
-      t.root.traverse((o) => {
-        const mesh = o as THREE.Mesh;
-        if (!mesh.isMesh) return;
-        geos.add(mesh.geometry);
-        for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) mats.add(m);
-      });
-    for (const g of geos) g.dispose();
-    for (const g of this.splitGeos) g.dispose();
-    this.splitGeos = [];
-    for (const m of mats) {
-      disposeWind(m);
-      m.dispose();
-    }
-    this.templates.clear();
+    this.disposeTemplates(true);
     for (const g of placeholderGeo.values()) g.dispose();
     placeholderGeo.clear();
     this.fences.dispose();
     disposeFenceStyles();
     this.litter.dispose();
     this.highlight.dispose();
-    for (const l of this.lights) l.light.removeFromParent();
-    this.lights = [];
+    this.night.dispose();
     disposePropMaterials();
+    moduleFn<() => void>(natureModule, 'disposeNatureResources')?.();
+    moduleFn<() => void>(structuresModule, 'disposeStructures')?.();
     this.root.removeFromParent();
   }
 }

@@ -35,12 +35,14 @@ export function assetFromDesign(key: string, design: CreatureDesign, detail: 0 |
     radius: design.radius ?? 0.5 * Math.max(size.x, size.z),
     triangles: built.triangles,
     buildMs: built.ms,
+    detail,
   };
 }
 
 export type DesignFn = (ctx: DesignContext) => CreatureDesign;
 
 export function disposeAsset(a: RigAsset): void {
+  a.lod?.dispose();
   a.geometry.dispose();
   a.material.dispose();
   a.highlightMaterial.dispose();

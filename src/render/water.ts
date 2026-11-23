@@ -2,18 +2,20 @@
 // shoreline intersection with the terrain is covered). MeshPhysicalMaterial
 // (IOR 1.33, PMREM sky reflections, real sun glint and shadows) extended with
 // animated multi-octave normals, depth-based absorption (water depth comes from
-// a per-vertex attribute sampled from world.heightAt on the same 1 m grid as
-// the terrain), soft shoreline foam and premultiplied-alpha compositing so the
-// reflection is not dimmed by transparency.
+// a per-vertex attribute sampled from world.heightAt with the same
+// tessellation as the terrain), soft shoreline foam and premultiplied-alpha
+// compositing so the reflection is not dimmed by transparency. Per-channel
+// absorption of the lake bed itself happens in the ground shader, so the
+// surface only veils what is below lightly in shallows (wading legs stay
+// visible) and strongly over deep pools.
 
 import * as THREE from 'three';
 import { MAP_H, MAP_W, TILE, WATER_LEVEL } from '../core/constants';
 import { isWater, type Terrain } from '../core/types';
 import type { World } from '../core/world';
-import { TERRAIN_SEG } from './terrain';
+import { nearWater } from './terrain';
 
-const NX = MAP_W * TERRAIN_SEG + 1;
-const STEP = TILE / TERRAIN_SEG;
+const CX = MAP_W + 1;
 
 export interface WaterUniforms {
   [k: string]: THREE.IUniform;
@@ -31,7 +33,7 @@ export class WaterSurface {
   readonly uniforms: WaterUniforms;
   private geo = new THREE.BufferGeometry();
   private material: THREE.MeshPhysicalMaterial;
-  private vmap = new Int32Array(NX * NX);
+  private vmap = new Int32Array(CX * (MAP_H + 1));
 
   constructor(
     private world: World,
@@ -44,8 +46,8 @@ export class WaterSurface {
       uWaves: { value: waves },
       uNoise: { value: noise },
       uTime: { value: 0 },
-      uDeep: { value: new THREE.Color(0.011, 0.036, 0.032) },
-      uShallow: { value: new THREE.Color(0.045, 0.07, 0.05) },
+      uDeep: { value: new THREE.Color(0.008, 0.03, 0.034) },
+      uShallow: { value: new THREE.Color(0.06, 0.09, 0.075) },
       uBank: { value: new THREE.Color(0.02, 0.03, 0.015) },
     };
     const m = new THREE.MeshPhysicalMaterial({
@@ -85,14 +87,17 @@ export class WaterSurface {
           if (wDepth < -0.02) discard;
           vec3 wV = normalize(cameraPosition - vWPos);
           float pathLen = max(wDepth, 0.0) / max(wV.y, 0.22);
-          float absorb = 1.0 - exp(-pathLen * 0.95);
+          // clear-ish shallows (the bed is tinted per channel by the ground
+          // shader; wading legs stay visible), murky dark deep pools
+          float turbid = mix(0.3, 0.9, smoothstep(0.95, 1.85, wDepth));
+          float absorb = 1.0 - exp(-pathLen * turbid);
           // shoreline foam: thin, broken, slowly pulsing
           float fn = texture2D(uNoise, vWPos.xz * 0.6 + vec2(uTime * 0.02, -uTime * 0.015)).b;
           float fn2 = texture2D(uNoise, vWPos.xz * 1.9 - vec2(uTime * 0.03, uTime * 0.01)).g;
           float shore = 1.0 - smoothstep(0.0, 0.025 + 0.035 * fn, wDepth);
           float foam = shore * smoothstep(0.5, 0.7, fn2 * 0.6 + fn * 0.4 + 0.1 * sin(uTime * 0.8 + vWPos.x * 0.7)) * 0.45;
           foam = max(foam, (1.0 - smoothstep(0.0, 0.01, wDepth)) * 0.25 * fn2);
-          diffuseColor.rgb = mix(mix(uShallow, uDeep, smoothstep(0.1, 1.6, pathLen)), vec3(0.42, 0.43, 0.41), foam);`,
+          diffuseColor.rgb = mix(mix(uShallow, uDeep, smoothstep(0.6, 2.4, pathLen)), vec3(0.42, 0.43, 0.41), foam);`,
         )
         .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = mix(roughness, 0.55, foam);')
         .replace(
@@ -151,18 +156,15 @@ export class WaterSurface {
   }
 
   private tileNeedsWater(x: number, z: number): boolean {
-    const w = this.world;
-    for (let dz = -1; dz <= 1; dz++)
-      for (let dx = -1; dx <= 1; dx++) {
-        const tx = x + dx,
-          tz = z + dz;
-        if (!w.inBounds(tx, tz)) continue;
-        if (isWater(w.terrain[w.idx(tx, tz)] as Terrain)) return true;
-      }
-    return false;
+    return nearWater(this.world, x, z);
   }
 
-  /** Rebuild the whole surface (cheap: a few thousand vertices). */
+  /**
+   * Rebuild the whole surface (cheap: a few thousand vertices). Every water
+   * tile (and its one-tile margin) is a 4-triangle fan around the tile centre,
+   * exactly like the terrain's tessellation there (terrain.ts draws all tiles
+   * near water as fans), so the interpolated depth matches the ground.
+   */
   rebuild(): void {
     const w = this.world;
     const vmap = this.vmap;
@@ -171,42 +173,32 @@ export class WaterSurface {
     const depth: number[] = [];
     const nrm: number[] = [];
     const idx: number[] = [];
-    const vert = (i: number, j: number): number => {
-      const k = j * NX + i;
-      if (vmap[k] >= 0) return vmap[k];
-      const x = i * STEP,
-        z = j * STEP;
+    const push = (x: number, z: number): number => {
       const id = pos.length / 3;
       pos.push(x, WATER_LEVEL, z);
       nrm.push(0, 1, 0);
       depth.push(WATER_LEVEL - w.heightAt(x, z));
-      vmap[k] = id;
       return id;
+    };
+    const corner = (i: number, j: number): number => {
+      const k = j * CX + i;
+      if (vmap[k] < 0) vmap[k] = push(i * TILE, j * TILE);
+      return vmap[k];
     };
     for (let z = 0; z < MAP_H; z++)
       for (let x = 0; x < MAP_W; x++) {
         if (!this.tileNeedsWater(x, z)) continue;
         // skip margin tiles whose ground is entirely above the water
-        let anyBelow = false;
-        for (let j = 0; j <= TERRAIN_SEG && !anyBelow; j++)
-          for (let i = 0; i <= TERRAIN_SEG; i++)
-            if (w.heightAt((x * TERRAIN_SEG + i) * STEP, (z * TERRAIN_SEG + j) * STEP) < WATER_LEVEL + 0.03) {
-              anyBelow = true;
-              break;
-            }
-        if (!anyBelow) continue;
-        for (let j = 0; j < TERRAIN_SEG; j++)
-          for (let i = 0; i < TERRAIN_SEG; i++) {
-            const gi = x * TERRAIN_SEG + i,
-              gj = z * TERRAIN_SEG + j;
-            const a = vert(gi, gj),
-              b = vert(gi + 1, gj),
-              c = vert(gi, gj + 1),
-              d = vert(gi + 1, gj + 1);
-            // same diagonal pattern as the terrain so interpolated depth matches the ground
-            if ((gi + gj) & 1) idx.push(a, c, b, b, c, d);
-            else idx.push(a, c, d, a, d, b);
-          }
+        let lowest = Infinity;
+        for (let j = 0; j <= 2; j++)
+          for (let i = 0; i <= 2; i++) lowest = Math.min(lowest, w.heightAt((x + i * 0.5) * TILE, (z + j * 0.5) * TILE));
+        if (lowest >= WATER_LEVEL + 0.03) continue;
+        const a = corner(x, z),
+          b = corner(x + 1, z),
+          c = corner(x, z + 1),
+          d = corner(x + 1, z + 1);
+        const m = push((x + 0.5) * TILE, (z + 0.5) * TILE);
+        idx.push(a, m, b, b, m, d, d, m, c, c, m, a);
       }
     this.addOuterBand(pos, nrm, depth, idx);
     this.geo.dispose();

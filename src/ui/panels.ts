@@ -11,6 +11,7 @@ import { SPECIES_BY_ID } from '../data/species';
 import { BIOME_NAME, STAFF_INFO, TERRAIN_INFO, type ThumbSpec } from './catalog';
 import { button, el, escapeHtml, fmtMoney, fmtPct, iconEl, levelClass, meter, setText, swallowPointer } from './dom';
 import { icon, type IconName } from './icons';
+import { cue } from './sound';
 import type { ThumbnailService } from './thumbs';
 
 // ---------------------------------------------------------------------------
@@ -65,23 +66,46 @@ export function fenceNameForDanger(danger: number): string {
 // ---------------------------------------------------------------------------
 // dialog
 
+const openDialogs: ((v: boolean) => void)[] = [];
+
+/** Close the top-most confirm dialog (Android back). Returns false if none is open. */
+export function closeTopDialog(): boolean {
+  const fin = openDialogs[openDialogs.length - 1];
+  if (!fin) return false;
+  fin(false);
+  return true;
+}
+
+export function dialogOpen(): boolean {
+  return openDialogs.length > 0;
+}
+
 export function showDialog(
   root: HTMLElement,
   opts: { title: string; text: string; ok: string; cancel?: string; danger?: boolean },
 ): Promise<boolean> {
   return new Promise((resolve) => {
-    const back = el('div', 'wh-dialog-back');
+    const back = el('div', { class: 'wh-dialog-back', attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': opts.title } });
+    let done = false;
     const finish = (v: boolean) => {
+      if (done) return;
+      done = true;
+      const i = openDialogs.indexOf(finish);
+      if (i >= 0) openDialogs.splice(i, 1);
+      if (!v) cue('close');
       back.remove();
       window.removeEventListener('keydown', onKey, true);
       resolve(v);
     };
     const onKey = (e: KeyboardEvent) => {
+      if (openDialogs[openDialogs.length - 1] !== finish) return;
       if (e.code === 'Escape') {
         e.stopPropagation();
+        e.preventDefault();
         finish(false);
-      } else if (e.code === 'Enter') {
+      } else if (e.code === 'Enter' || e.code === 'NumpadEnter') {
         e.stopPropagation();
+        e.preventDefault();
         finish(true);
       }
     };
@@ -97,7 +121,9 @@ export function showDialog(
     });
     swallowPointer(back);
     window.addEventListener('keydown', onKey, true);
+    openDialogs.push(finish);
     root.append(back);
+    cue('open');
     okBtn.focus({ preventScroll: true });
   });
 }
@@ -316,6 +342,7 @@ export class InfoPanel {
     this.view = null;
     this.followBtn = null;
     if (!sel) {
+      if (this.sheet.open) cue('close');
       this.sheet.hide();
       return;
     }
@@ -426,8 +453,9 @@ export class InfoPanel {
         danger: true,
       });
       if (ok && sim.animals.has(id)) {
-        sim.sellAnimal(id);
-        this.host.select(null);
+        const r = sim.sellAnimal(id);
+        if (!r.ok) cue('error');
+        else this.host.select(null);
       }
     });
     s.setFoot([this.makeFollow({ kind: 'animal', id }), sell]);
@@ -528,8 +556,9 @@ export class InfoPanel {
       if (!st) return;
       const ok = await showDialog(this.host.uiRoot, { title: `Dismiss ${st.name}?`, text: `${st.name} will leave the zoo. You will no longer pay their ${fmtMoney(st.salary)}/day wage.`, ok: 'Dismiss', danger: true });
       if (ok && sim.staff.has(id)) {
-        sim.fireStaff(id);
-        this.host.select(null);
+        const r = sim.fireStaff(id);
+        if (!r.ok) cue('error');
+        else this.host.select(null);
       }
     });
     s.setFoot([this.makeFollow({ kind: 'staff', id }), fire]);
@@ -584,25 +613,25 @@ export class InfoPanel {
     if (o.defId !== 'entrance_gate') {
       foot.push(
         button('wh-btn-danger', 'trash', 'Remove', async () => {
-          const cur = sim.world.objects.get(id);
-          if (!cur) return;
-          const [cw, cd] = rotatedSize(def, cur.rot);
-          const rect = { x0: cur.tx, z0: cur.tz, x1: cur.tx + cw - 1, z1: cur.tz + cd - 1 };
-          const dry = sim.bulldoze(rect, true);
-          // bulldoze also clears fences on the footprint border — be honest about it
-          let fences = 0;
-          for (let z = rect.z0; z <= rect.z1 + 1; z++) for (let x = rect.x0; x <= rect.x1; x++) if (sim.world.getFence({ dir: 'h', x, z })) fences++;
-          for (let z = rect.z0; z <= rect.z1; z++) for (let x = rect.x0; x <= rect.x1 + 1; x++) if (sim.world.getFence({ dir: 'v', x, z })) fences++;
+          if (!sim.world.objects.has(id)) return;
+          const dry = sim.removeObject(id, true);
+          if (!dry.ok) {
+            cue('error');
+            return;
+          }
+          const refund = Math.max(0, -dry.cost);
           const ok = await showDialog(this.host.uiRoot, {
             title: `Remove ${def.name}?`,
-            text: `You get ${fmtMoney(Math.max(0, -dry.cost))} back.${fences ? ` This also removes ${fences} adjacent fence segment${fences > 1 ? 's' : ''}.` : ''}`,
+            text: refund ? `You get ${fmtMoney(refund)} back. Fences and paths around it stay as they are.` : 'Fences and paths around it stay as they are.',
             ok: 'Remove',
             danger: true,
           });
-          if (ok && sim.world.objects.has(id)) {
-            sim.bulldoze(rect);
+          if (!ok || !sim.world.objects.has(id)) return;
+          const r = sim.removeObject(id);
+          if (r.ok) {
+            cue('bulldoze');
             this.host.select(null);
-          }
+          } else cue('error');
         }),
       );
     }
@@ -622,22 +651,34 @@ export class InfoPanel {
     const startRename = () => {
       const h = w.habitats.get(id);
       if (!h || titleEl.querySelector('input')) return;
-      const input = el('input', { class: 'wh-input', attrs: { maxlength: '28', value: h.name, 'aria-label': 'Habitat name' } }) as HTMLInputElement;
+      const input = el('input', {
+        class: 'wh-input',
+        attrs: { maxlength: '32', value: h.name, 'aria-label': 'Habitat name', enterkeyhint: 'done', autocomplete: 'off', spellcheck: 'false' },
+      }) as HTMLInputElement;
       titleEl.textContent = '';
       titleEl.append(input);
       input.focus();
       input.select();
+      let finished = false;
       const done = (save: boolean) => {
+        if (finished) return;
+        finished = true;
         const v = input.value.trim();
-        if (save && v && w.habitats.has(id)) w.renameHabitat(id, v);
+        const cur = w.habitats.get(id);
+        if (save && v && cur && v !== cur.name) {
+          const r = sim.renameHabitat(id, v);
+          cue(r.ok ? 'tap' : 'error');
+        }
         titleEl.textContent = '';
         lastTitle = '';
         renderTitle();
       };
       input.addEventListener('keydown', (e) => {
         e.stopPropagation();
-        if (e.key === 'Enter') done(true);
-        else if (e.key === 'Escape') done(false);
+        if (e.key === 'Enter') input.blur();
+        else if (e.key === 'Escape') {
+          done(false);
+        }
       });
       input.addEventListener('blur', () => done(true), { once: true });
     };
@@ -789,14 +830,16 @@ export class SpeciesCard {
         .slice(0, 8)
         .map((n) => `<span class="wh-tag">${escapeHtml(n!)}</span>`)
         .join('');
-      const kv = (k: string, v: string) => `<div class="wh-kv-item"><div class="wh-kv-k">${k}</div><div class="wh-kv-v">${escapeHtml(v)}</div></div>`;
+      const kv = (k: string, v: string, wide = false) =>
+        `<div class="wh-kv-item"${wide ? ' style="grid-column:1/-1"' : ''}><div class="wh-kv-k">${k}</div><div class="wh-kv-v">${escapeHtml(v)}</div></div>`;
       const facts = el('div', {
         class: 'wh-kv',
         html:
           kv('Group size', `${sp.groupMin}–${sp.groupMax}`) +
           kv('Space each', `${sp.spacePerAnimal} tiles`) +
-          kv('Fence needed', fenceNameForDanger(sp.danger)) +
-          kv('Guest appeal', `${sp.appeal}/10`),
+          kv('Guest appeal', `${sp.appeal}/10`) +
+          kv('Cost', fmtMoney(sp.cost)) +
+          kv('Fence needed', `${fenceNameForDanger(sp.danger)} or stronger`, true),
       });
       this.suit = null;
       this.suitWrap.textContent = '';

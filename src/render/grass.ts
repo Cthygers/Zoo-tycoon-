@@ -13,11 +13,17 @@ import type { World } from '../core/world';
 import { OBJECTS_BY_ID } from '../data/objects';
 
 const CELL = 4; // metres
-const BLADES = 8;
-const SEGS = 3;
 const CANDIDATES_PER_M2 = 6;
 
-function buildTuft(): THREE.InstancedBufferGeometry {
+/** Tuft geometry per quality tier: blades × segments (triangles = blades × (2·segs − 1)). */
+export interface TuftShape {
+  blades: number;
+  segs: number;
+}
+
+function buildTuft(shape: TuftShape): THREE.InstancedBufferGeometry {
+  const BLADES = shape.blades;
+  const SEGS = shape.segs;
   const pos: number[] = [];
   const nrm: number[] = [];
   const at: number[] = [];
@@ -125,9 +131,10 @@ export class GrassField {
     private world: World,
     noise: THREE.Texture,
     capacity: number,
+    readonly shape: TuftShape = { blades: 8, segs: 3 },
   ) {
     this.capacity = Math.max(64, capacity);
-    this.geo = buildTuft();
+    this.geo = buildTuft(shape);
     this.stagePos = new Float32Array(this.capacity * 4);
     this.stagePar = new Float32Array(this.capacity * 4);
     this.iPos = new THREE.InstancedBufferAttribute(new Float32Array(this.capacity * 4), 4);
@@ -201,8 +208,8 @@ export class GrassField {
           // colour: root dark, tip light; matches the ground's macro patches
           vec4 gm = textureLod(uNoise, iPos.xz * 0.019, 0.0);
           float macro = gm.r * 0.6 + 0.2;
-          vec3 base = mix(vec3(0.025, 0.042, 0.01), vec3(0.06, 0.045, 0.025), iPar.y);
-          vec3 tip = mix(vec3(0.1, 0.16, 0.035), vec3(0.24, 0.18, 0.085), iPar.y);
+          vec3 base = mix(vec3(0.034, 0.052, 0.018), vec3(0.07, 0.054, 0.03), iPar.y);
+          vec3 tip = mix(vec3(0.12, 0.19, 0.055), vec3(0.27, 0.21, 0.11), iPar.y);
           tip *= 0.85 + 0.3 * iPar.z;
           tip = mix(tip, tip * vec3(1.15, 1.02, 0.72), smoothstep(0.45, 0.75, gm.b) * 0.6);
           vGCol = mix(base, tip, smoothstep(0.0, 1.0, aBlade.x)) * (0.8 + 0.4 * macro);

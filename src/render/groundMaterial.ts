@@ -1,11 +1,23 @@
 // Ground material shared by the playable terrain and the decorative outer
 // landscape: MeshStandardMaterial extended with
-//  - per-tile terrain types (index texture) blended between neighbouring tiles
-//    with noise-warped, height-aware organic borders;
-//  - procedural texture-array sampling with per-layer rotation/scale and macro
-//    variation to hide tiling;
+//  - per-tile terrain types (index texture): the four surrounding tile types
+//    are merged by bilinear weight, the two strongest layers are sampled and
+//    blended across ~1 tile with a soft transition perturbed by multi-scale
+//    noise and by the layers' own height maps (dry tufts poke through lawn,
+//    lawn creeps into dirt) — organic edges at a fixed cost of ≤ 2 layer
+//    samples per pixel;
+//  - outside the map a continuous meadow mix (no tile lookups) that turns
+//    into mud / lake bed near the water line;
+//  - macro variation at 50 m / 11 m / 2.4 m: gentle brightness changes plus
+//    lawn hue shifts (lusher, yellowing, sun-bleached patches);
 //  - path overlay (paved / gravel / boardwalk) with crisp irregular edges;
-//  - wet shore band, underwater caustics and drifting cloud shadows.
+//  - wet shore band, per-channel underwater absorption of the lake bed,
+//    caustics and drifting cloud shadows;
+//  - low-sun "sheen" on grass (blades catch grazing light that a flat
+//    ground normal would miss), respecting shadows.
+//
+// Texture fetches per pixel (typical lawn pixel, low tier): 4 tile texels +
+// 4 noise + 2 layer (albedo, detail); transitions add 2.
 
 import * as THREE from 'three';
 import { MAP_H, MAP_W, TILE, WATER_LEVEL } from '../core/constants';
@@ -29,6 +41,8 @@ export interface GroundUniforms {
   uLayerXf: THREE.IUniform<THREE.Vector4[]>;
   uTime: THREE.IUniform<number>;
   uSunDirW: THREE.IUniform<THREE.Vector3>;
+  /** Direct light colour × intensity (sun or moon). */
+  uSunCol: THREE.IUniform<THREE.Color>;
   uCloudOffset: THREE.IUniform<THREE.Vector2>;
   uCloudCover: THREE.IUniform<number>;
   uCloudShadow: THREE.IUniform<number>;
@@ -42,6 +56,7 @@ uniform highp sampler2D uTypeTex;
 uniform vec4 uLayerXf[${GROUND_LAYERS}];
 uniform float uTime;
 uniform vec3 uSunDirW;
+uniform vec3 uSunCol;
 uniform vec2 uCloudOffset;
 uniform float uCloudCover;
 uniform float uCloudShadow;
@@ -52,25 +67,25 @@ const int MAPW = ${MAP_W};
 const int MAPH = ${MAP_H};
 const float TILE_M = ${TILE.toFixed(1)};
 const float WATER_Y = ${WATER_LEVEL.toFixed(3)};
+const float MAP_WM = ${(MAP_W * TILE).toFixed(1)};
+const float MAP_HM = ${(MAP_H * TILE).toFixed(1)};
 
+float gLuma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 bool inMap(ivec2 c) { return c.x >= 0 && c.y >= 0 && c.x < MAPW && c.y < MAPH; }
 
-// Ground layer for a tile (terrain type → texture layer). Outside the map:
-// meadow, or lake bed / mud where the decorative ground dips to the water line
-// (ponds that continue past the border).
+// Ground layer just outside the map: meadow, or mud / lake bed where the
+// decorative ground dips to the water line (ponds that continue past the border).
 float gOuterY;
-int layerAt(ivec2 c) {
-  if (inMap(c)) {
-    int t = int(texelFetch(uTypeTex, c, 0).r * 255.0 + 0.5);
-    return t >= 7 ? 7 : t;
-  }
+int outerLayer() {
   if (gOuterY < WATER_Y - 0.02) return 7;
   if (gOuterY < WATER_Y + 0.12) return 6;
-  vec4 n = textureLod(uNoise, vec2(c) * 0.021 + 0.13, 0.0);
-  float v = n.r * 0.7 + n.b * 0.3;
-  if (v > 0.6) return 1;
-  if (v < 0.3 && n.g > 0.55) return 2;
   return 0;
+}
+// Ground layer for a tile (terrain type → texture layer).
+int layerAt(ivec2 c) {
+  if (!inMap(c)) return outerLayer();
+  int t = int(texelFetch(uTypeTex, c, 0).r * 255.0 + 0.5);
+  return t >= 7 ? 7 : t;
 }
 int pathAt(ivec2 c) {
   if (!inMap(c)) return 0;
@@ -115,39 +130,82 @@ GSample sampleLayer(int layer, vec2 xz) {
   return s;
 }
 
-GSample sampleGround(vec3 wp, vec4 nzA, vec4 nzB, vec4 nzC) {
+GSample mixSample(GSample a, GSample b, float m) {
+  GSample r;
+  r.alb = mix(a.alb, b.alb, m);
+  r.slope = mix(a.slope, b.slope, m);
+  r.rough = mix(a.rough, b.rough, m);
+  r.ao = mix(a.ao, b.ao, m);
+  r.h = mix(a.h, b.h, m);
+  return r;
+}
+
+// Share of the lawn / grassland layers in the final blend (for hue variation and sheen).
+float gGrassy;
+float gLawn;
+
+GSample sampleGround(vec3 wp, vec4 nzA, vec4 nzB, vec4 nzC, vec4 nzD) {
   gOuterY = wp.y;
   vec2 tp = wp.xz / TILE_M;
-  // organic warp at three scales (≈50 m, 11 m, 2.4 m)
-  vec2 warp = (nzA.gb - 0.5) * 2.2 + (nzB.rg - 0.5) * 2.6 + (nzC.rg - 0.5) * 1.3;
+  ivec2 here = ivec2(floor(tp));
+  float fine = nzC.b * 0.55 + nzD.g * 0.45; // ≈2.4 m + 0.6 m noise
+  if (!inMap(here)) {
+    // continuous meadow: dry patches fade in away from the border
+    vec2 o = max(max(-wp.xz, wp.xz - vec2(MAP_WM, MAP_HM)), 0.0);
+    float dOut = length(o);
+    int base = outerLayer();
+    float v = nzA.r * 0.6 + nzB.r * 0.4 + (fine - 0.5) * 0.12;
+    float dry = base == 0 ? smoothstep(0.52, 0.76, v) * smoothstep(6.0, 26.0, dOut) * 0.75 : 0.0;
+    GSample a = sampleLayer(base, wp.xz);
+    gLawn = base == 0 ? 1.0 - dry : 0.0;
+    gGrassy = base == 0 ? 1.0 : 0.0;
+    if (dry < 0.01) return a;
+    GSample b = sampleLayer(1, wp.xz);
+    float m = smoothstep(0.25, 0.75, dry + (b.h - a.h) * 0.3);
+    return mixSample(a, b, m);
+  }
+  // small organic warp (≈0.7 tile) so borders never follow the tile grid
+  vec2 warp = (nzB.rg - 0.5) * 0.9 + (nzC.rg - 0.5) * 0.45;
   vec2 g = tp + warp - 0.5;
   vec2 ci = floor(g);
   vec2 f = g - ci;
   ivec2 i0 = ivec2(ci);
-  int l00 = layerAt(i0);
-  int l10 = layerAt(i0 + ivec2(1, 0));
-  int l01 = layerAt(i0 + ivec2(0, 1));
-  int l11 = layerAt(i0 + ivec2(1, 1));
-  if (l00 == l10 && l00 == l01 && l00 == l11) return sampleLayer(l00, wp.xz);
-  // plain bilinear weights give rounded iso-lines (no tile staircase)
-  vec4 w = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
-  GSample a = sampleLayer(l00, wp.xz);
-  GSample b = sampleLayer(l10, wp.xz);
-  GSample c = sampleLayer(l01, wp.xz);
-  GSample d = sampleLayer(l11, wp.xz);
-  // height-aware blend: the taller material (grass blades, stones) wins near the border
-  vec4 hb = w * 1.5 + vec4(a.h, b.h, c.h, d.h) * 0.5;
-  float m = max(max(hb.x, hb.y), max(hb.z, hb.w));
-  vec4 wb = max(hb - (m - 0.32), 0.0);
-  wb *= wb;
-  wb /= max(dot(wb, vec4(1.0)), 1e-5);
-  GSample r;
-  r.alb = a.alb * wb.x + b.alb * wb.y + c.alb * wb.z + d.alb * wb.w;
-  r.slope = a.slope * wb.x + b.slope * wb.y + c.slope * wb.z + d.slope * wb.w;
-  r.rough = a.rough * wb.x + b.rough * wb.y + c.rough * wb.z + d.rough * wb.w;
-  r.ao = a.ao * wb.x + b.ao * wb.y + c.ao * wb.z + d.ao * wb.w;
-  r.h = a.h * wb.x + b.h * wb.y + c.h * wb.z + d.h * wb.w;
-  return r;
+  int L0 = layerAt(i0);
+  int L1 = layerAt(i0 + ivec2(1, 0));
+  int L2 = layerAt(i0 + ivec2(0, 1));
+  int L3 = layerAt(i0 + ivec2(1, 1));
+  if (L0 == L1 && L0 == L2 && L0 == L3) {
+    gLawn = L0 == 0 ? 1.0 : 0.0;
+    gGrassy = L0 <= 1 ? 1.0 : 0.0;
+    return sampleLayer(L0, wp.xz);
+  }
+  // merge equal layers, keep the two strongest
+  float W0 = (1.0 - f.x) * (1.0 - f.y), W1 = f.x * (1.0 - f.y), W2 = (1.0 - f.x) * f.y, W3 = f.x * f.y;
+  if (L1 == L0) { W0 += W1; W1 = 0.0; }
+  if (L2 == L0) { W0 += W2; W2 = 0.0; } else if (L2 == L1) { W1 += W2; W2 = 0.0; }
+  if (L3 == L0) { W0 += W3; W3 = 0.0; } else if (L3 == L1) { W1 += W3; W3 = 0.0; } else if (L3 == L2) { W2 += W3; W3 = 0.0; }
+  int A = L0; float wA = W0;
+  if (W1 > wA) { A = L1; wA = W1; }
+  if (W2 > wA) { A = L2; wA = W2; }
+  if (W3 > wA) { A = L3; wA = W3; }
+  int B = A; float wB = 0.0;
+  if (L0 != A && W0 > wB) { B = L0; wB = W0; }
+  if (L1 != A && W1 > wB) { B = L1; wB = W1; }
+  if (L2 != A && W2 > wB) { B = L2; wB = W2; }
+  if (L3 != A && W3 > wB) { B = L3; wB = W3; }
+  GSample a = sampleLayer(A, wp.xz);
+  GSample b = sampleLayer(B, wp.xz);
+  float t = wB / max(wA + wB, 1e-4); // 0 at A's tile centre … 0.5 on the border
+  // soft, ragged transition over ~1 tile each side. The noise term flips sign
+  // with the layer order so both sides of a border agree (continuous), and it
+  // vanishes at t = 0 so tile-centre lines never show; the taller material
+  // (dry tufts, stones) wins near the border.
+  float nn = (fine - 0.5) * 0.5 + (nzD.b - 0.5) * 0.16;
+  float s = t + ((A < B ? nn : -nn) + (b.h - a.h) * 0.3) * smoothstep(0.0, 0.25, t);
+  float m = smoothstep(0.06, 0.94, s);
+  gLawn = mix(A == 0 ? 1.0 : 0.0, B == 0 ? 1.0 : 0.0, m);
+  gGrassy = mix(A <= 1 ? 1.0 : 0.0, B <= 1 ? 1.0 : 0.0, m);
+  return mixSample(a, b, m);
 }
 
 // Rounded-rectangle distance (in tiles) from the open sides of a path tile.
@@ -181,20 +239,29 @@ const MAIN = /* glsl */ `
   vec4 nzA = texture2D(uNoise, vWPos.xz * 0.019);
   vec4 nzB = texture2D(uNoise, vWPos.xz * 0.087);
   vec4 nzC = texture2D(uNoise, vWPos.xz * 0.41);
-  float edgeNoise = (nzC.g - 0.5) * 0.05 + (texture2D(uNoise, vWPos.xz * 1.7).b - 0.5) * 0.025;
+  vec4 nzD = texture2D(uNoise, vWPos.xz * 1.7);
+  float edgeNoise = (nzC.g - 0.5) * 0.05 + (nzD.b - 0.5) * 0.025;
   float tileAA = 0.7 * length(fwidth(vWPos.xz)) / TILE_M + 0.002;
 #ifdef CAUSTICS
-  vec2 cuv = vWPos.xz * 0.21;
+  // warped so the voronoi web reads as wavy light lines, not polygons
+  vec2 cuv = vWPos.xz * 0.21 + (nzB.rg - 0.5) * 0.35;
   float caustA = texture2D(uNoise, cuv + vec2(uTime * 0.021, uTime * 0.013)).a;
   float caustB = texture2D(uNoise, cuv * 1.17 + vec2(-uTime * 0.017, uTime * 0.019) + 0.5).a;
 #endif
-  GSample gs = sampleGround(vWPos, nzA, nzB, nzC);
+  GSample gs = sampleGround(vWPos, nzA, nzB, nzC, nzD);
   vec3 gAlb = gs.alb;
-  // macro variation (breaks tiling, natural patchiness)
-  float macro = (nzA.r - 0.5) * 1.1 + (nzB.b - 0.5) * 0.8 + (nzC.b - 0.5) * 0.5;
-  gAlb *= 1.0 + 0.55 * macro;
-  float hueT = smoothstep(0.32, 0.68, nzA.b * 0.55 + nzB.g * 0.45);
-  gAlb *= mix(vec3(0.9, 1.0, 1.04), vec3(1.14, 1.02, 0.7), hueT);
+  // macro variation: gentle brightness at three scales (breaks tiling)…
+  float macro = (nzA.r - 0.5) * 0.5 + (nzB.b - 0.5) * 0.45 + (nzC.b - 0.5) * 0.3;
+  gAlb *= 1.0 + 0.32 * macro;
+  // …and lawn / meadow hue: lusher hollows, yellowing and sun-bleached patches
+  {
+    float yellow = smoothstep(0.5, 0.75, nzA.b * 0.6 + nzB.g * 0.4);
+    float lush = smoothstep(0.55, 0.78, nzA.g * 0.5 + nzB.r * 0.5);
+    vec3 tint = mix(vec3(1.0), vec3(1.1, 1.03, 0.76), yellow * 0.55);
+    tint = mix(tint, vec3(0.86, 0.97, 0.9), lush * 0.6);
+    tint = mix(tint, vec3(1.08, 1.06, 0.95), smoothstep(0.62, 0.8, nzC.r) * 0.35);
+    gAlb *= mix(vec3(1.0), tint, gGrassy);
+  }
   vec2 gSlope = gs.slope;
   float gRough = gs.rough;
   float gAO = gs.ao;
@@ -241,15 +308,23 @@ const MAIN = /* glsl */ `
       gSlope = mix(gSlope, ps.slope, pm);
       gRough = mix(gRough, ps.rough, pm);
       gAO = mix(gAO, ps.ao, pm);
+      gGrassy *= 1.0 - pm;
     }
   }
 
-  // ---- wet shore / underwater darkening
+  // ---- wet shore band, underwater absorption of the bed (per channel:
+  //      red goes first → green-teal shallows, dark deep pools)
   float wy = vWPos.y - WATER_Y;
   float wet = 1.0 - smoothstep(0.0, 0.16, wy);
   float underwater = 1.0 - smoothstep(-0.02, 0.02, wy);
-  gAlb *= mix(1.0, mix(0.62, 0.8, underwater), wet);
+  gAlb *= mix(1.0, mix(0.62, 0.82, underwater), wet);
   gRough = mix(gRough, 0.45, wet * 0.8);
+  if (underwater > 0.0) {
+    float wd = max(-wy, 0.0);
+    float vy = max(normalize(cameraPosition - vWPos).y, 0.25);
+    float path = wd / vy + wd * 0.8;
+    gAlb *= mix(vec3(1.0), exp(-path * vec3(0.62, 0.21, 0.3)), underwater);
+  }
   diffuseColor.rgb = gAlb;
 `;
 
@@ -271,6 +346,7 @@ export function createGroundMaterial(textures: GroundTextureSet, typeTex: THREE.
     uLayerXf: { value: layerXf },
     uTime: { value: 0 },
     uSunDirW: { value: new THREE.Vector3(0, 1, 0) },
+    uSunCol: { value: new THREE.Color(1, 1, 1) },
     uCloudOffset: { value: new THREE.Vector2() },
     uCloudCover: { value: 0.56 },
     uCloudShadow: { value: 0.45 },
@@ -283,7 +359,7 @@ export function createGroundMaterial(textures: GroundTextureSet, typeTex: THREE.
   if (opts.cloudShadows) defines.CLOUD_SHADOWS = 1;
   if (opts.caustics) defines.CAUSTICS = 1;
   material.defines = defines;
-  material.customProgramCacheKey = () => `ground:${opts.antiTile ? 1 : 0}${opts.cloudShadows ? 1 : 0}${opts.caustics ? 1 : 0}`;
+  material.customProgramCacheKey = () => `ground2:${opts.antiTile ? 1 : 0}${opts.cloudShadows ? 1 : 0}${opts.caustics ? 1 : 0}`;
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
     shader.vertexShader = shader.vertexShader
@@ -307,6 +383,15 @@ export function createGroundMaterial(textures: GroundTextureSet, typeTex: THREE.
       .replace(
         '#include <aomap_fragment>',
         `{
+          // grass sheen under a low sun: blades catch grazing light; scaled by
+          // the shadow the direct term actually received (ratio to unshadowed)
+          vec3 gN = normalize(vWNrm);
+          float gNdl = max(dot(gN, uSunDirW), 0.0);
+          float gExpect = gLuma(uSunCol * gAlb) * gNdl * RECIPROCAL_PI;
+          float gLit = clamp(gLuma(reflectedLight.directDiffuse) / max(gExpect, 1e-6), 0.0, 1.0);
+          float gLow = (1.0 - smoothstep(0.18, 0.62, uSunDirW.y)) * smoothstep(0.0, 0.06, uSunDirW.y);
+          reflectedLight.directDiffuse += uSunCol * gAlb * RECIPROCAL_PI * (gGrassy * gLow * 0.22 * gLit);
+
           float occ = mix(1.0, gAO, 0.85);
           reflectedLight.indirectDiffuse *= occ;
           // under water there is no air/ground specular interface
@@ -324,8 +409,8 @@ export function createGroundMaterial(textures: GroundTextureSet, typeTex: THREE.
             // two drifting line networks at different scales → shimmering caustic web
             float caust = caustA * 0.6 + caustB * 0.4;
             caust = caust * caust;
-            float fade = smoothstep(0.08, 0.35, depth) * (1.0 - smoothstep(1.2, 2.6, depth));
-            reflectedLight.directDiffuse *= mix(1.0, 0.7 + caust * 1.6, fade);
+            float fade = smoothstep(0.12, 0.4, depth) * (1.0 - smoothstep(1.0, 2.2, depth));
+            reflectedLight.directDiffuse *= mix(1.0, 0.84 + caust * 0.8, fade);
           }
           #endif
         }`,

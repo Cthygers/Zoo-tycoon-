@@ -28,8 +28,20 @@ const BALLOON_COLORS = [0xd8262e, 0x2f6fd0, 0xf2c230, 0x37a852, 0xe06aa8, 0xf07a
 const SCOOP_COLORS = [0xf3e6c8, 0xe9a3b4, 0x6b4128, 0xb6d99a];
 const CUP_COLORS = [0xc8302b, 0x2a62b3, 0xe8e4dc];
 
+/** Number of distinct colour variants of an item kind. */
+export function itemVariants(kind: ItemKind): number {
+  return kind === 'balloon' ? BALLOON_COLORS.length : kind === 'icecream' ? SCOOP_COLORS.length : kind === 'drink' ? CUP_COLORS.length : 1;
+}
+
+export const ITEM_KINDS: readonly ItemKind[] = ['food', 'drink', 'icecream', 'balloon', 'gift', 'broom'];
+
+export function isItemKind(k: string): k is ItemKind {
+  return (ITEM_KINDS as readonly string[]).includes(k);
+}
+
 /** Geometry for an item in the hand frame (origin at the wrist joint, hand hanging along −Y). */
 export function itemGeometry(kind: ItemKind, variant: number): THREE.BufferGeometry {
+  variant = Math.abs(Math.floor(variant)) % itemVariants(kind);
   const key = `${kind}:${variant}`;
   let g = cache.get(key);
   if (g) return g;

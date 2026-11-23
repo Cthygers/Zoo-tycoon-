@@ -3,7 +3,7 @@
 // All functions add geometry to a Kit (merged per material by the caller).
 
 import * as THREE from 'three';
-import { box, Kit, quad, V } from './kit';
+import { box, Kit, kitLod, quad, V } from './kit';
 import * as M from './mats';
 import { interiorUV, signUV, type InteriorKey, type SignKey } from './signs';
 
@@ -18,6 +18,8 @@ export function interiorBox(k: Kit, cx: number, cy: number, w: number, h: number
   const zb = zf - wallT - depth;
   // back
   k.add(mat, quad(w + 0.02, h + 0.02, r.u0, r.v0, r.u1, r.v1).translate(cx, cy, zb));
+  // distant LOD: the back panel alone reads the same
+  if (kitLod()) return;
   // sample the dark region at one texel so mip levels never bleed neighbours in
   const dr = interiorUV('dark');
   const du = (dr.u0 + dr.u1) / 2;
@@ -131,19 +133,15 @@ export function post(k: Kit, mat: THREE.Material, x: number, z: number, y0: numb
 
 /**
  * Small wall-mounted lantern (bracket + glowing box) on a +Z facing wall at z.
- * The glass uses the interior atlas' bright 'glow' region (emissive at night)
- * so it adds no extra material to a building.
+ * The glass is the lamp-post glass material (shared batch; warm glow, halo and
+ * light pool at night like the street lamps).
  */
 export function wallLantern(k: Kit, x: number, y: number, z: number, iron: THREE.Material = M.paint(M.COL.ironBlack)): void {
   k.add(iron, box(0.12, 0.16, 0.03).translate(x, y, z + 0.015));
   k.add(iron, box(0.03, 0.03, 0.16).translate(x, y + 0.05, z + 0.09));
   k.add(iron, box(0.17, 0.03, 0.17).translate(x, y + 0.17, z + 0.17));
   k.add(iron, box(0.11, 0.02, 0.11).translate(x, y - 0.06, z + 0.17));
-  const g = new THREE.BoxGeometry(0.13, 0.2, 0.13);
-  const r = interiorUV('glow');
-  const uv = g.getAttribute('uv') as THREE.BufferAttribute;
-  for (let i = 0; i < uv.count; i++) uv.setXY(i, r.u0 + uv.getX(i) * (r.u1 - r.u0), r.v0 + uv.getY(i) * (r.v1 - r.v0));
-  k.add(M.interior(), g.translate(x, y + 0.05, z + 0.17));
+  k.add(M.lampGlow(), new THREE.BoxGeometry(0.13, 0.2, 0.13).translate(x, y + 0.05, z + 0.17));
 }
 
 export { V };

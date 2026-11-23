@@ -3,13 +3,28 @@
 // multisampled render target, read back, and cached as data URLs. Terrain and
 // path swatches are painted procedurally on a 2D canvas. Work is queued and
 // processed a little per frame so opening a drawer never stalls the game.
+// Finished thumbnails are also persisted in IndexedDB (versioned keys), so on
+// the next launch the drawers fill instantly; any storage failure (private
+// mode, quota, no IndexedDB) silently falls back to rendering.
 
 import * as THREE from 'three';
 import type { CreatureModel, ICreatureFactory, IPropsLayer } from '../core/contracts';
 import { Noise } from '../core/rng';
 import { PathType, Terrain, type HumanAppearance, type StaffRole } from '../core/types';
+import { FENCES_BY_ID, PATHS_BY_TYPE } from '../data/fences';
+import { OBJECTS_BY_ID } from '../data/objects';
+import { SPECIES_BY_ID } from '../data/species';
 import type { ThumbSpec } from './catalog';
 import { disposeOwned } from './preview';
+
+/**
+ * Bump whenever thumbnail framing / lighting or the procedural models change
+ * enough that cached images from an older build would look wrong. Keys also
+ * hash the item's catalogue entry, so data edits invalidate single entries.
+ */
+export const THUMB_CACHE_VERSION = 4;
+const DB_NAME = 'wildhaven-thumbs';
+const DB_STORE = 'thumbs';
 
 export const THUMB_W = 228;
 export const THUMB_H = 192;
@@ -41,8 +56,164 @@ const STAFF_LOOK: Record<StaffRole, HumanAppearance> = {
   vet: { skin: 0xe0b394, hair: 0x6a4a2c, shirt: 0xe9ece8, pants: 0x3e4a5a, shoes: 0x2b2b2b, hairStyle: 1, height: 1.68, build: 0.95, child: false, female: true },
 };
 
+function hashStr(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
+/** Catalogue data a thumbnail depends on (so edits re-render just that item). */
+function specData(s: ThumbSpec): unknown {
+  switch (s.kind) {
+    case 'object':
+      return OBJECTS_BY_ID[s.defId];
+    case 'fence':
+      return FENCES_BY_ID[s.fenceId];
+    case 'animal':
+      return SPECIES_BY_ID[s.speciesId];
+    case 'staff':
+      return STAFF_LOOK[s.role];
+    case 'path':
+      return PATHS_BY_TYPE[s.pathType];
+    case 'terrain':
+      return TERRAIN_PAL[s.terrain];
+    default:
+      return null;
+  }
+}
+
+/**
+ * Tiny IndexedDB key/value store for thumbnail data URLs. Every operation is
+ * best-effort: errors, a blocked upgrade or a slow disk just mean "no cache".
+ */
+class ThumbStore {
+  private db: IDBDatabase | null = null;
+  private writes = new Map<string, string>();
+  private timer = 0;
+  private closed = false;
+
+  /**
+   * Load every entry with the given key prefix (removing entries written by
+   * other cache versions). Resolves with an empty map on any failure. There is
+   * no wall-clock timeout here (a busy main thread during loading would trip
+   * it); the caller stops waiting after a number of rendered frames instead.
+   */
+  load(prefix: string): Promise<Map<string, string>> {
+    const version = prefix.slice(0, prefix.indexOf('|') + 1);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (m: Map<string, string>) => {
+        if (settled) return;
+        settled = true;
+        resolve(m);
+      };
+      try {
+        const idb = (globalThis as { indexedDB?: IDBFactory }).indexedDB;
+        if (!idb) return finish(new Map());
+        const req = idb.open(DB_NAME, 1);
+        req.onupgradeneeded = () => {
+          try {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(DB_STORE)) db.createObjectStore(DB_STORE);
+          } catch {
+            /* ignore */
+          }
+        };
+        req.onerror = () => finish(new Map());
+        req.onblocked = () => finish(new Map());
+        req.onsuccess = () => {
+          const db = req.result;
+          if (this.closed) {
+            db.close();
+            return finish(new Map());
+          }
+          this.db = db;
+          db.onversionchange = () => {
+            db.close();
+            this.db = null;
+          };
+          const out = new Map<string, string>();
+          try {
+            // two bulk reads (one round trip each) instead of a cursor step per entry
+            const tx = db.transaction(DB_STORE, 'readwrite');
+            const store = tx.objectStore(DB_STORE);
+            const keysReq = store.getAllKeys();
+            const valsReq = store.getAll();
+            valsReq.onsuccess = () => {
+              const keys = keysReq.result;
+              const vals = valsReq.result;
+              for (let i = 0; i < keys.length; i++) {
+                const k = String(keys[i]);
+                const v = vals[i];
+                if (k.startsWith(prefix)) {
+                  if (typeof v === 'string' && v.startsWith('data:image/')) out.set(k.slice(prefix.length), v);
+                } else if (!k.startsWith(version)) store.delete(keys[i]); // written by an older build
+              }
+              finish(out); // don't wait for the stale-entry deletes to commit
+            };
+            tx.onerror = () => finish(out);
+            tx.onabort = () => finish(out);
+          } catch {
+            finish(out);
+          }
+        };
+      } catch {
+        finish(new Map());
+      }
+    });
+  }
+
+  /** Queue a write (flushed in one transaction shortly after). */
+  put(key: string, url: string): void {
+    if (this.closed) return;
+    this.writes.set(key, url);
+    if (!this.timer) this.timer = window.setTimeout(() => this.flush(), 400);
+  }
+
+  private flush(): void {
+    this.timer = 0;
+    const db = this.db;
+    if (!db || !this.writes.size) {
+      this.writes.clear();
+      return;
+    }
+    try {
+      const tx = db.transaction(DB_STORE, 'readwrite');
+      const store = tx.objectStore(DB_STORE);
+      for (const [k, v] of this.writes) store.put(v, k);
+      tx.onerror = (e) => e.preventDefault(); // quota etc.: just don't persist
+    } catch {
+      /* storage unavailable */
+    }
+    this.writes.clear();
+  }
+
+  close(): void {
+    this.closed = true;
+    if (this.timer) {
+      window.clearTimeout(this.timer);
+      this.flush();
+    }
+    try {
+      this.db?.close();
+    } catch {
+      /* ignore */
+    }
+    this.db = null;
+  }
+}
+
 export class ThumbnailService {
   private cache = new Map<string, string>();
+  private store = new ThumbStore();
+  /** Persistent entries loaded from IndexedDB (key → data URL), null until loaded. */
+  private persisted: Map<string, string> | null = null;
+  private prefix: string;
+  /** Frames spent waiting for the persistent cache before rendering anyway. */
+  private waitFrames = 0;
   private failed = new Set<string>();
   private queue: { key: string; spec: ThumbSpec }[] = [];
   private queued = new Set<string>();
@@ -60,7 +231,25 @@ export class ThumbnailService {
     private props: IPropsLayer,
     private creatures: ICreatureFactory,
     private envScene: THREE.Scene,
+    /** Variant tag for persisted thumbnails (e.g. the quality tier models were built at); null disables persistence. */
+    variant: string | null = 'default',
   ) {
+    this.prefix = `v${THUMB_CACHE_VERSION}|${variant ?? ''}|`;
+    if (variant !== null) {
+      this.store.load(this.prefix).then((m) => {
+        if (this.disposed) return;
+        // keep anything rendered while the store was opening
+        if (this.persisted) for (const [k, v] of this.persisted) m.set(k, v);
+        this.persisted = m;
+        // serve everything that was requested while the store was opening
+        const waiting = this.queue.splice(0);
+        for (const job of waiting) {
+          const hit = m.get(this.persistKey(job.key, job.spec));
+          if (hit) this.resolve(job.key, hit, false);
+          else this.queue.push(job);
+        }
+      });
+    } else this.persisted = new Map();
     const hemi = new THREE.HemisphereLight(0xdfe9f5, 0x5d5140, 1.35);
     const key = new THREE.DirectionalLight(0xfff0da, 2.3);
     key.position.set(4, 7, 5);
@@ -73,10 +262,29 @@ export class ThumbnailService {
     return this.cache.get(thumbKey(spec)) ?? null;
   }
 
+  private pkCache = new Map<string, string>();
+  private persistKey(key: string, spec: ThumbSpec): string {
+    let pk = this.pkCache.get(key);
+    if (pk) return pk;
+    let fp = '';
+    try {
+      fp = hashStr(JSON.stringify(specData(spec)) ?? '');
+    } catch {
+      fp = '';
+    }
+    pk = `${key}#${fp}`;
+    this.pkCache.set(key, pk);
+    return pk;
+  }
+
   /** Ask for a thumbnail; cb fires (possibly later) once it is ready. */
   request(spec: ThumbSpec, cb: Listener, priority = false): void {
     const key = thumbKey(spec);
-    const hit = this.cache.get(key);
+    let hit = this.cache.get(key);
+    if (!hit && this.persisted && spec.kind !== 'icon') {
+      hit = this.persisted.get(this.persistKey(key, spec));
+      if (hit) this.cache.set(key, hit);
+    }
     if (hit) {
       cb(hit);
       return;
@@ -92,7 +300,7 @@ export class ThumbnailService {
     }
   }
 
-  private resolve(key: string, url: string | null): void {
+  private resolve(key: string, url: string | null, spec: ThumbSpec | false): void {
     this.queued.delete(key);
     const ls = this.listeners.get(key);
     this.listeners.delete(key);
@@ -101,18 +309,28 @@ export class ThumbnailService {
       return;
     }
     this.cache.set(key, url);
+    if (spec && this.persisted) {
+      const pk = this.persistKey(key, spec);
+      this.persisted.set(pk, url);
+      this.store.put(this.prefix + pk, url);
+    }
     if (ls) for (const fn of ls) fn(url);
   }
 
   /** Process queued work (call once per frame, before the main render). */
   update(): void {
     if (this.disposed || this.busy || !this.queue.length) return;
+    // give the persistent cache a moment to open before rendering anything it may hold
+    if (!this.persisted) {
+      if (++this.waitFrames < 150) return;
+      this.persisted = new Map(); // storage is too slow: render now, merge when it arrives
+    }
     this.frame++;
     if (this.frame % 2) return; // at most one thumbnail every other frame
     const job = this.queue.shift()!;
     const s = job.spec;
-    if (s.kind === 'terrain') this.resolve(job.key, terrainSwatch(s.terrain));
-    else if (s.kind === 'path') this.resolve(job.key, pathSwatch(s.pathType));
+    if (s.kind === 'terrain') this.resolve(job.key, terrainSwatch(s.terrain), s);
+    else if (s.kind === 'path') this.resolve(job.key, pathSwatch(s.pathType), s);
     else if (s.kind === 'animal') {
       this.busy = true;
       this.creatures
@@ -121,14 +339,14 @@ export class ThumbnailService {
         .then(() => {
           this.busy = false;
           if (this.disposed) return;
-          this.resolve(job.key, this.renderCreature(() => this.creatures.createAnimal(s.speciesId, { seed: 11, sex: 'M', growth: 1 }), 'animal'));
+          this.resolve(job.key, this.renderCreature(() => this.creatures.createAnimal(s.speciesId, { seed: 11, sex: 'M', growth: 1 }), 'animal'), s);
         });
     } else if (s.kind === 'staff') {
-      this.resolve(job.key, this.renderCreature(() => this.creatures.createHuman(STAFF_LOOK[s.role], s.role, 5), 'human'));
+      this.resolve(job.key, this.renderCreature(() => this.creatures.createHuman(STAFF_LOOK[s.role], s.role, 5), 'human'), s);
     } else if (s.kind === 'object') {
-      this.resolve(job.key, this.renderModel(() => this.props.createObjectModel(s.defId, 3), 0.62));
+      this.resolve(job.key, this.renderModel(() => this.props.createObjectModel(s.defId, 3), 0.62), s);
     } else if (s.kind === 'fence') {
-      this.resolve(job.key, this.renderModel(() => this.props.createFenceSegmentModel(s.fenceId), 0.5));
+      this.resolve(job.key, this.renderModel(() => this.props.createFenceSegmentModel(s.fenceId), 0.5), s);
     }
   }
 
@@ -323,7 +541,7 @@ export class ThumbnailService {
     layer.height = THUMB_H;
     layer.getContext('2d')!.putImageData(img, 0, 0);
     c.drawImage(layer, 0, 0);
-    return cv.toDataURL('image/png');
+    return encodeCanvas(cv);
   }
 
   dispose(): void {
@@ -332,6 +550,7 @@ export class ThumbnailService {
     this.listeners.clear();
     this.rt?.dispose();
     this.rt = null;
+    this.store.close();
   }
 }
 
@@ -340,6 +559,17 @@ export class ThumbnailService {
 
 const SW = 128;
 const noise = new Noise(9071);
+
+let webpOk: boolean | null = null;
+/** WebP (with alpha) is ~3× smaller than PNG for these images; fall back to PNG where unsupported. */
+function encodeCanvas(cv: HTMLCanvasElement): string {
+  if (webpOk !== false) {
+    const u = cv.toDataURL('image/webp', 0.9);
+    webpOk = u.startsWith('data:image/webp');
+    if (webpOk) return u;
+  }
+  return cv.toDataURL('image/png');
+}
 
 function swatchCanvas(): { cv: HTMLCanvasElement; c: CanvasRenderingContext2D; img: ImageData } | null {
   const cv = document.createElement('canvas');
@@ -415,7 +645,7 @@ export function terrainSwatch(t: Terrain): string | null {
     s.c.fillStyle = g;
     s.c.fillRect(0, 0, SW, SW);
   }
-  return s.cv.toDataURL('image/png');
+  return encodeCanvas(s.cv);
 }
 
 export function pathSwatch(p: PathType): string | null {
@@ -490,5 +720,5 @@ export function pathSwatch(p: PathType): string | null {
     }
     c.putImageData(d, 0, 0);
   }
-  return s.cv.toDataURL('image/png');
+  return encodeCanvas(s.cv);
 }

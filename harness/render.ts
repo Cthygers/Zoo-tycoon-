@@ -110,21 +110,43 @@ if (params.has('pitch')) p.pitch = Number(params.get('pitch'));
 if (params.has('dist')) p.dist = Number(params.get('dist'));
 
 const cam = ctx.camera;
-const fy = world.heightAt(p.focus[0], p.focus[1]);
-const yaw = (p.yaw * Math.PI) / 180,
-  pitch = (p.pitch * Math.PI) / 180;
-cam.position.set(
-  p.focus[0] + Math.sin(yaw) * Math.cos(pitch) * p.dist,
-  fy + Math.sin(pitch) * p.dist,
-  p.focus[1] + Math.cos(yaw) * Math.cos(pitch) * p.dist,
-);
-if (view === 'low') cam.position.y = Math.max(cam.position.y, world.heightAt(cam.position.x, cam.position.z) + 1.7);
-cam.lookAt(p.focus[0], fy + (view === 'low' ? 1.2 : 0), p.focus[1]);
-const viewRadius = Math.tan((cam.fov * Math.PI) / 360) * p.dist * 1.6;
-ctx.setFocus(p.focus[0], p.focus[1], viewRadius);
+function applyView(pp: Preset, low = false) {
+  const fy = world.heightAt(pp.focus[0], pp.focus[1]);
+  const yaw = (pp.yaw * Math.PI) / 180,
+    pitch = (pp.pitch * Math.PI) / 180;
+  cam.position.set(
+    pp.focus[0] + Math.sin(yaw) * Math.cos(pitch) * pp.dist,
+    fy + Math.sin(pitch) * pp.dist,
+    pp.focus[1] + Math.cos(yaw) * Math.cos(pitch) * pp.dist,
+  );
+  if (low) cam.position.y = Math.max(cam.position.y, world.heightAt(cam.position.x, cam.position.z) + 1.7);
+  cam.lookAt(pp.focus[0], fy + (low ? 1.2 : 0), pp.focus[1]);
+  // same heuristic as the game camera (ui/camera.ts)
+  const cp = Math.cos(pitch);
+  ctx.setFocus(pp.focus[0], pp.focus[1], pp.dist * (0.85 + 1.5 * cp * cp));
+}
+applyView(p, view === 'low');
 ctx.resize(container.clientWidth, container.clientHeight);
 ctx.setTimeOfDay(minute, 1);
 ctx.settle();
+
+// ?atlas=1: show the foliage clump atlas in a corner (texture debug)
+let atlasScene: THREE.Scene | null = null;
+const atlasCam = new THREE.OrthographicCamera(0, 1, 1, 0, -1, 1);
+if (params.get('atlas') === '1') {
+  atlasScene = new THREE.Scene();
+  const tex = (ctx as unknown as { textures: { foliage: THREE.Texture } }).textures.foliage;
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { t: { value: tex } },
+    vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+    fragmentShader:
+      'uniform sampler2D t; varying vec2 vUv; void main(){ vec4 c = texture2D(t, fract(vUv * vec2(2.0, 1.0))); vec3 col = vUv.x < 0.5 ? vec3(c.r) * c.a + vec3(0.3, 0.5, 0.8) * (1.0 - c.a) : vec3(c.gb, 1.0) * c.a; gl_FragColor = vec4(col, 1.0); }',
+    toneMapped: false,
+  });
+  const quad = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.5 * (container.clientWidth / container.clientHeight) * 0.5), mat);
+  quad.position.set(0.25, 0.75, 0);
+  atlasScene.add(quad);
+}
 
 const anim = params.get('anim') === '1';
 let frames = 0;
@@ -138,16 +160,44 @@ const loop = () => {
   if (frames < 3) ctx.settle();
   ctx.update(frames < 2 ? 0.016 : dt);
   ctx.render();
+  if (atlasScene) {
+    const r = ctx.renderer;
+    r.autoClear = false;
+    r.render(atlasScene, atlasCam);
+    r.autoClear = true;
+  }
   frames++;
   const d = ctx.debugInfo();
   const hhmm = `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(Math.floor(minute % 60)).padStart(2, '0')}`;
-  info.textContent = `${q} ${view} ${hhmm}  calls ${d.calls}  tris ${(d.triangles / 1000).toFixed(0)}k  grass ${d.grassTufts}  exp ${d.exposure.toFixed(2)}  night ${ctx.nightFactor.toFixed(2)}`;
+  info.textContent = `${q} ${view} ${hhmm}  calls ${d.calls}  tris ${(d.triangles / 1000).toFixed(0)}k  terrain ${(d.terrainTris / 1000).toFixed(1)}k  forest ${(d.forestTris / 1000).toFixed(1)}k  grass ${d.grassTufts}  shadow ${d.shadowBox.map((v) => v.toFixed(0)).join('x')}  exp ${d.exposure.toFixed(2)}  night ${ctx.nightFactor.toFixed(2)}`;
   if (frames === 6 || frames === 16) console.log(`[render-stats] frame=${frames} q=${q} view=${view} calls=${d.calls} triangles=${d.triangles} grass=${d.grassTufts}`);
+  if (frames === 8) (window as unknown as { __ready: boolean }).__ready = true;
   requestAnimationFrame(loop);
 };
 requestAnimationFrame(loop);
 window.addEventListener('resize', () => ctx.resize(container.clientWidth, container.clientHeight));
-// expose for debugging from the console
-(window as unknown as { ctx: RenderContext; world: World }).ctx = ctx;
-(window as unknown as { world: World }).world = world;
-(window as unknown as { THREE: typeof THREE }).THREE = THREE;
+
+// ---- automation hooks (scripts drive several shots per page load)
+const hooks = {
+  /** Jump the clock ('HH:MM') and snap exposure. */
+  setTime(hhmmStr: string) {
+    const [h, m] = hhmmStr.split(':').map(Number);
+    minute = h * 60 + (m || 0);
+    ctx.setTimeOfDay(minute, 1);
+    ctx.settle();
+  },
+  /** Camera preset name, optionally overridden. */
+  setView(name: string, over: Partial<Preset> = {}) {
+    const pp = { ...(presets[name] ?? presets.game), ...over };
+    applyView(pp, name === 'low');
+  },
+  stats() {
+    return ctx.debugInfo();
+  },
+  /** Switch quality tier at runtime (exercises setQuality). */
+  setQuality(level: QualityLevel) {
+    ctx.setQuality(level);
+    ctx.resize(container.clientWidth, container.clientHeight);
+  },
+};
+Object.assign(window as unknown as Record<string, unknown>, { ctx, world, THREE, hooks });

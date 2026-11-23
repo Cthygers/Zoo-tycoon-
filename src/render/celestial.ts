@@ -24,8 +24,17 @@ export interface Celestial {
   moonIllum: number;
 }
 
-/** Writes sun / moon directions (pointing from the ground toward the body). */
-export function computeCelestial(minuteOfDay: number, day: number, sunDir: THREE.Vector3, moonDir: THREE.Vector3): Celestial {
+/**
+ * Writes sun / moon directions (pointing from the ground toward the body).
+ * Pass `out` to avoid allocating (called every frame).
+ */
+export function computeCelestial(
+  minuteOfDay: number,
+  day: number,
+  sunDir: THREE.Vector3,
+  moonDir: THREE.Vector3,
+  out: Celestial = { sunElev: 0, moonElev: 0, moonIllum: 0 },
+): Celestial {
   const hours = minuteOfDay / 60;
   const H = ((hours - SOLAR_NOON_H) / 24) * Math.PI * 2;
   equatorialToWorld(H, DECL, sunDir);
@@ -36,9 +45,8 @@ export function computeCelestial(minuteOfDay: number, day: number, sunDir: THREE
   const moonDecl = -DECL * 0.6 + 0.09;
   equatorialToWorld(H + Math.PI + offset, moonDecl, moonDir);
   const elong = Math.acos(Math.min(1, Math.max(-1, sunDir.dot(moonDir))));
-  return {
-    sunElev: Math.asin(sunDir.y),
-    moonElev: Math.asin(moonDir.y),
-    moonIllum: (1 - Math.cos(elong)) / 2,
-  };
+  out.sunElev = Math.asin(sunDir.y);
+  out.moonElev = Math.asin(moonDir.y);
+  out.moonIllum = (1 - Math.cos(elong)) / 2;
+  return out;
 }

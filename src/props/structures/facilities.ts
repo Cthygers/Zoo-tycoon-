@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import { registerProp } from '../registry';
+import { tiered } from './tiers';
 import { door, frame, glazedWindow, interiorBox, signBoard, wallLantern } from './common';
 import { box, cyl, gableEnd, gablePlanes, hipPlanes, Kit, mat, quad, rod, roof, V, wall } from './kit';
 import * as M from './mats';
@@ -255,7 +256,7 @@ function buildGate(): THREE.Object3D {
 }
 
 export function registerFacilities(): void {
-  registerProp('restroom', { variants: 2, build: buildRestroom });
-  registerProp('entrance_gate', { variants: 1, build: buildGate });
+  registerProp('restroom', { variants: 2, ...tiered(buildRestroom) });
+  registerProp('entrance_gate', { variants: 1, ...tiered(buildGate) });
 }
 

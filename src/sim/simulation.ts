@@ -25,18 +25,28 @@ import {
   type ZooStats,
 } from '../core/contracts';
 import type { EventBus, NotifyKind, TileRect } from '../core/events';
-import { TERRAIN_COUNT, Terrain, type CommandResult, type LedgerEntry, type Litter, type Objective, type PathType, type StaffRole } from '../core/types';
+import {
+  TERRAIN_COUNT,
+  Terrain,
+  type CommandResult,
+  type LedgerEntry,
+  type Litter,
+  type Objective,
+  type PathType,
+  type PlacedObject,
+  type StaffRole,
+} from '../core/types';
 import { World, type EdgeRef, type WorldSave } from '../core/world';
 import { FENCES_BY_ID } from '../data/fences';
 import { OBJECTS_BY_ID } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
 import { AnimalSystem } from './animals';
-import { Commands, TERRAIN_COST_LAND, TERRAIN_COST_WATER } from './commands';
-import { STAFF_SALARY } from './names';
+import { Commands, staffWage, terrainCost } from './commands';
 import { buildHabitatTiles, evaluateSpecies, type HabitatPopulation, type HabitatTiles, type SpeciesEval } from './habitat';
 import { GuestSystem } from './guests';
 import { N_TILES, PathNav, TileSearch } from './nav';
 import { Progress, createObjectives } from './progress';
+import { packRows, rleDecode, rleEncode, unpackRows, type PackedRows } from './savepack';
 import { SimRng } from './rng';
 import { StaffSystem } from './staff';
 import type { AnimalSim, GuestSim, HabitatRuntime, StaffSim } from './state';
@@ -65,7 +75,11 @@ export function emptyLedger(day: number): LedgerEntry {
 }
 
 interface SimSaveData extends SimSave {
+  /** World state; in compact saves its grids and objects live in worldGrids / worldObjects. */
   world: WorldSave;
+  /** Run-length encoded world grids (compact saves). */
+  worldGrids?: { terrain: number[]; path: number[]; hFence: number[]; vFence: number[] };
+  worldObjects?: PackedRows;
   money: number;
   admissionPrice: number;
   day: number;
@@ -75,13 +89,14 @@ interface SimSaveData extends SimSave {
   objectives: Objective[];
   ledger: LedgerEntry[];
   today: LedgerEntry;
-  animals: AnimalSim[];
-  guests: GuestSim[];
-  staff: StaffSim[];
-  litter: Litter[];
+  /** Entity lists: column-keyed rows (compact saves) or plain arrays (older saves). */
+  animals: AnimalSim[] | PackedRows;
+  guests: GuestSim[] | PackedRows;
+  staff: StaffSim[] | PackedRows;
+  litter: Litter[] | PackedRows;
   habitats: HabitatRuntime[];
-  /** habitat id → one tile inside it (restores ids after World.load renumbers them). */
-  habitatIds: [number, number][];
+  /** Old saves only (before WorldSave.habitatRle): habitat id → one tile inside it. */
+  habitatIds?: [number, number][];
   nextIds: { animal: number; guest: number; staff: number; litter: number };
   rng: number;
   time: number;
@@ -560,28 +575,18 @@ export class Simulation implements ISimulation {
   }
   removeFences(edges: EdgeRef[], dryRun = false): CommandResult {
     return this.cmd.removeFences(edges, dryRun);
-  }  removeObject(objectId: number, dryRun = false): CommandResult {
-    // TODO(polish): dedicated command that leaves fences/paths alone.
-    const o = this.world.objects.get(objectId);
-    if (!o) return { ok: false, cost: 0, reason: 'Nothing to remove' };
-    const fp = this.world.footprint(o);
-    let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
-    for (const t of fp) {
-      x0 = Math.min(x0, t.x); z0 = Math.min(z0, t.z); x1 = Math.max(x1, t.x); z1 = Math.max(z1, t.z);
-    }
-    return this.cmd.bulldoze({ x0, z0, x1, z1 }, dryRun);
+  }
+  removeObject(objectId: number, dryRun = false): CommandResult {
+    return this.cmd.removeObject(objectId, dryRun);
   }
   renameHabitat(habitatId: number, name: string): CommandResult {
-    const n = name.trim().slice(0, 32);
-    if (!n || !this.world.habitats.has(habitatId)) return { ok: false, cost: 0, reason: 'Invalid name' };
-    this.world.renameHabitat(habitatId, n);
-    return { ok: true, cost: 0 };
+    return this.cmd.renameHabitat(habitatId, name);
   }
   staffWage(role: StaffRole): number {
-    return STAFF_SALARY[role] ?? 0;
+    return staffWage(role);
   }
   terrainCost(terrain: Terrain): number {
-    return terrain === Terrain.Water || terrain === Terrain.DeepWater ? TERRAIN_COST_WATER : TERRAIN_COST_LAND;
+    return terrainCost(terrain);
   }
 
   buyAnimal(speciesId: string, wx: number, wz: number, dryRun = false): CommandResult {
@@ -710,11 +715,12 @@ export class Simulation implements ISimulation {
   // ============================================================ persistence
   serialize(): SimSave {
     if (this.habSyncDirty) this.syncHabitats();
-    const habitatIds: [number, number][] = [];
-    for (const h of this.world.habitats.values()) if (h.tiles.length) habitatIds.push([h.id, h.tiles[0]]);
+    const ws = this.world.serialize();
     const data: SimSaveData = {
       version: SAVE_VERSION,
-      world: this.world.serialize(),
+      world: { ...ws, terrain: [], path: [], hFence: [], vFence: [], objects: [] },
+      worldGrids: { terrain: rleEncode(ws.terrain), path: rleEncode(ws.path), hFence: rleEncode(ws.hFence), vFence: rleEncode(ws.vFence) },
+      worldObjects: packRows(ws.objects),
       money: this.money,
       admissionPrice: this.admissionPrice,
       day: this.day,
@@ -724,12 +730,11 @@ export class Simulation implements ISimulation {
       objectives: this.objectives,
       ledger: this.ledger,
       today: this.today,
-      animals: Array.from(this.animals.values()),
-      guests: Array.from(this.guests.values()),
-      staff: Array.from(this.staff.values()),
-      litter: Array.from(this.litter.values()),
+      animals: packRows(Array.from(this.animals.values())),
+      guests: packRows(Array.from(this.guests.values())),
+      staff: packRows(Array.from(this.staff.values())),
+      litter: packRows(Array.from(this.litter.values())),
       habitats: Array.from(this.habRt.values()),
-      habitatIds,
       nextIds: this.nextIds,
       rng: this.rng.state,
       time: this.time,
@@ -743,24 +748,34 @@ export class Simulation implements ISimulation {
       progress: this.progress.serialize(),
       debtWarned: this.debtWarned,
     };
-    // deep copy so later simulation never mutates a save that is still being written
-    return JSON.parse(JSON.stringify(data)) as SimSave;
+    // deep copy (so later simulation never mutates a save that is still being written),
+    // with fractional numbers rounded to 1/1000 — positions to the millimetre — which
+    // keeps the save small for localStorage.
+    return JSON.parse(JSON.stringify(data, roundFloats)) as SimSave;
   }
 
   load(save: SimSave): void {
     if (!save || save.version !== SAVE_VERSION) throw new Error('Unsupported save version');
     const s = JSON.parse(JSON.stringify(save)) as SimSaveData;
     if (!s.world || !Array.isArray(s.world.terrain)) throw new Error('Corrupt save: missing world');
+    if (s.worldGrids) {
+      const g = s.worldGrids;
+      s.world.terrain = rleDecode(g.terrain, MAP_W * MAP_H);
+      s.world.path = rleDecode(g.path, MAP_W * MAP_H);
+      s.world.hFence = rleDecode(g.hFence, MAP_W * (MAP_H + 1));
+      s.world.vFence = rleDecode(g.vFence, (MAP_W + 1) * MAP_H);
+    }
+    if (s.worldObjects) s.world.objects = unpackRows<PlacedObject>(s.worldObjects);
 
     // entities first so listeners of worldReset (emitted by World.load) see the new state
     this.animals.clear();
     this.guests.clear();
     this.staff.clear();
     this.litter.clear();
-    for (const a of s.animals ?? []) this.animals.set(a.id, a);
-    for (const g of s.guests ?? []) this.guests.set(g.id, g);
-    for (const st of s.staff ?? []) this.staff.set(st.id, st);
-    for (const l of s.litter ?? []) this.litter.set(l.id, l);
+    for (const a of unpackRows<AnimalSim>(s.animals)) this.animals.set(a.id, a);
+    for (const g of unpackRows<GuestSim>(s.guests)) this.guests.set(g.id, upgradeGuest(g));
+    for (const st of unpackRows<StaffSim>(s.staff)) this.staff.set(st.id, st);
+    for (const l of unpackRows<Litter>(s.litter)) this.litter.set(l.id, l);
 
     this.money = s.money;
     this.admissionPrice = s.admissionPrice;
@@ -787,40 +802,14 @@ export class Simulation implements ISimulation {
     this.debtWarned = s.debtWarned ?? false;
     this.pendingDelta = 0;
     this.resetCaches();
+    // Saves written before the world persisted habitat ids carry one sample tile per
+    // habitat: seed the labelling with those so World.load keeps the old ids.
+    if (!s.world.habitatRle && Array.isArray(s.habitatIds) && s.habitatIds.length) s.world.habitatRle = seedHabitatRle(s.habitatIds);
     // the world last: World.load emits worldReset, by which time every other piece of state is in place
     this.world.load(s.world);
-    this.restoreHabitatIds(s.habitatIds ?? [], s.world);
     this.resetCaches();
+    this.guestSys.afterLoad();
     this.events.emit('moneyChanged', { money: this.money, delta: 0 });
-  }
-
-  /**
-   * World.load() renumbers habitats from scratch. Re-label every region with
-   * the id it had when saved (by a sample tile), then recompute so the world's
-   * id-voting keeps them. Also drops the throw-away names World.load created.
-   */
-  private restoreHabitatIds(ids: [number, number][], ws: WorldSave) {
-    const w = this.world;
-    if (!ids.length) return;
-    const map = new Map<number, number>();
-    for (const [oldId, tile] of ids) {
-      const now = w.habitatOf[tile];
-      if (now) map.set(now, oldId);
-    }
-    let differs = false;
-    for (const [now, old] of map) if (now !== old) differs = true;
-    if (!differs) return;
-    for (let i = 0; i < N_TILES; i++) {
-      const h = w.habitatOf[i];
-      if (h) w.habitatOf[i] = map.get(h) ?? 0;
-    }
-    w.recomputeHabitats();
-    // World keeps a private name map; remove names of the temporary ids it invented.
-    const names = (w as unknown as { habitatNames?: unknown }).habitatNames;
-    if (names instanceof Map) {
-      const keep = new Set(Object.keys(ws.habitatNames ?? {}).map(Number));
-      for (const k of Array.from(names.keys())) if (!keep.has(k as number) && !w.habitats.has(k as number)) names.delete(k);
-    }
   }
 
   private resetCaches() {
@@ -889,6 +878,7 @@ export class Simulation implements ISimulation {
     this.world.load(blank);
     this.world.generateStarterMap(); // emits worldReset
     this.resetCaches();
+    this.guestSys.afterLoad();
     this.rating = this.progress.targetRating();
     this.events.emit('moneyChanged', { money: this.money, delta: 0 });
   }
@@ -897,6 +887,40 @@ export class Simulation implements ISimulation {
     this.offs.forEach((f) => f());
     this.nav.dispose();
   }
+}
+
+/** JSON replacer: fractional numbers rounded to 3 decimals (integers, strings untouched). */
+function roundFloats(_key: string, v: unknown): unknown {
+  return typeof v === 'number' && !Number.isInteger(v) && Number.isFinite(v) ? Math.round(v * 1000) / 1000 : v;
+}
+
+/** Run-length habitat labelling with only the given sample tiles set ([id, count, ...]). */
+function seedHabitatRle(ids: [number, number][]): number[] {
+  const lab = new Int32Array(N_TILES);
+  for (const [id, tile] of ids) if (tile >= 0 && tile < N_TILES && id > 0) lab[tile] = id;
+  const out: number[] = [];
+  for (let i = 0; i < N_TILES; ) {
+    const v = lab[i];
+    let n = 1;
+    while (i + n < N_TILES && lab[i + n] === v) n++;
+    out.push(v, n);
+    i += n;
+  }
+  return out;
+}
+
+/** Fill in guest fields added after a save was written. */
+function upgradeGuest(g: GuestSim): GuestSim {
+  const d = g as Partial<GuestSim>;
+  d.qObj ??= 0;
+  d.qPos ??= -1;
+  d.qWait ??= 0;
+  d.leader ??= 0;
+  d.party ??= [];
+  d.fstate ??= 0;
+  d.avoidObj ??= 0;
+  d.avoidUntil ??= 0;
+  return g;
 }
 
 /** Keep saved objective progress but pick up new objectives added in later versions. */

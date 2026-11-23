@@ -28,6 +28,49 @@ const UP = new THREE.Vector3(0, 1, 0);
 /** Materials whose merged mesh should never cast shadows (glass, glow, water…). */
 export const NO_SHADOW = new WeakSet<THREE.Material>();
 
+// ---------------------------------------------------------------------------
+// Detail mode: quality tier (round-segment multiplier) and distant-LOD builds
+// (round parts at half the segments, pieces smaller than lodMin metres in
+// bounding radius — handles, bolts, brackets, trims — dropped). Set around a
+// builder call with withDetail().
+
+interface KitDetail {
+  /** Multiplier for round segment counts above 8 (squares / octagons are kept). */
+  seg: number;
+  /** Distant LOD build. */
+  lod: boolean;
+  /** LOD: drop pieces whose bounding radius is below this (m). */
+  lodMin: number;
+}
+
+let detail: KitDetail = { seg: 1, lod: false, lodMin: 0.11 };
+
+export function withDetail<T>(d: Partial<KitDetail>, fn: () => T): T {
+  const prev = detail;
+  detail = { ...prev, ...d };
+  try {
+    return fn();
+  } finally {
+    detail = prev;
+  }
+}
+
+/** Segment multiplier of the current quality tier. */
+export function segScale(): number {
+  return detail.seg;
+}
+
+/** True while a distant LOD is being built. */
+export function kitLod(): boolean {
+  return detail.lod;
+}
+
+/** Round segment count for the current detail mode (≤ 8 is left alone: deliberate polygons). */
+export function segs(n: number): number {
+  if (n <= 8) return n;
+  return Math.max(8, Math.round(n * detail.seg * (detail.lod ? 0.5 : 1)));
+}
+
 /** Collects geometries per material and merges them into one mesh each. */
 export class Kit {
   private lists = new Map<THREE.Material, Geo[]>();
@@ -36,6 +79,14 @@ export class Kit {
 
   /** Add a geometry (consumed: it is transformed in place and disposed after merging). */
   add(mat: THREE.Material, geo: Geo, matrix?: THREE.Matrix4): this {
+    if (detail.lod) {
+      if (!geo.boundingSphere) geo.computeBoundingSphere();
+      const sc = matrix ? matrix.getMaxScaleOnAxis() : 1;
+      if ((geo.boundingSphere?.radius ?? 1) * sc < detail.lodMin) {
+        geo.dispose();
+        return this;
+      }
+    }
     if (matrix) geo.applyMatrix4(matrix);
     let l = this.lists.get(mat);
     if (!l) {
@@ -185,8 +236,8 @@ export function orientAlong(g: Geo, a: THREE.Vector3, b: THREE.Vector3): Geo {
 }
 
 /** Cylinder along Y centred at origin, UVs: U around (metres), V along height (metres). */
-export function cyl(rTop: number, rBot: number, h: number, seg: number, o: UVOpts & { caps?: boolean; hseg?: number } = {}): Geo {
-  const g = new THREE.CylinderGeometry(rTop, rBot, h, seg, o.hseg ?? 1, o.caps === false);
+export function cyl(rTop: number, rBot: number, h: number, seg: number, o: UVOpts & { caps?: boolean; hseg?: number; fixed?: boolean } = {}): Geo {
+  const g = new THREE.CylinderGeometry(rTop, rBot, h, o.fixed ? seg : segs(seg), o.hseg ?? 1, o.caps === false);
   const tile = o.tile ?? 1;
   const off = o.off ?? 0;
   const pos = g.getAttribute('position');
@@ -220,8 +271,10 @@ export function rod(a: THREE.Vector3, b: THREE.Vector3, r: number, seg = 6, o: U
  * Lathe around Y from (radius, y) profile points. U = around (metres at the
  * mean radius), V = arc length along the profile (metres).
  */
-export function lathe(pts: [number, number][], seg: number, o: UVOpts & { phi?: number } = {}): Geo {
+export function lathe(pts: [number, number][], seg: number, o: UVOpts & { phi?: number; fixed?: boolean } = {}): Geo {
   const v2 = pts.map(([r, y]) => new THREE.Vector2(r, y));
+  // callers that address vertices by segment index pass fixed: true
+  if (!o.fixed) seg = segs(seg);
   const g = new THREE.LatheGeometry(v2, seg, o.phi ?? 0);
   const tile = o.tile ?? 1;
   const off = o.off ?? 0;

@@ -264,6 +264,39 @@ export class CardSet {
   centres(): V3[] {
     return this.specs.map((s) => s.base.clone().addScaledVector(s.up, s.height * 0.5));
   }
+  /** Shallow copy (card specs are shared, never mutated). */
+  clone(): CardSet {
+    const c = new CardSet();
+    c.specs = this.specs.slice();
+    return c;
+  }
+  /**
+   * Sparser set of larger cards for a distant LOD: keeps `count` cards spread
+   * through the crown (favouring its outer shell, which is what shows from
+   * afar), each grown by `grow` about its centre, single row (no curl).
+   */
+  lodSet(count: number, grow: number, crown: Ellipsoid | null, rnd: () => number, shell = 0.6): CardSet {
+    const out = new CardSet();
+    const n = this.specs.length;
+    if (n === 0) return out;
+    const scored: { s: CardSpec; k: number }[] = [];
+    const c = new THREE.Vector3();
+    for (const s of this.specs) {
+      c.copy(s.base).addScaledVector(s.up, s.height * 0.5);
+      const d = crown ? Math.min(1.2, ellipsoidDepth(crown, c)) : 1;
+      scored.push({ s, k: rnd() * (1 - shell + shell * d) });
+    }
+    scored.sort((a, b) => b.k - a.k);
+    const m = Math.min(n, Math.max(1, Math.round(count)));
+    for (let i = 0; i < m; i++) {
+      const s = scored[i].s;
+      const w = s.width * grow;
+      const h = s.height * grow;
+      c.copy(s.base).addScaledVector(s.up, s.height * 0.5);
+      out.specs.push({ base: c.clone().addScaledVector(s.up, -h * 0.5), up: s.up, side: s.side, width: w, height: h, uv: s.uv, flip: s.flip, color: s.color, curl: (s.curl ?? 0) * grow, rows: 1 });
+    }
+    return out;
+  }
   /**
    * Emit into md. Normals = mix(face normal (towards outside), ellipsoid normal, bendAmt).
    * `ao(p, depth)` returns a brightness multiplier per vertex.

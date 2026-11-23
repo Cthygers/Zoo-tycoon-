@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { Rng } from '../../core/rng';
 import { registerProp } from '../registry';
+import { tiered } from './tiers';
 import { box, cyl, extrude, Kit, lathe, mat, quad, rod, V } from './kit';
 import * as M from './mats';
 import { signUV, type SignKey } from './signs';
@@ -232,7 +233,7 @@ function buildLamp(v: number): THREE.Object3D {
         [0.075, 3.02],
         [0.0, 3.03],
       ],
-      14,
+      10,
       { tile: 1 },
     ),
   );
@@ -494,7 +495,7 @@ function buildFountain(): THREE.Object3D {
       // parabolic fall: leaves the lip outward, accelerates down
       pts.push([r0 + (r1 - r0) * Math.sqrt(t), y0 + (y1 - y0) * t * t]);
     }
-    const g = lathe(pts.reverse(), seg, { tile: 0.5 });
+    const g = lathe(pts.reverse(), seg, { tile: 0.5, fixed: true });
     const uv = g.getAttribute('uv') as THREE.BufferAttribute;
     // V along the flow (top → bottom = 0 → 1), U around
     const n = pts.length;
@@ -504,6 +505,18 @@ function buildFountain(): THREE.Object3D {
   };
   k.addNamed('falls', M.fallingWater(), fall(0.73, 1.19, 0.86, 0.42, 24));
   k.addNamed('falls', M.fallingWater(), fall(0.385, 1.755, 0.45, 1.17, 16));
+  // jet crown: the column breaks into a thin bell of water falling into the top bowl
+  const crown: [number, number][] = [];
+  for (let i = 0; i <= 6; i++) {
+    const t = i / 6;
+    crown.push([0.03 + 0.27 * Math.sqrt(t), 2.42 + 0.05 * Math.sin(Math.PI * Math.min(1, t * 1.6)) - 0.66 * t * t]);
+  }
+  k.addNamed('falls', M.fallingWater(), fall2(crown, 14));
+  // splash foam where the sheets land, and fainter spreading ripples beyond
+  k.addNamed('foam', M.foam(), ringGeo(0.74, 1.02, 0.428, 40, 14));
+  k.addNamed('foam', M.foam(), ringGeo(1.0, 1.37, 0.427, 40, 16, 0.55, 1));
+  k.addNamed('foam', M.foam(), ringGeo(0.38, 0.6, 1.172, 28, 9));
+  k.addNamed('foam', M.foam(), ringGeo(0.17, 0.33, 1.752, 20, 6));
   // central jet (scaled in animate)
   const jet = new THREE.Group();
   jet.name = 'jet';
@@ -535,31 +548,81 @@ function setPlanarUV(g: THREE.BufferGeometry, tile: number): void {
   for (let i = 0; i < p.count; i++) uv.setXY(i, p.getX(i) / tile, p.getZ(i) / tile);
 }
 
+/** Water sheet lathe from a (radius, y) profile listed top → bottom (V along the flow). */
+function fall2(pts: [number, number][], seg: number): THREE.BufferGeometry {
+  const g = lathe(pts, seg, { tile: 0.5, fixed: true });
+  const uv = g.getAttribute('uv') as THREE.BufferAttribute;
+  const n = pts.length;
+  for (let i = 0; i <= seg; i++) for (let j = 0; j < n; j++) uv.setXY(i * n + j, (i / seg) * 4, j / (n - 1));
+  return g;
+}
+
+/**
+ * Flat ring on a water surface (facing up) at height y: U around (`uRep`
+ * repeats), V across the ring from v0 (inside) to v1 (outside). The foam
+ * scrolls outward along V and the alpha map fades it by V, so a ring mapped
+ * to the upper part of V (e.g. 0.55 → 1) reads as fainter spreading ripples.
+ */
+function ringGeo(r0: number, r1: number, y: number, seg: number, uRep: number, v0 = 0, v1 = 1): THREE.BufferGeometry {
+  const g = new THREE.RingGeometry(r0, r1, seg, 1);
+  g.rotateX(-Math.PI / 2);
+  const p = g.getAttribute('position');
+  const uv = g.getAttribute('uv') as THREE.BufferAttribute;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i);
+    const z = p.getZ(i);
+    const a = Math.atan2(z, x) / (Math.PI * 2) + 0.5;
+    const rr = Math.hypot(x, z);
+    // seam: RingGeometry repeats the first column at a = 1
+    const seamU = i % (seg + 1) === seg ? 1 : a;
+    uv.setXY(i, seamU * uRep + r0 * 3.7, v0 + ((rr - r0) / (r1 - r0)) * (v1 - v0));
+  }
+  return g.translate(0, y, 0);
+}
+
+interface FountainParts {
+  jet: THREE.Object3D | null;
+  falls: THREE.Mesh | null;
+  pool: THREE.Mesh | null;
+  foam: THREE.Mesh | null;
+}
+
 function animateFountain(obj: THREE.Object3D, t: number): void {
-  const ud = obj.userData as { jet?: THREE.Object3D | null; falls?: THREE.Mesh | null; pool?: THREE.Mesh | null };
-  if (ud.jet === undefined) {
-    ud.jet = obj.getObjectByName('jet') ?? null;
-    ud.falls = (obj.getObjectByName('falls') as THREE.Mesh | undefined) ?? null;
-    ud.pool = (obj.getObjectByName('pool') as THREE.Mesh | undefined) ?? null;
+  const ud = obj.userData as { fountain?: FountainParts };
+  let f = ud.fountain;
+  if (!f) {
+    f = {
+      jet: obj.getObjectByName('jet') ?? null,
+      falls: (obj.getObjectByName('falls') as THREE.Mesh | undefined) ?? null,
+      pool: (obj.getObjectByName('pool') as THREE.Mesh | undefined) ?? null,
+      foam: (obj.getObjectByName('foam') as THREE.Mesh | undefined) ?? null,
+    };
+    ud.fountain = f;
   }
-  if (ud.jet) {
+  if (f.jet) {
     const s = 1 + 0.12 * Math.sin(t * 7.3) + 0.06 * Math.sin(t * 13.1);
-    ud.jet.scale.set(1, s, 1);
+    f.jet.scale.set(1, s, 1);
   }
-  const fm = ud.falls?.material as THREE.MeshStandardMaterial | undefined;
+  const fm = f.falls?.material as THREE.MeshStandardMaterial | undefined;
   if (fm?.map) fm.map.offset.set(0, (t * 0.9) % 1);
-  const pm = ud.pool?.material as THREE.MeshStandardMaterial | undefined;
+  const pm = f.pool?.material as THREE.MeshStandardMaterial | undefined;
   if (pm?.normalMap) pm.normalMap.offset.set((t * 0.013) % 1, (t * 0.021) % 1);
+  // foam churns outward, with a gentle breathing of its density
+  const om = f.foam?.material as THREE.MeshStandardMaterial | undefined;
+  if (om?.map) {
+    om.map.offset.set((Math.sin(t * 0.7) * 0.04) % 1, -((t * 0.32) % 1));
+    om.opacity = 0.7 + 0.1 * Math.sin(t * 2.3) + 0.05 * Math.sin(t * 5.1);
+  }
 }
 
 // ---------------------------------------------------------------------------
 
 export function registerAmenities(): void {
-  registerProp('bench', { variants: 3, build: buildBench });
-  registerProp('bin', { variants: 2, build: buildBin });
-  registerProp('lamp', { variants: 3, build: buildLamp });
-  registerProp('picnic_table', { variants: 2, build: buildPicnic });
-  registerProp('donation_box', { variants: 1, build: buildDonation });
-  registerProp('info_sign', { variants: 3, build: buildInfo });
-  registerProp('fountain', { variants: 1, unique: true, build: buildFountain, animate: animateFountain });
+  registerProp('bench', { variants: 3, ...tiered(buildBench, false) });
+  registerProp('bin', { variants: 2, ...tiered(buildBin) });
+  registerProp('lamp', { variants: 3, ...tiered(buildLamp) });
+  registerProp('picnic_table', { variants: 2, ...tiered(buildPicnic) });
+  registerProp('donation_box', { variants: 1, ...tiered(buildDonation) });
+  registerProp('info_sign', { variants: 3, ...tiered(buildInfo, false) });
+  registerProp('fountain', { variants: 1, unique: true, ...tiered(buildFountain, false), animate: animateFountain });
 }

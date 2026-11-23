@@ -7,15 +7,36 @@ import type { TileRect } from '../core/events';
 import { PathType, Terrain, isWater, type CommandResult, type StaffRole } from '../core/types';
 import type { EdgeRef } from '../core/world';
 import { FENCES_BY_ID, PATHS_BY_TYPE } from '../data/fences';
-import { OBJECTS_BY_ID } from '../data/objects';
+import { OBJECTS_BY_ID, rotatedSize } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
 import { evaluateSpecies, weakestFenceName } from './habitat';
 import { STAFF_SALARY, STAFF_TITLE } from './names';
+
+/** Price to repaint one tile with `terrain` (0 for unknown terrain). */
+export function terrainCost(terrain: Terrain): number {
+  return TERRAIN_COST[terrain] ?? 0;
+}
+/** Daily wage of a staff role (0 for an unknown role). */
+export function staffWage(role: StaffRole): number {
+  return STAFF_SALARY[role] ?? 0;
+}
 import type { Simulation } from './simulation';
 
-export const TERRAIN_COST_LAND = 4;
-export const TERRAIN_COST_WATER = 12;
+/** Price per tile to repaint terrain (index = Terrain). Water is dug out, snow and rock are imported. */
+export const TERRAIN_COST: readonly number[] = [
+  4, // Grass
+  4, // DryGrass
+  3, // Dirt
+  5, // Sand
+  6, // Rock
+  7, // Snow
+  4, // Mud
+  12, // Water
+  18, // DeepWater
+];
 export const REFUND_FRACTION = 0.4;
+/** Longest habitat name (characters). */
+export const MAX_HABITAT_NAME = 32;
 export const SELL_FRACTION = 0.5;
 
 const money = (v: number) => `$${Math.round(v).toLocaleString('en-US')}`;
@@ -98,7 +119,7 @@ export class Commands {
         if (allowed(x, z)) count++;
         else if (w.terrain[w.idx(x, z)] !== terrain) blocked++;
       }
-    const cost = count * (water ? TERRAIN_COST_WATER : TERRAIN_COST_LAND);
+    const cost = count * terrainCost(terrain);
     if (count === 0) return this.result(false, 0, blocked ? blockReason : 'Already that terrain', dryRun, at);
     if (!this.sim.canAfford(cost)) return this.result(false, cost, this.noMoney(cost), dryRun, at);
     if (dryRun) return this.result(true, cost, blocked ? `${blocked} tile(s) skipped: ${blockReason}` : undefined, true, at);
@@ -244,8 +265,9 @@ export class Commands {
     const at = { x: (tx + 0.5) * TILE, z: (tz + 0.5) * TILE };
     if (!def) return this.result(false, 0, 'Unknown object', dryRun, at);
     if (def.notBuildable) return this.result(false, 0, `${def.name} cannot be built`, dryRun, at);
-    const r = ((Math.round(rot) % 4) + 4) % 4;
+    let r = ((Math.round(rot) % 4) + 4) % 4;
     const why = w.canPlaceObject(def, tx, tz, r);
+    if (!why && (def.shop || def.restroom)) r = this.faceThePath(defId, tx, tz, r);
     if (why) return this.result(false, def.cost, why, dryRun, at);
     // keep animals from being buried under solid objects
     if (def.solid) {
@@ -263,6 +285,73 @@ export class Commands {
     this.sim.spend('construction', def.cost);
     const c = w.objectCenter(o);
     return this.result(true, def.cost, undefined, false, { x: c.x, z: c.z });
+  }
+
+  /**
+   * Shops and restrooms serve guests from their front (+Z of the model). If the
+   * requested rotation leaves the front facing away from every path, turn the
+   * building (same footprint) so its counter / doors open onto a path.
+   */
+  private faceThePath(defId: string, tx: number, tz: number, rot: number): number {
+    const w = this.sim.world;
+    const def = OBJECTS_BY_ID[defId];
+    const opens = (r: number): boolean => {
+      const [fw, fd] = rotatedSize(def, r);
+      const [ow, od] = rotatedSize(def, rot);
+      if (fw !== ow || fd !== od) return false; // footprint must stay the same
+      // tiles just beyond the front edge, front = (sin θ, cos θ) with θ = r·π/2
+      const fx = [0, 1, 0, -1][r],
+        fz = [1, 0, -1, 0][r];
+      for (let i = 0; i < (fx ? fd : fw); i++) {
+        const x = fx > 0 ? tx + fw : fx < 0 ? tx - 1 : tx + i;
+        const z = fz > 0 ? tz + fd : fz < 0 ? tz - 1 : tz + i;
+        if (!w.inBounds(x, z) || !w.isPath(x, z) || w.habitatOf[w.idx(x, z)]) continue;
+        const ax = Math.min(Math.max(x, tx), tx + fw - 1),
+          az = Math.min(Math.max(z, tz), tz + fd - 1);
+        if (!w.fenceBetween(ax, az, x, z)) return true;
+      }
+      return false;
+    };
+    if (opens(rot)) return rot;
+    for (const d of [1, 3, 2]) {
+      const r = (rot + d) % 4;
+      if (opens(r)) return r;
+    }
+    return rot;
+  }
+
+  /** Remove one placed object (partial refund); fences, paths and litter stay. */
+  removeObject(objectId: number, dryRun = false): CommandResult {
+    const sim = this.sim;
+    const w = sim.world;
+    const o = w.objects.get(objectId);
+    if (!o) return this.result(false, 0, 'Nothing to remove', dryRun);
+    const c = w.objectCenter(o);
+    const at = { x: c.x, z: c.z };
+    if (o.defId === 'entrance_gate') return this.result(false, 0, 'The entrance cannot be removed', dryRun, at);
+    const refund = Math.round((OBJECTS_BY_ID[o.defId]?.cost ?? 0) * REFUND_FRACTION);
+    if (dryRun) return this.result(true, -refund, undefined, true, at);
+    // guests queueing at / sitting on / walking to it change their plans first
+    sim.guestSys.releaseObject(objectId);
+    w.removeObject(objectId); // emits objectRemoved + habitatsChanged (habitat stats refreshed)
+    if (refund) sim.spend('construction', -refund);
+    sim.markPopulationDirty();
+    return this.result(true, -refund, undefined, false, at);
+  }
+
+  /** Rename a habitat: control characters stripped, whitespace collapsed, max MAX_HABITAT_NAME chars. */
+  renameHabitat(habitatId: number, name: string): CommandResult {
+    const w = this.sim.world;
+    const hab = w.habitats.get(habitatId);
+    if (!hab) return this.result(false, 0, 'No such habitat', false);
+    const at = { x: ((hab.minX + hab.maxX + 1) / 2) * TILE, z: ((hab.minZ + hab.maxZ + 1) / 2) * TILE };
+    // eslint-disable-next-line no-control-regex
+    const clean = String(name ?? '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!clean) return this.result(false, 0, 'Please enter a name', false, at);
+    const chars = Array.from(clean); // keep surrogate pairs (emoji) intact
+    const n = chars.length > MAX_HABITAT_NAME ? chars.slice(0, MAX_HABITAT_NAME).join('').trimEnd() : clean;
+    if (n !== hab.name) w.renameHabitat(habitatId, n); // emits habitatsChanged
+    return this.result(true, 0, undefined, false, at);
   }
 
   // ----------------------------------------------------------- bulldoze
@@ -324,6 +413,7 @@ export class Commands {
     if (!objs.size && !paths.length && !fences.length && !trash.length)
       return this.result(false, 0, protectedHit ? 'The entrance cannot be removed' : 'Nothing to remove here', dryRun, at);
     if (dryRun) return this.result(true, -refund, undefined, true, at);
+    for (const id of objs) this.sim.guestSys.releaseObject(id);
     for (const id of objs) w.removeObject(id);
     for (const p of paths) w.setPath(p.x, p.z, PathType.None);
     for (const e of fences) w.setFence(e, 0, false);
@@ -381,7 +471,7 @@ export class Commands {
     const w = sim.world;
     const at = { x: wx, z: wz };
     const salary = STAFF_SALARY[role];
-    if (salary === undefined) return this.result(false, 0, 'Unknown staff role', dryRun, at);
+    if (!salary) return this.result(false, 0, 'Unknown staff role', dryRun, at);
     const t = w.tileOfWorld(wx, wz);
     const tx = Math.max(0, Math.min(MAP_W - 1, t.x)),
       tz = Math.max(0, Math.min(MAP_H - 1, t.z));

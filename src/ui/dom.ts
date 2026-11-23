@@ -2,6 +2,7 @@
 // that skip redundant writes, and formatting of game values.
 
 import { icon, type IconName } from './icons';
+import { cue } from './sound';
 
 type Child = Node | string | null | undefined | false;
 
@@ -36,9 +37,14 @@ export function el<K extends keyof HTMLElementTagNameMap>(tag: K, opts: ElOpts |
   return e;
 }
 
-/** A button with an icon and optional label. */
+/** A button with an icon and optional label (plays the 'tap' cue unless the handler plays a richer one). */
 export function button(cls: string, ico: IconName | null, label: string | null, onClick: (ev: MouseEvent) => void, title?: string): HTMLButtonElement {
-  const b = el('button', { class: `wh-btn ${cls}`, attrs: { type: 'button' }, title: title ?? label ?? undefined, onClick });
+  const click = (ev: MouseEvent) => {
+    cue('tap');
+    onClick(ev);
+  };
+  const t = title ?? label ?? undefined;
+  const b = el('button', { class: `wh-btn ${cls}`, attrs: t ? { type: 'button', 'aria-label': t } : { type: 'button' }, title: t, onClick: click });
   b.innerHTML = (ico ? icon(ico) : '') + (label ? `<span class="wh-btn-label">${escapeHtml(label)}</span>` : '');
   return b;
 }

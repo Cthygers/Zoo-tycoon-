@@ -5,27 +5,40 @@
 //
 // Sprite convention: the sprite's root (where it attaches to a branch or the
 // ground) is at v = 0 in the middle of its cell; it grows toward v = 1.
+//
+// Atlases are packed into two shared sheets so all trees (and all ground
+// plants) draw with ONE foliage material each — the props layer batches per
+// material, so this saves a draw call per species in the main and shadow
+// passes:
+//   trees  2048×1024: oak, acacia, baobab, pine, birch, bamboo, palm
+//   ground 1024×1024: grass, reed, flowers, fern
+// AtlasInfo carries the species' rect in its sheet; cellUV() maps into it.
 
-import type * as THREE from 'three';
+import * as THREE from 'three';
 import { mulberry32 } from '../../core/rng';
-import { cachedTexture } from './mats';
+import { cachedTexture, foliageMaterial, type FoliageMaterial, hasCachedTexture, LEAF_PARAMS, texLow } from './mats';
 import { albedoTexture, foliageTexture, Img, lin, mix, normalTexture, paintCurve, paintDisc, paintLeaf, paintStem, pfbm, sat, type RGB } from './tex';
 
 type Rnd = () => number;
 
 export type AtlasKind = 'oak' | 'acacia' | 'baobab' | 'pine' | 'birch' | 'bamboo' | 'palm' | 'fern' | 'grass' | 'reed' | 'flowers';
 
-/** Atlas layout: grid of cells (cols × rows), UV rect per cell. */
+/** Atlas layout: grid of cells (cols × rows) inside `rect` [u0, v0, u1, v1] of the sheet texture. */
 export interface AtlasInfo {
   tex: THREE.DataTexture;
   cols: number;
   rows: number;
+  rect: [number, number, number, number];
+  sheet: SheetKind;
 }
 
-export function cellUV(a: { cols: number; rows: number }, cell: number): [number, number, number, number] {
+export function cellUV(a: { cols: number; rows: number; rect?: [number, number, number, number] }, cell: number): [number, number, number, number] {
   const c = cell % a.cols;
   const r = Math.floor(cell / a.cols) % a.rows;
-  return [c / a.cols, r / a.rows, (c + 1) / a.cols, (r + 1) / a.rows];
+  const [u0, v0, u1, v1] = a.rect ?? [0, 0, 1, 1];
+  const su = (u1 - u0) / a.cols;
+  const sv = (v1 - v0) / a.rows;
+  return [u0 + c * su, v0 + r * sv, u0 + (c + 1) * su, v0 + (r + 1) * sv];
 }
 
 // ---------------------------------------------------------------------------
@@ -701,12 +714,162 @@ const GEN: Record<AtlasKind, { gen: () => Img; cols: number; rows: number }> = {
   flowers: { gen: genFlowers, cols: 2, rows: 2 },
 };
 
-/** Cached foliage atlas. */
+export type SheetKind = 'trees' | 'ground';
+
+/** Sheet layouts: pixel offset of each atlas (sizes come from its generator). */
+const SHEETS: Record<SheetKind, { w: number; h: number; slots: Partial<Record<AtlasKind, [number, number]>> }> = {
+  trees: {
+    w: 2048,
+    h: 1024,
+    slots: { oak: [0, 0], birch: [0, 512], acacia: [512, 0], bamboo: [512, 512], baobab: [1024, 0], pine: [1024, 512], palm: [1536, 0] },
+  },
+  ground: { w: 1024, h: 1024, slots: { grass: [0, 0], reed: [512, 0], flowers: [0, 512], fern: [512, 512] } },
+};
+
+const SHEET_OF: Record<AtlasKind, SheetKind> = {
+  oak: 'trees',
+  acacia: 'trees',
+  baobab: 'trees',
+  pine: 'trees',
+  birch: 'trees',
+  bamboo: 'trees',
+  palm: 'trees',
+  grass: 'ground',
+  reed: 'ground',
+  flowers: 'ground',
+  fern: 'ground',
+};
+
+type Mip = { data: Uint8Array; width: number; height: number };
+
+// Per-atlas mip chains awaiting composition into their sheet (prewarm builds
+// one atlas per step; each keeps its own coverage-preserving alpha scale).
+const pendingMips = new Map<AtlasKind, Mip[]>();
+
+function atlasMips(kind: AtlasKind): Mip[] {
+  let m = pendingMips.get(kind);
+  if (!m) {
+    const t = foliageTexture(GEN[kind].gen(), 0.5, false);
+    m = t.mipmaps as Mip[];
+    t.dispose();
+    pendingMips.set(kind, m);
+  }
+  return m;
+}
+
+/** Compose a sheet's mip chain from its atlases' chains (levels they lack are box-filtered). */
+function composeSheet(sk: SheetKind): THREE.DataTexture {
+  const sh = SHEETS[sk];
+  const levels: Mip[] = [];
+  for (let w = sh.w, h = sh.h; ; w = Math.max(1, w >> 1), h = Math.max(1, h >> 1)) {
+    levels.push({ data: new Uint8Array(w * h * 4), width: w, height: h });
+    if (w === 1 && h === 1) break;
+  }
+  const filled = new Array<boolean>(levels.length).fill(true);
+  for (const k of Object.keys(sh.slots) as AtlasKind[]) {
+    const [ox, oy] = sh.slots[k]!;
+    const mips = atlasMips(k);
+    const [aw, ah] = GEN_SIZE[k];
+    for (let L = 0; L < levels.length; L++) {
+      const m = mips[L];
+      const dst = levels[L];
+      const sx = ox >> L;
+      const sy = oy >> L;
+      // the atlas no longer maps to whole texels of the sheet at this level
+      if (!m || aw >> L === 0 || ah >> L === 0) {
+        filled[L] = false;
+        continue;
+      }
+      for (let y = 0; y < m.height && sy + y < dst.height; y++) {
+        const w = Math.min(m.width, dst.width - sx);
+        dst.data.set(m.data.subarray(y * m.width * 4, (y * m.width + w) * 4), ((sy + y) * dst.width + sx) * 4);
+      }
+    }
+    pendingMips.delete(k);
+  }
+  // coarsest levels some atlas could not supply: 2×2 box filter of the level above
+  for (let L = 1; L < levels.length; L++) {
+    if (filled[L]) continue;
+    const a = levels[L - 1];
+    const b = levels[L];
+    for (let y = 0; y < b.height; y++)
+      for (let x = 0; x < b.width; x++)
+        for (let c = 0; c < 4; c++) {
+          let sum = 0;
+          for (let dy = 0; dy < 2; dy++)
+            for (let dx = 0; dx < 2; dx++) sum += a.data[(Math.min(a.height - 1, y * 2 + dy) * a.width + Math.min(a.width - 1, x * 2 + dx)) * 4 + c];
+          b.data[(y * b.width + x) * 4 + c] = sum >> 2;
+        }
+  }
+  return mipTexture(levels);
+}
+
+function mipTexture(mips: Mip[]): THREE.DataTexture {
+  const t = new THREE.DataTexture(mips[0].data, mips[0].width, mips[0].height, THREE.RGBAFormat, THREE.UnsignedByteType);
+  t.wrapS = THREE.ClampToEdgeWrapping;
+  t.wrapT = THREE.ClampToEdgeWrapping;
+  t.magFilter = THREE.LinearFilter;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.anisotropy = 4;
+  t.flipY = false;
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.mipmaps = mips;
+  t.generateMipmaps = false;
+  t.needsUpdate = true;
+  return t;
+}
+
+function sheetTexture(sk: SheetKind): THREE.DataTexture {
+  const full = cachedTexture(`sheet-${sk}`, () => composeSheet(sk));
+  if (!texLow() || full.mipmaps.length < 2) return full;
+  // low tier: drop the top mip (half resolution, same layout)
+  return cachedTexture(`sheet-${sk}@lo`, () => mipTexture(full.mipmaps.slice(1) as Mip[]));
+}
+
+/** Prewarm steps: paint each atlas into its sheet, then build each sheet texture. */
+export function atlasSteps(): (() => void)[] {
+  const steps: (() => void)[] = [];
+  for (const sk of Object.keys(SHEETS) as SheetKind[]) {
+    for (const k of Object.keys(SHEETS[sk].slots) as AtlasKind[]) steps.push(() => void (texCached(sk) || atlasMips(k)));
+    steps.push(() => void sheetTexture(sk));
+  }
+  return steps;
+}
+
+function texCached(sk: SheetKind): boolean {
+  return hasCachedTexture(`sheet-${sk}`);
+}
+
+/** Atlas of a species: its sheet texture and its rect in the sheet. */
 export function atlas(kind: AtlasKind): AtlasInfo {
   const g = GEN[kind];
-  const tex = cachedTexture(`atlas-${kind}`, () => foliageTexture(g.gen(), 0.5, false));
-  return { tex, cols: g.cols, rows: g.rows };
+  const sk = SHEET_OF[kind];
+  const tex = sheetTexture(sk);
+  const sh = SHEETS[sk];
+  const [ox, oy] = sh.slots[kind]!;
+  const [w, h] = GEN_SIZE[kind];
+  return { tex, cols: g.cols, rows: g.rows, rect: [ox / sh.w, oy / sh.h, (ox + w) / sh.w, (oy + h) / sh.h], sheet: sk };
 }
+
+/** Shared foliage material of a sheet (all species on it batch together). */
+export function leafMaterial(sk: SheetKind): FoliageMaterial {
+  return foliageMaterial(`sheet-${sk}`, sheetTexture(sk), LEAF_PARAMS[sk]);
+}
+
+/** Generator image sizes (px), for rects before / without painting. */
+const GEN_SIZE: Record<AtlasKind, [number, number]> = {
+  oak: [512, 512],
+  acacia: [512, 512],
+  baobab: [512, 512],
+  pine: [512, 512],
+  birch: [512, 512],
+  bamboo: [512, 512],
+  palm: [256, 1024],
+  fern: [256, 512],
+  grass: [512, 512],
+  reed: [512, 512],
+  flowers: [512, 512],
+};
 
 // ---------------------------------------------------------------------------
 // Tileable surfaces: clipped box hedge and bed soil

@@ -11,6 +11,7 @@ import {
   type CreatureAnim,
   type CreatureModel,
   type HabitatReport,
+  type IAudio,
   type ICreatureFactory,
   type IEntityViews,
   type IPropsLayer,
@@ -506,6 +507,35 @@ export class MockSim implements ISimulation {
     return this.res(true, -refund, undefined, false, at);
   }
 
+  removeObject(objectId: number, dryRun = false): CommandResult {
+    const w = this.world;
+    const o = w.objects.get(objectId);
+    if (!o) return this.res(false, 0, 'Nothing to remove', dryRun);
+    const c = w.objectCenter(o);
+    const at = { x: c.x, z: c.z };
+    if (o.defId === 'entrance_gate') return this.res(false, 0, 'The entrance cannot be removed', dryRun, at);
+    const refund = Math.round(OBJECTS_BY_ID[o.defId].cost * 0.4);
+    if (dryRun) return this.res(true, -refund, undefined, true, at);
+    w.removeObject(objectId);
+    return this.res(true, -refund, undefined, false, at);
+  }
+
+  renameHabitat(habitatId: number, name: string): CommandResult {
+    const n = name.replace(/\s+/g, ' ').trim().slice(0, 32);
+    if (!this.world.habitats.has(habitatId)) return this.res(false, 0, 'No such habitat', false);
+    if (!n) return this.res(false, 0, 'Please enter a name', false);
+    this.world.renameHabitat(habitatId, n);
+    return this.res(true, 0, undefined, false);
+  }
+
+  staffWage(role: StaffRole): number {
+    return SALARY[role] ?? 0;
+  }
+
+  terrainCost(terrain: Terrain): number {
+    return isWater(terrain) ? 12 : 4;
+  }
+
   removeFences(edges: EdgeRef[], dryRun = false): CommandResult {
     const w = this.world;
     const todo = edges.filter((e) => w.getFence(e));
@@ -992,6 +1022,12 @@ export class MockProps implements IPropsLayer {
 
   update(): void {}
 
+  setQuality(_quality: QualitySettings): void {}
+
+  async prewarm(onProgress?: (fraction: number) => void): Promise<void> {
+    onProgress?.(1);
+  }
+
   createObjectModel(defId: string, seed: number): THREE.Object3D {
     return mockObjectModel(defId, seed);
   }
@@ -1125,6 +1161,9 @@ class CapsuleModel implements CreatureModel {
 }
 
 export class MockCreatures implements ICreatureFactory {
+  readonly root = new THREE.Group();
+  update(_camera: THREE.Camera): void {}
+  setQuality(_quality: QualitySettings): void {}
   async preload(_ids: string[], onProgress?: (f: number) => void): Promise<void> {
     onProgress?.(1);
   }
@@ -1137,6 +1176,27 @@ export class MockCreatures implements ICreatureFactory {
   createHuman(appearance: HumanAppearance, _role: 'guest' | StaffRole, _seed: number): CreatureModel {
     return new CapsuleModel(appearance.shirt, appearance.height, 0.4, true);
   }
+}
+
+// ===========================================================================
+// Audio
+// ===========================================================================
+
+/** Silent audio that records cues (window.__cues) so the harness can check UI sounds. */
+export class MockAudio implements IAudio {
+  enabled = true;
+  readonly cues: string[] = [];
+  update(_dt: number, _camera: THREE.Camera, _focus: THREE.Vector3): void {}
+  play(cue: Parameters<IAudio['play']>[0]): void {
+    this.cues.push(cue);
+    if (this.cues.length > 200) this.cues.shift();
+  }
+  setEnabled(on: boolean): void {
+    this.enabled = on;
+  }
+  resume(): void {}
+  suspend(): void {}
+  dispose(): void {}
 }
 
 // ===========================================================================

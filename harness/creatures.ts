@@ -3,6 +3,10 @@
 //   ?grid=1                 all species side by side (+ a 1.8 m human for scale)
 //   ?humans=1               a crowd of people with different actions / held items
 //   ?live=1                 keep animating (default: freeze at t when t is given)
+//   ?crowd=N                N people + a few herds spread over 120 m (LOD / draw-call stress test)
+//   ?standalone=1           render every model as its own SkinnedMesh (pre-batching path) for A/B
+//   ?lod=0..3               force a LOD level on every batched creature
+//   ?highlight=1            highlight every other model (selection glow)
 
 import * as THREE from 'three';
 import { Sky } from 'three/examples/jsm/objects/Sky.js';
@@ -98,6 +102,11 @@ ground.receiveShadow = true;
 scene.add(ground);
 
 const factory = new CreatureFactory(quality);
+// Batched crowd rendering needs the factory root in the scene; without it every
+// model renders standalone (old path) — handy for visual A/B comparisons.
+if (!q.get('standalone')) scene.add(factory.root);
+if (q.has('lod')) factory.crowd.forceLod = num('lod', 0);
+if (q.has('sbias')) factory.crowd.shadowLodBias = num('sbias', 1);
 const info = document.getElementById('info')!;
 
 interface Entry {
@@ -173,6 +182,47 @@ async function build(): Promise<THREE.Vector3> {
     target.set(0, 0.9, -0.8);
     return target;
   }
+  if (q.get('crowd')) {
+    const n = num('crowd', 150);
+    const skins = [0xf1c8a8, 0xc68e6a, 0x8d5a3b, 0x5a3825, 0xe0b090, 0xa56f4e];
+    const shirts = [0xb03a2e, 0x2e5d8f, 0xe2d8c4, 0x3f7a4b, 0xd9a43c, 0x6a4c93, 0x223344, 0xc96f8a];
+    const actions = ['walk', 'idle', 'watch', 'eat', 'drink', 'walk', 'shop', 'walk'];
+    const holds = ['none', 'balloon', 'none', 'icecream', 'drink', 'food', 'gift', 'none'];
+    let rs = 12345;
+    const rnd = () => ((rs = (rs * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    for (let i = 0; i < n; i++) {
+      const child = rnd() < 0.2;
+      const m = human(
+        {
+          skin: skins[i % skins.length], shirt: shirts[(i * 5) % shirts.length], hair: [0x2a1d14, 0x5a3b22, 0xa77d45][i % 3],
+          pants: [0x2f3a4f, 0x4a4036, 0x7a6f5c][i % 3], hairStyle: (i % 4) as 0, female: rnd() < 0.5, child,
+          height: child ? 1.2 + rnd() * 0.2 : 1.6 + rnd() * 0.3, build: 0.9 + rnd() * 0.3,
+        },
+        i % 25 === 0 ? (['keeper', 'groundskeeper', 'vet'] as const)[(i / 25) % 3] : 'guest',
+        i * 7 + 1,
+      );
+      const r = 4 + Math.sqrt(rnd()) * 110, a = rnd() * Math.PI * 0.7 - Math.PI * 0.35;
+      m.object.position.set(Math.sin(a) * r, 0, -Math.cos(a) * r);
+      m.object.rotation.y = rnd() * Math.PI * 2;
+      scene.add(m.object);
+      const act = actions[i % actions.length];
+      entries.push({ model: m, anim: { action: act, speed: act === 'walk' ? 1.3 : 0, holding: holds[i % holds.length] } });
+    }
+    const herds = ['zebra', 'giraffe', 'elephant', 'lion', 'gazelle', 'penguin'];
+    await factory.preload(herds);
+    herds.forEach((id, h) => {
+      for (let k = 0; k < 5; k++) {
+        const m = factory.createAnimal(id, { seed: h * 10 + k, sex: k % 2 ? 'M' : 'F', growth: k === 4 ? 0.4 : 1 });
+        const r = 12 + h * 18 + k * 2.5, a = (h % 2 ? 0.25 : -0.25) + k * 0.06;
+        m.object.position.set(Math.sin(a) * r, 0, -Math.cos(a) * r);
+        m.object.rotation.y = h + k;
+        scene.add(m.object);
+        entries.push({ model: m, anim: { action: k % 2 ? 'walk' : 'idle', speed: k % 2 ? 1.2 : 0 } });
+      }
+    });
+    target.set(0, 1, -20);
+    return target;
+  }
   if (q.get('person')) {
     const h = human({ female: q.get('sex') === 'F', child: !!q.get('child'), hairStyle: Number(q.get('hair') ?? 0) as 0, shirt: 0x8a3b2e }, (q.get('role') as StaffRole) ?? 'guest', num('seed', 4));
     scene.add(h.object);
@@ -223,8 +273,24 @@ if (q.get('wire')) {
     }
   });
 }
-const stats = factory.stats();
-info.textContent = `build ${buildMs.toFixed(0)} ms\n` + stats.map((s) => `${s.key}  ${s.triangles} tris  ${s.ms.toFixed(0)} ms`).join('\n');
+/** CPU time (ms, summed) of animation, crowd update (LOD / upload) and render submission. */
+const cpu = { anim: 0, crowd: 0, render: 0, frames: 0 };
+(window as unknown as { __cpu: typeof cpu }).__cpu = cpu;
+function showInfo(): void {
+  const lods = factory.lodStats();
+  const cs = factory.crowdStats();
+  const ri = renderer.info.render;
+  info.textContent =
+    `build ${buildMs.toFixed(0)} ms   draws ${ri.calls}  tris ${ri.triangles}` +
+    (cpu.frames ? `   cpu/frame: anim ${(cpu.anim / cpu.frames).toFixed(2)} ms, crowd ${(cpu.crowd / cpu.frames).toFixed(2)} ms, render ${(cpu.render / cpu.frames).toFixed(2)} ms` : '') +
+    '\n' +
+    `crowd: ${cs.batches} batches, ${cs.instances} batched, ${cs.visible} visible, ${cs.shadow} shadow, LOD ${cs.perLod.join('/')}, ${cs.lodBuilds} LOD builds ${cs.lodBuildMs.toFixed(0)} ms\n` +
+    factory
+      .stats()
+      .slice(0, 30)
+      .map((s, i) => `${s.key}  ${s.triangles} tris  ${s.ms.toFixed(0)} ms   LOD ${(lods[i]?.triangles ?? []).join('/')}`)
+      .join('\n');
+}
 
 const live = !!q.get('live') || !q.has('t');
 const tEnd = num('t', 0);
@@ -238,13 +304,23 @@ function stepAll(dt: number) {
     e.model.update(dt, e.anim);
   }
 }
+if (q.get('highlight')) entries.forEach((e, i) => i % 2 === 0 && e.model.setHighlighted(true));
 while (simT < tEnd) {
   stepAll(step);
   simT += step;
 }
 stepAll(0);
+scene.updateMatrixWorld();
+// build every LOD the view needs before the screenshot (normally spread over frames)
+factory.crowd.buildBudgetMs = 1e9;
+factory.update(camera);
+factory.update(camera);
+factory.crowd.buildBudgetMs = 4;
+renderer.info.reset();
 renderer.render(scene, camera);
-(window as unknown as { __ready: boolean }).__ready = true;
+showInfo();
+(window as unknown as { __ready: boolean; __factory: unknown; __renderer: unknown }).__ready = true;
+(window as unknown as { __factory: unknown }).__factory = factory;
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
@@ -256,9 +332,19 @@ function frame() {
   const now = performance.now();
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
+  const t0 = performance.now();
   if (live) stepAll(dt);
+  const t1 = performance.now();
   controls.update();
+  factory.update(camera);
+  const t2 = performance.now();
   renderer.render(scene, camera);
+  const t3 = performance.now();
+  cpu.anim += t1 - t0;
+  cpu.crowd += t2 - t1;
+  cpu.render += t3 - t2;
+  cpu.frames++;
+  if (live) showInfo();
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

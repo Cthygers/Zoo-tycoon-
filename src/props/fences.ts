@@ -26,6 +26,8 @@ import {
   surfaceTextures,
   weatheredWoodMaterial,
 } from './materials';
+import { MultiBatch, type CullView, type InstParams, type SlotRef } from './lod/batched';
+import { applyFade } from './lod/fade';
 import { cloneWithHooks } from './wind';
 
 const HALF = TILE / 2;
@@ -492,13 +494,20 @@ export function createFenceSegment(fenceId: number, detail: FenceDetail = 2): TH
 /** Extension (m) of a vertex at local y = 0, interpolated along the 2 m segment. */
 const GROUND_EXT = /* glsl */ `
 float fenceGroundExt() {
-#ifdef USE_INSTANCING
+#if defined( USE_BATCHING ) && defined( USE_BATCHING_COLOR )
+  // batched back-end: (extA, extB) ride in the per-instance colour texture
+  vec4 fgC = getBatchingColor( getIndirectIndex( gl_DrawID ) );
+  return position.y < 0.002 ? mix( fgC.x, fgC.y, clamp( position.x * ${(1 / TILE).toFixed(6)} + 0.5, 0.0, 1.0 ) ) : 0.0;
+#elif defined( USE_INSTANCING )
   return position.y < 0.002 ? mix( aGround.x, aGround.y, clamp( position.x * ${(1 / TILE).toFixed(6)} + 0.5, 0.0, 1.0 ) ) : 0.0;
 #else
   return 0.0;
 #endif
 }
 `;
+
+/** color_vertex without the per-instance colour multiply (fences use that slot for the ground extension). */
+const FENCE_COLOR_VERTEX = THREE.ShaderChunk.color_vertex.replace('vColor *= getBatchingColor( getIndirectIndex( gl_DrawID ) );', '');
 
 function groundPatched(src: THREE.Material, uv: FencePart['groundUv']): THREE.Material {
   const m = src.clone();
@@ -507,7 +516,8 @@ function groundPatched(src: THREE.Material, uv: FencePart['groundUv']): THREE.Ma
   const scale = uv ? (1 / uv.tile).toFixed(6) : '0.0';
   m.onBeforeCompile = (shader, renderer) => {
     let vs = shader.vertexShader
-      .replace('#include <common>', `#include <common>\n#ifdef USE_INSTANCING\nattribute vec2 aGround;\n#endif\n${GROUND_EXT}`)
+      .replace('#include <batching_pars_vertex>', `#include <batching_pars_vertex>\n#ifdef USE_INSTANCING\nattribute vec2 aGround;\n#endif\n${GROUND_EXT}`)
+      .replace('#include <color_vertex>', FENCE_COLOR_VERTEX)
       .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed.y -= fenceGroundExt();');
     if (axis) {
       // keep texel density on the stretched part: shift the base vertices' UVs too
@@ -553,6 +563,7 @@ class FenceBatch {
     mesh.receiveShadow = this.shadows;
     mesh.name = 'fence-batch';
     mesh.frustumCulled = true;
+    if (this.material.transparent) mesh.renderOrder = 11;
     this.capacity = cap;
     this.geometry = geo;
     this.ground = ground;
@@ -613,6 +624,19 @@ interface StyleBatches {
 export class FenceRenderer {
   readonly group = new THREE.Group();
   private batches = new Map<number, StyleBatches>();
+  /** Batched back-end: one BatchedMesh per (patched) material, shared by every style. */
+  private multi = new Map<string, MultiBatch>();
+  private multiList: MultiBatch[] = [];
+  private readonly ref: SlotRef = { id: -1, slot: { index: -1 } };
+  private readonly ext = new THREE.Color();
+  private readonly inst: InstParams = { cull: Infinity, shadow: 0, lodOn: true, tint: null };
+  /** Shadow-caster distances from the camera focus (set by the layer per tier). */
+  private shadowNear = 45;
+  private shadowFar = 90;
+  /** Camera distance where detailed fences swap to the detail-0 build (0 = never). */
+  private lodDist = 0;
+  /** Per fence id: is the detail-0 build much cheaper than the current one? */
+  private farWorth = new Map<number, boolean>();
   private patched = new Map<string, THREE.Material>();
   private dirty = true;
   private unsub: (() => void)[] = [];
@@ -625,6 +649,8 @@ export class FenceRenderer {
     private readonly world: World,
     events: EventBus,
     private quality: QualitySettings,
+    /** Use BatchedMesh (WEBGL_multi_draw) with per-instance culling instead of InstancedMesh. */
+    private readonly batched = false,
   ) {
     this.group.name = 'fences';
     const mark = () => {
@@ -645,10 +671,81 @@ export class FenceRenderer {
     if (changed) {
       for (const b of this.batches.values()) for (const x of [...b.posts, ...b.panel]) x.dispose();
       this.batches.clear();
+      for (const b of this.multiList) b.dispose();
+      this.multi.clear();
+      this.multiList = [];
+      this.farWorth.clear();
       this.dirty = true;
       return;
     }
     for (const b of this.batches.values()) for (const x of [...b.posts, ...b.panel]) x.setShadows(q.shadows);
+    for (const b of this.multiList) b.setShadows(q.shadows);
+  }
+
+  /** Shadow-caster distances around the camera focus and the far-LOD distance (batched back-end). */
+  setShadowRange(near: number, far: number, lodDist = this.lodDist): void {
+    if (near === this.shadowNear && far === this.shadowFar && lodDist === this.lodDist) return;
+    this.shadowNear = near;
+    this.shadowFar = far;
+    this.lodDist = lodDist;
+    this.dirty = true;
+  }
+
+  /** Detail-0 build of a fence when it is worth drawing beyond lodDist (batched back-end only). */
+  private farStyle(id: number): FenceStyle | null {
+    if (!this.batched || this.lodDist <= 0 || this.detail === 0) return null;
+    let worth = this.farWorth.get(id);
+    const far = fenceStyle(id, 0);
+    if (worth === undefined) {
+      const near = fenceStyle(id, this.detail);
+      const tris = (st: FenceStyle | null) => {
+        let n = 0;
+        for (const p of st ? [...st.posts, ...st.panel] : []) n += (p.geometry.index ? p.geometry.index.count : p.geometry.getAttribute('position').count) / 3;
+        return n;
+      };
+      worth = !!far && !!near && tris(far) < tris(near) * 0.8;
+      this.farWorth.set(id, worth);
+    }
+    return worth ? far : null;
+  }
+
+  /** Per-frame culling of the batched back-end (no-op for instanced fences). */
+  cull(view: CullView, force: boolean): void {
+    for (const b of this.multiList) if (force || b.dirty) b.cull(view);
+  }
+
+  private multiFor(p: FencePart): MultiBatch {
+    const mat = this.material(p);
+    const key = `${mat.uuid}|${Object.keys(p.geometry.attributes).sort().join(',')}`;
+    let b = this.multi.get(key);
+    if (!b) {
+      b = new MultiBatch(mat, this.quality.shadows, this.group);
+      b.mesh.name = 'fence-multibatch';
+      // see-through fences (glass, chain-link mesh) don't write depth: draw them after
+      // the water (renderOrder 10) so they are never painted over where they cross a pond
+      if (mat.transparent) b.mesh.renderOrder = 11;
+      this.multi.set(key, b);
+      this.multiList.push(b);
+    }
+    return b;
+  }
+
+  private pushMulti(st: FenceStyle, parts: FencePart[], m: THREE.Matrix4, extA: number, extB: number, cull = Infinity, minDist = 0): void {
+    const p = this.inst;
+    this.ext.setRGB(extA, extB, 0);
+    p.tint = this.ext;
+    p.cull = cull;
+    p.minDist = minDist;
+    p.band = cull !== Infinity || minDist > 0;
+    const see = st.postMode === 'all' && parts === st.panel;
+    for (const part of parts) {
+      // fences outline habitats: never distance-culled; shadows only near the focus
+      // (see-through panels — bars, rails, mesh — alias in a distant shadow map anyway)
+      let sh = st.def.height > 2.4 ? this.shadowFar * 0.6 : this.shadowNear;
+      if (see) sh *= 0.65;
+      p.shadow = part.castShadow && this.quality.shadows ? sh : 0;
+      this.multiFor(part).add(part.geometry, m, this.ref, p);
+    }
   }
 
   private material(p: FencePart): THREE.Material {
@@ -656,6 +753,9 @@ export class FenceRenderer {
     let m = this.patched.get(key);
     if (!m) {
       m = groundPatched(p.material, p.groundUv);
+      // close-up / follow cameras: fence sections between the camera and the subject dissolve
+      // (glass is already see-through)
+      if (!m.userData.glass) applyFade(m);
       this.patched.set(key, m);
     }
     return m;
@@ -789,25 +889,31 @@ export class FenceRenderer {
 
     // ---- prepare batches
     const used = new Set<number>([...panelCount.keys(), ...postCount.keys()]);
-    for (const [id, b] of this.batches) {
-      if (used.has(id)) continue;
-      for (const x of [...b.posts, ...b.panel]) {
-        x.begin(0);
-        x.end();
+    const multi = this.batched;
+    if (multi) {
+      for (const b of this.multiList) b.clear();
+    } else {
+      for (const [id, b] of this.batches) {
+        if (used.has(id)) continue;
+        for (const x of [...b.posts, ...b.panel]) {
+          x.begin(0);
+          x.end();
+        }
       }
-    }
-    for (const id of used) {
-      const b = this.batchesFor(id);
-      if (!b) continue;
-      for (const x of b.panel) x.begin(panelCount.get(id) ?? 0);
-      for (const x of b.posts) x.begin(postCount.get(id) ?? 0);
+      for (const id of used) {
+        const b = this.batchesFor(id);
+        if (!b) continue;
+        for (const x of b.panel) x.begin(panelCount.get(id) ?? 0);
+        for (const x of b.posts) x.begin(postCount.get(id) ?? 0);
+      }
     }
 
     // ---- panels
     const m = this.m;
     const addPanel = (id: number, ax: number, az: number, bx: number, bz: number, dir: 'h' | 'v') => {
-      const sb = this.batchesFor(id);
-      if (!sb) return;
+      const st = multi ? fenceStyle(id, this.detail) : null;
+      const sb = multi ? null : this.batchesFor(id);
+      if (!sb && !st) return;
       const A = this.base(ax, az);
       const B = this.base(bx, bz);
       const s = (B.b - A.b) / TILE;
@@ -818,7 +924,13 @@ export class FenceRenderer {
       else m.set(0, 0, -1, mx, s, 1, 0, my, 1, 0, 0, mz, 0, 0, 0, 1);
       const eA = A.b - A.g + SINK;
       const eB = B.b - B.g + SINK;
-      for (const x of sb.panel) x.push(m, eA, eB);
+      if (st) {
+        const far = this.farStyle(id);
+        if (far) {
+          this.pushMulti(st, st.panel, m, eA, eB, this.lodDist);
+          this.pushMulti(far, far.panel, m, eA, eB, Infinity, this.lodDist);
+        } else this.pushMulti(st, st.panel, m, eA, eB);
+      } else for (const x of sb!.panel) x.push(m, eA, eB);
     };
     for (let z = 0; z <= MAP_H; z++)
       for (let x = 0; x < MAP_W; x++) {
@@ -836,8 +948,9 @@ export class FenceRenderer {
     for (let i = 0; i < posts.length; i += 2) {
       const ci = posts[i];
       const id = posts[i + 1];
-      const sb = this.batchesFor(id);
-      if (!sb) continue;
+      const st = multi ? fenceStyle(id, this.detail) : null;
+      const sb = multi ? null : this.batchesFor(id);
+      if (!sb && !st) continue;
       const cx = ci % (MAP_W + 1);
       const cz = (ci / (MAP_W + 1)) | 0;
       const P = this.base(cx, cz);
@@ -845,21 +958,29 @@ export class FenceRenderer {
       rot.makeRotationY((((cx * 7 + cz * 13) & 3) * Math.PI) / 2);
       rot.setPosition(cx * TILE, P.b, cz * TILE);
       const e = P.b - P.g + SINK;
-      for (const x of sb.posts) x.push(rot, e, e);
+      if (st) {
+        const far = this.farStyle(id);
+        if (far) {
+          this.pushMulti(st, st.posts, rot, e, e, this.lodDist);
+          this.pushMulti(far, far.posts, rot, e, e, Infinity, this.lodDist);
+        } else this.pushMulti(st, st.posts, rot, e, e);
+      } else for (const x of sb!.posts) x.push(rot, e, e);
     }
 
-    for (const id of used) {
-      const b = this.batches.get(id);
-      if (!b) continue;
-      for (const x of b.panel) x.end();
-      for (const x of b.posts) x.end();
-    }
+    if (!multi)
+      for (const id of used) {
+        const b = this.batches.get(id);
+        if (!b) continue;
+        for (const x of b.panel) x.end();
+        for (const x of b.posts) x.end();
+      }
   }
 
   /** Draw-call relevant meshes (for stats / debugging). */
-  meshes(): THREE.InstancedMesh[] {
-    const out: THREE.InstancedMesh[] = [];
+  meshes(): { count: number }[] {
+    const out: { count: number }[] = [];
     for (const b of this.batches.values()) for (const x of [...b.posts, ...b.panel]) out.push(x.mesh);
+    for (const b of this.multiList) out.push({ count: b.size() });
     return out;
   }
 
@@ -868,6 +989,9 @@ export class FenceRenderer {
     this.unsub = [];
     for (const b of this.batches.values()) for (const x of [...b.posts, ...b.panel]) x.dispose();
     this.batches.clear();
+    for (const b of this.multiList) b.dispose();
+    this.multi.clear();
+    this.multiList = [];
     for (const m of this.patched.values()) m.dispose();
     this.patched.clear();
     this.group.removeFromParent();

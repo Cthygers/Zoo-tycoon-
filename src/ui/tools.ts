@@ -3,8 +3,8 @@
 // gesture ends, a pending action that the player must confirm (✓ / ✗).
 
 import * as THREE from 'three';
-import { MAP_H, MAP_W, TILE } from '../core/constants';
-import type { CreatureModel, ICreatureFactory, IPropsLayer, IRenderContext, ISimulation, SpeciesSuitability } from '../core/contracts';
+import { MAP_H, MAP_W, TILE, WATER_LEVEL } from '../core/constants';
+import type { ICreatureFactory, IPropsLayer, IRenderContext, ISimulation, SpeciesSuitability } from '../core/contracts';
 import type { TileRect } from '../core/events';
 import { PathType, Terrain, type CommandResult, type StaffRole, type Tool } from '../core/types';
 import type { EdgeRef } from '../core/world';
@@ -14,7 +14,8 @@ import { SPECIES_BY_ID } from '../data/species';
 import { STAFF_INFO, TERRAIN_INFO } from './catalog';
 import { fmtMoney } from './dom';
 import type { ToolInput } from './input';
-import { COL, DrapedMesh, FenceGhosts, GridOverlay, Marker, disposeOwned, ghostify, surfaceY, tintGhost, type EdgeState, type RGBA } from './preview';
+import { AnimalGhost, COL, DrapedMesh, FenceGhosts, GridOverlay, Marker, disposeOwned, ghostify, surfaceY, tintGhost, type EdgeState, type RGBA } from './preview';
+import { cue } from './sound';
 
 export interface PendingAction {
   title: string;
@@ -26,6 +27,9 @@ export interface PendingAction {
   noteKind?: 'bad' | 'warn';
   commit(): CommandResult;
 }
+
+/** Bulldoze tool: clear everything in a rectangle, or only fence runs. */
+export type BulldozeMode = 'area' | 'fence';
 
 export interface AnimalPreviewInfo {
   speciesId: string;
@@ -51,6 +55,13 @@ export interface ToolHost {
 
 type TP = { x: number; z: number };
 
+const removeStates: EdgeState[] = [];
+/** A shared array of `n` 'remove' edge states (no per-preview allocation). */
+function REMOVE_STATES(n: number): EdgeState[] {
+  while (removeStates.length < n) removeStates.push('remove');
+  return removeStates;
+}
+
 function hexToRgba(hex: string, a: number): RGBA {
   const n = parseInt(hex.slice(1), 16);
   return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255, a];
@@ -68,12 +79,15 @@ export class ToolManager implements ToolInput {
   tool: Tool = { kind: 'select' };
   fenceMode: 'rect' | 'line' = 'rect';
   pathStraight = false;
+  bulldozeMode: BulldozeMode = 'area';
 
   readonly group = new THREE.Group();
   private fills: DrapedMesh;
   private habOutline: DrapedMesh;
   private grid: GridOverlay;
   private fences: FenceGhosts;
+  /** Red overlays on existing fences that a removal would take away (one per fence type). */
+  private removeGhosts = new Map<number, FenceGhosts>();
   private marker = new Marker();
 
   // gesture / selection state
@@ -97,10 +111,17 @@ export class ToolManager implements ToolInput {
   // animal / staff
   private point: TP | null = null;
   private prevPoint: TP | null = null;
-  private animalModel: CreatureModel | null = null;
-  private animalModelSpecies = '';
+  private animalGhost: AnimalGhost | null = null;
+  /** Species whose meshes are built (creating a ghost for them is cheap). */
+  private readySpecies = new Set<string>();
+  private loadingSpecies = new Set<string>();
+  // bulldoze (fence mode): world point of the tap that started the gesture
+  private tapPt: TP | null = null;
+  private prevTapPt: TP | null = null;
+  private removeEdges: EdgeRef[] = [];
 
   private pending: PendingAction | null = null;
+  private disposed = false;
   private labelPos = new THREE.Vector3();
   private labelOn = false;
   private recheck = 0;
@@ -142,7 +163,8 @@ export class ToolManager implements ToolInput {
     if (!keepSel) this.resetState();
     if (tool.kind !== 'object' && this.ghost) this.dropGhost();
     if (tool.kind === 'object' && this.ghostDef !== tool.defId) this.dropGhost();
-    if (tool.kind !== 'animal') this.dropAnimalModel();
+    if (tool.kind !== 'animal') this.dropAnimalGhost();
+    else this.warmSpecies(tool.speciesId);
     if (tool.kind === 'select') {
       this.grid.hide();
       this.host.onAnimalPreview(null);
@@ -162,18 +184,22 @@ export class ToolManager implements ToolInput {
     this.prevPoint = null;
     this.ghostTile = null;
     this.ghostLocked = false;
+    this.tapPt = null;
+    this.prevTapPt = null;
     this.fills.clear();
     this.fences.clear();
+    this.clearRemoveGhosts();
     this.marker.hide();
+    if (this.animalGhost) this.animalGhost.visible = false;
     this.setPending(null);
     this.setLabel(null);
   }
 
   /** Cancel the pending action but keep the tool. */
   cancelPending(): void {
+    if (this.pending) cue('close');
     this.resetState();
     if (this.ghost) this.ghost.visible = false;
-    this.dropAnimalModel();
     this.host.onAnimalPreview(this.tool.kind === 'animal' ? { speciesId: this.tool.speciesId, habitatId: null, suitability: null, result: null } : null);
   }
 
@@ -196,17 +222,32 @@ export class ToolManager implements ToolInput {
     this.refresh();
   }
 
+  setBulldozeMode(m: BulldozeMode): void {
+    if (m === this.bulldozeMode) return;
+    this.bulldozeMode = m;
+    if (this.tool.kind === 'bulldoze') this.resetState();
+    this.refresh();
+  }
+
   confirm(): CommandResult | null {
     const p = this.pending;
-    if (!p || !p.ok || this.gesture) return null;
+    if (!p || this.gesture) return null;
+    if (!p.ok) {
+      cue('error');
+      return null;
+    }
+    const removal = p.cost < 0 || this.tool.kind === 'bulldoze';
     const r = p.commit();
     if (r.ok) {
+      cue(removal ? 'bulldoze' : 'build');
       this.host.onCommitted(r);
       this.resetState();
       if (this.ghost) this.ghost.visible = false;
-      this.dropAnimalModel();
       if (this.tool.kind === 'animal') this.host.onAnimalPreview({ speciesId: this.tool.speciesId, habitatId: null, suitability: null, result: null });
-    } else this.refresh();
+    } else {
+      cue('error');
+      this.refresh();
+    }
     return r;
   }
 
@@ -241,12 +282,15 @@ export class ToolManager implements ToolInput {
         this.sel = { a: c, b: { ...c } };
         break;
       }
+      case 'bulldoze':
       case 'path':
-      case 'terrain':
-      case 'bulldoze': {
-        const c = this.tileOf(p);
+      case 'terrain': {
+        const fenceMode = t.kind === 'bulldoze' && this.bulldozeMode === 'fence';
+        const c = fenceMode ? this.cornerOf(p) : this.tileOf(p);
         this.prevSel = this.sel;
+        this.prevTapPt = this.tapPt;
         this.sel = { a: c, b: { ...c } };
+        this.tapPt = { x: p.x, z: p.z };
         break;
       }
       case 'object': {
@@ -292,6 +336,8 @@ export class ToolManager implements ToolInput {
     this.applyPointer();
     this.gesture = false;
     this.refresh();
+    // audible feedback when the spot the player just picked cannot be used
+    if (this.pending && !this.pending.ok) cue('error');
   }
 
   cancel(): void {
@@ -299,6 +345,7 @@ export class ToolManager implements ToolInput {
     this.gesture = false;
     this.ptrDirty = false;
     this.sel = this.prevSel;
+    this.tapPt = this.prevTapPt;
     this.ghostTile = this.prevGhostTile;
     this.ghostLocked = this.prevGhostLocked;
     this.point = this.prevPoint;
@@ -331,9 +378,11 @@ export class ToolManager implements ToolInput {
       case 'fence':
         this.sel!.b = this.cornerOf(p);
         break;
+      case 'bulldoze':
+        this.sel!.b = this.bulldozeMode === 'fence' ? this.cornerOf(p) : this.tileOf(p);
+        break;
       case 'path':
       case 'terrain':
-      case 'bulldoze':
         this.sel!.b = this.tileOf(p);
         break;
       case 'object': {
@@ -379,7 +428,7 @@ export class ToolManager implements ToolInput {
       }
     }
     this.marker.update(dt);
-    if (this.animalModel) this.animalModel.update(dt, { action: 'idle', speed: 0 });
+    if (this.animalGhost?.visible) this.animalGhost.update(dt);
     // periodic re-validation (money, animals moving, world edits)
     if (this.pending) {
       this.recheck += dt;
@@ -425,7 +474,7 @@ export class ToolManager implements ToolInput {
       case 'terrain':
         return this.previewTerrain(this.tool.terrain, this.tool.brush);
       case 'bulldoze':
-        return this.previewBulldoze();
+        return this.bulldozeMode === 'fence' ? this.previewFenceRemoval() : this.previewBulldoze();
       case 'object':
         return this.previewObject(this.tool.defId, this.tool.rot);
       case 'animal':
@@ -435,6 +484,7 @@ export class ToolManager implements ToolInput {
       default:
         this.fills.clear();
         this.fences.clear();
+        this.clearRemoveGhosts();
         this.marker.hide();
         this.setPending(null);
         this.setLabel(null);
@@ -642,16 +692,18 @@ export class ToolManager implements ToolInput {
 
   private previewBulldoze(): void {
     const sim = this.host.sim;
+    const w = sim.world;
     const r = this.rectOfSel(1);
     this.fills.begin();
     let res: CommandResult | null = null;
+    const edges = this.removeEdges;
+    edges.length = 0;
     if (r) {
       const sub = Math.min(48, Math.max(2, (Math.max(r.x1 - r.x0, r.z1 - r.z0) + 1) * 2));
       this.fills.rect(r.x0 * TILE, r.z0 * TILE, (r.x1 + 1) * TILE, (r.z1 + 1) * TILE, COL.remove, sub);
       res = sim.bulldoze(r, true);
       this.fills.outline(r.x0, r.z0, r.x1, r.z1, 0.14, COL.removeLine);
       // mark objects that will be removed
-      const w = sim.world;
       const seen = new Set<number>();
       for (let z = r.z0; z <= r.z1; z++)
         for (let x = r.x0; x <= r.x1; x++) {
@@ -660,8 +712,15 @@ export class ToolManager implements ToolInput {
           seen.add(o.id);
           for (const ft of w.footprint(o)) this.fills.tile(ft.x, ft.z, [1, 0.3, 0.2, 0.3], 0.18);
         }
+      // …and the fence segments on and inside the rectangle (the sim clears those too)
+      for (let z = r.z0; z <= r.z1 + 1; z++)
+        for (let x = r.x0; x <= r.x1; x++) if (w.getFence({ dir: 'h', x, z })) edges.push({ dir: 'h', x, z });
+      for (let z = r.z0; z <= r.z1; z++)
+        for (let x = r.x0; x <= r.x1 + 1; x++) if (w.getFence({ dir: 'v', x, z })) edges.push({ dir: 'v', x, z });
+      for (const e of edges) this.edgeRibbon(e, 0.3, COL.removeLine);
     }
     this.fills.end();
+    this.showRemoveGhosts(edges);
     if (!r || !res) {
       this.setPending(null);
       this.setLabel(null);
@@ -670,14 +729,153 @@ export class ToolManager implements ToolInput {
     const refund = -res.cost;
     this.setLabel({ x: (r.x1 + 1) * TILE, z: (r.z1 + 1) * TILE }, res.ok ? `+${fmtMoney(refund)}` : 'Nothing here', `${r.x1 - r.x0 + 1}×${r.z1 - r.z0 + 1}`, res.ok);
     const rect = { ...r };
+    const nf = edges.length;
     this.setPending({
-      title: `Clear ${r.x1 - r.x0 + 1}×${r.z1 - r.z0 + 1} area`,
+      title: `Clear ${r.x1 - r.x0 + 1}×${r.z1 - r.z0 + 1} area${nf ? ` · ${nf * TILE} m fence` : ''}`,
       verb: 'Remove',
       cost: res.cost,
       ok: res.ok,
       ...this.note(res),
       commit: () => sim.bulldoze(rect),
     });
+  }
+
+  // ---- fence removal (bulldoze tool, "fences only")
+  private edgeRibbon(e: EdgeRef, width: number, c: RGBA): void {
+    if (e.dir === 'h') this.fills.line(e.x * TILE, e.z * TILE, (e.x + 1) * TILE, e.z * TILE, width, c);
+    else this.fills.line(e.x * TILE, e.z * TILE, e.x * TILE, (e.z + 1) * TILE, width, c);
+  }
+
+  /** Nearest fenced edge to a world point (within ~1.3 m), or null. */
+  private fenceEdgeNear(px: number, pz: number): EdgeRef | null {
+    const w = this.host.sim.world;
+    const tx = px / TILE,
+      tz = pz / TILE;
+    let best: EdgeRef | null = null;
+    let bd = 0.65; // tiles
+    const cx = Math.floor(tx),
+      cz = Math.floor(tz);
+    for (let z = cz - 1; z <= cz + 2; z++)
+      for (let x = cx - 1; x <= cx + 2; x++) {
+        // h(x, z): (x..x+1, z)
+        if (w.getFence({ dir: 'h', x, z })) {
+          const dx = Math.max(x - tx, 0, tx - (x + 1));
+          const d = Math.hypot(dx, tz - z);
+          if (d < bd) {
+            bd = d;
+            best = { dir: 'h', x, z };
+          }
+        }
+        // v(x, z): (x, z..z+1)
+        if (w.getFence({ dir: 'v', x, z })) {
+          const dz = Math.max(z - tz, 0, tz - (z + 1));
+          const d = Math.hypot(tx - x, dz);
+          if (d < bd) {
+            bd = d;
+            best = { dir: 'v', x, z };
+          }
+        }
+      }
+    return best;
+  }
+
+  /** The straight run of same-type fence through an edge, ending at corners / junctions. */
+  private fenceRun(start: EdgeRef): EdgeRef[] {
+    const w = this.host.sim.world;
+    const id = w.getFence(start);
+    const out: EdgeRef[] = [start];
+    // does a perpendicular fence meet the run at grid corner (cx, cz)?
+    const branches = (cx: number, cz: number, dir: 'h' | 'v') =>
+      dir === 'h'
+        ? !!(w.getFence({ dir: 'v', x: cx, z: cz - 1 }) || w.getFence({ dir: 'v', x: cx, z: cz }))
+        : !!(w.getFence({ dir: 'h', x: cx - 1, z: cz }) || w.getFence({ dir: 'h', x: cx, z: cz }));
+    for (const step of [-1, 1]) {
+      let cur = start;
+      for (let guard = 0; guard < 200; guard++) {
+        const next: EdgeRef = cur.dir === 'h' ? { dir: 'h', x: cur.x + step, z: cur.z } : { dir: 'v', x: cur.x, z: cur.z + step };
+        // the corner shared by cur and next
+        const cx = cur.dir === 'h' ? (step > 0 ? cur.x + 1 : cur.x) : cur.x;
+        const cz = cur.dir === 'h' ? cur.z : step > 0 ? cur.z + 1 : cur.z;
+        if (w.getFence(next) !== id || branches(cx, cz, cur.dir)) break;
+        out.push(next);
+        cur = next;
+      }
+    }
+    return out;
+  }
+
+  private previewFenceRemoval(): void {
+    const sim = this.host.sim;
+    const w = sim.world;
+    const edges = this.removeEdges;
+    edges.length = 0;
+    const s = this.sel;
+    this.fills.begin();
+    if (s) {
+      if (s.a.x === s.b.x && s.a.z === s.b.z) {
+        // tap: the whole straight run under the finger
+        const t = this.tapPt;
+        const e = t ? this.fenceEdgeNear(t.x, t.z) : null;
+        if (e) for (const r of this.fenceRun(e)) edges.push(r);
+      } else {
+        // drag: fenced edges along the line between the two posts
+        for (const e of w.edgesBetweenCorners(s.a.x, s.a.z, s.b.x, s.b.z)) {
+          if (w.getFence(e)) edges.push(e);
+          else this.edgeRibbon(e, 0.12, [1, 0.85, 0.75, 0.35]);
+        }
+      }
+      for (const e of edges) this.edgeRibbon(e, 0.32, COL.removeLine);
+    }
+    this.fills.end();
+    this.showRemoveGhosts(edges);
+    if (!s) {
+      this.setPending(null);
+      this.setLabel(null);
+      return;
+    }
+    const todo = edges.slice();
+    const res = sim.removeFences(todo, true);
+    const metres = todo.length * TILE;
+    const end = todo.length ? todo[todo.length - 1] : null;
+    const lp = end ? (end.dir === 'h' ? { x: (end.x + 1) * TILE, z: end.z * TILE } : { x: end.x * TILE, z: (end.z + 1) * TILE }) : { x: s.b.x * TILE, z: s.b.z * TILE };
+    this.setLabel(lp, res.ok ? `+${fmtMoney(-res.cost)}` : 'No fence here', res.ok ? `${metres} m` : '', res.ok);
+    const kinds = new Set(todo.map((e) => w.getFence(e)));
+    const name = kinds.size === 1 ? FENCES_BY_ID[[...kinds][0]]?.name ?? 'Fence' : 'Fences';
+    this.setPending({
+      title: res.ok ? `Remove ${name.toLowerCase()} · ${metres} m` : 'Remove fence',
+      verb: 'Remove',
+      cost: res.cost,
+      ok: res.ok,
+      ...(res.ok ? {} : { note: 'Tap a fence, or drag along one', noteKind: 'bad' as const }),
+      commit: () => sim.removeFences(todo),
+    });
+  }
+
+  /** Red, slightly inflated overlays on the existing fence segments in `edges`. */
+  private showRemoveGhosts(edges: EdgeRef[]): void {
+    const w = this.host.sim.world;
+    const byType = new Map<number, EdgeRef[]>();
+    for (const e of edges) {
+      const id = w.getFence(e);
+      if (!id) continue;
+      let l = byType.get(id);
+      if (!l) byType.set(id, (l = []));
+      l.push(e);
+    }
+    for (const [id, g] of this.removeGhosts) if (!byType.has(id)) g.clear();
+    for (const [id, list] of byType) {
+      let g = this.removeGhosts.get(id);
+      if (!g) {
+        g = new FenceGhosts(w, this.host.props, 'remove');
+        this.removeGhosts.set(id, g);
+        this.group.add(g.group);
+      }
+      g.set(id, list, REMOVE_STATES(list.length));
+    }
+  }
+
+  private clearRemoveGhosts(): void {
+    for (const g of this.removeGhosts.values()) g.clear();
   }
 
   // ---- objects
@@ -753,13 +951,26 @@ export class ToolManager implements ToolInput {
   }
 
   // ---- animals
-  private dropAnimalModel(): void {
-    if (this.animalModel) {
-      this.group.remove(this.animalModel.object);
-      this.animalModel.dispose();
+  /** Build a species' meshes in the background (yields to the browser) before its ghost is needed. */
+  private warmSpecies(speciesId: string): void {
+    if (this.readySpecies.has(speciesId) || this.loadingSpecies.has(speciesId)) return;
+    this.loadingSpecies.add(speciesId);
+    this.host.creatures
+      .preload([speciesId])
+      .catch(() => undefined)
+      .then(() => {
+        this.loadingSpecies.delete(speciesId);
+        this.readySpecies.add(speciesId);
+        if (!this.disposed && this.tool.kind === 'animal' && this.tool.speciesId === speciesId && this.point) this.refresh();
+      });
+  }
+
+  private dropAnimalGhost(): void {
+    if (this.animalGhost) {
+      this.group.remove(this.animalGhost.root);
+      this.animalGhost.dispose();
     }
-    this.animalModel = null;
-    this.animalModelSpecies = '';
+    this.animalGhost = null;
   }
 
   private previewAnimal(speciesId: string): void {
@@ -769,7 +980,7 @@ export class ToolManager implements ToolInput {
     const p = this.point;
     if (!p || !sp) {
       this.marker.hide();
-      this.dropAnimalModel();
+      if (this.animalGhost) this.animalGhost.visible = false;
       this.setPending(null);
       this.setLabel(null);
       this.host.onAnimalPreview({ speciesId, habitatId: null, suitability: null, result: null });
@@ -789,26 +1000,27 @@ export class ToolManager implements ToolInput {
         suit = null;
       }
     }
-    // live model preview at the spot (hidden while the finger is dragging the marker)
-    if (r.ok && !this.gesture) {
-      if (!this.animalModel || this.animalModelSpecies !== speciesId) {
-        this.dropAnimalModel();
-        try {
-          this.animalModel = this.host.creatures.createAnimal(speciesId, { seed: 4711, sex: 'F', growth: 1 });
-          this.animalModelSpecies = speciesId;
-          this.group.add(this.animalModel.object);
-        } catch (err) {
-          console.warn('[ui] animal preview failed', err);
-        }
+    // translucent ghost of the animal at the spot (green = can adopt here, red = can't);
+    // built only once the species' meshes exist so a tap never stalls on mesh generation
+    if ((!this.animalGhost || this.animalGhost.speciesId !== speciesId) && this.readySpecies.has(speciesId)) {
+      this.dropAnimalGhost();
+      try {
+        this.animalGhost = new AnimalGhost(this.host.creatures, speciesId);
+        this.group.add(this.animalGhost.root);
+      } catch (err) {
+        console.warn('[ui] animal preview failed', err);
+        this.animalGhost = null;
       }
-      if (this.animalModel) {
-        const o = this.animalModel.object;
-        o.visible = true;
-        o.position.set(p.x, w.heightAt(p.x, p.z), p.z);
-        const cam = this.host.ctx.camera.position;
-        o.rotation.set(0, Math.atan2(cam.x - p.x, cam.z - p.z) + 0.7, 0);
-      }
-    } else if (this.animalModel) this.animalModel.object.visible = false;
+    }
+    if (this.animalGhost && this.animalGhost.speciesId === speciesId) {
+      const g = this.animalGhost;
+      const cam = this.host.ctx.camera.position;
+      // swimmers float at the water line, everything else stands on the ground
+      const gy = sp.swims && w.heightAt(p.x, p.z) < WATER_LEVEL - 0.3 ? WATER_LEVEL : w.heightAt(p.x, p.z);
+      g.place(p.x, gy, p.z, Math.atan2(cam.x - p.x, cam.z - p.z) + 0.7);
+      g.setOk(r.ok);
+      g.visible = true;
+    } else if (this.animalGhost) this.animalGhost.visible = false;
     this.host.onAnimalPreview({ speciesId, habitatId: hab?.id ?? null, suitability: suit, result: r });
     this.setLabel(null);
     const px = p.x,
@@ -903,13 +1115,16 @@ export class ToolManager implements ToolInput {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.dropGhost();
-    this.dropAnimalModel();
+    this.dropAnimalGhost();
     this.host.ctx.scene.remove(this.group);
     this.fills.dispose();
     this.habOutline.dispose();
     this.grid.dispose();
     this.fences.dispose();
+    for (const g of this.removeGhosts.values()) g.dispose();
+    this.removeGhosts.clear();
     this.marker.dispose();
   }
 }

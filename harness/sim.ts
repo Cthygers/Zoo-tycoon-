@@ -215,9 +215,37 @@ function drawWorld(v: View, detail: boolean) {
       ctx.fillText(a.action, X(a.x) + 4, Z(a.z) - 4);
     }
   }
-  // people
+  // queue geometry: counter / door spots (squares), line places (dots), exit (ring)
+  if (detail) {
+    for (const p of sim.guestSys.queues.points.values()) {
+      ctx.fillStyle = 'rgba(255,120,40,0.85)';
+      for (let k = 0; k < p.sx.length; k++) ctx.fillRect(X(p.sx[k]) - 2.5, Z(p.sz[k]) - 2.5, 5, 5);
+      ctx.fillStyle = 'rgba(255,200,60,0.55)';
+      for (let i = 0; i < p.maxQueue; i++) {
+        ctx.beginPath();
+        ctx.arc(X(p.lx[i]), Z(p.lz[i]), 1.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.strokeStyle = 'rgba(120,255,120,0.8)';
+      ctx.beginPath();
+      ctx.arc(X(p.ex), Z(p.ez), 3, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+  // people (children smaller; a thin line ties them to their party leader)
   for (const g of sim.guests.values()) {
     if (g.hidden) continue;
+    if (detail && g.leader) {
+      const l = sim.guests.get(g.leader);
+      if (l && !l.hidden) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(X(g.x), Z(g.z));
+        ctx.lineTo(X(l.x), Z(l.z));
+        ctx.stroke();
+      }
+    }
     const r = Math.max(1.3, (g.appearance.child ? 0.2 : 0.27) * v.s);
     ctx.fillStyle = hex(g.appearance.shirt);
     ctx.strokeStyle = g.action === 'watch' ? '#ffe14a' : g.action === 'sit' ? '#4af' : '#000';
@@ -289,6 +317,16 @@ function draw() {
   lines.push(`warm-up ${warm} steps in ${warmMs.toFixed(0)} ms   demo failures: ${report.failures.length}`);
   lines.push(`animal actions: ${hist([...sim.animals.values()].map((a) => a.action))}`);
   lines.push(`guest actions: ${hist([...sim.guests.values()].map((g) => g.action))}`);
+  {
+    const q: string[] = [];
+    for (const p of sim.guestSys.queues.points.values()) {
+      const o = sim.world.objects.get(p.obj);
+      q.push(`${OBJECTS_BY_ID[o?.defId ?? '']?.name.split(' ')[0] ?? p.obj}: ${p.line.length}/${p.maxQueue} in line, ${p.busy()} served`);
+    }
+    lines.push(`queues: ${q.join(' | ')}`);
+    const c = sim.guestSys.counters;
+    lines.push(`served ${c.served} (items ${c.items})  restroom ${c.restroom}  gave up ${c.gaveUp}  lines full ${c.full}  parties ${[...sim.guests.values()].filter((g) => !g.leader).length}`);
+  }
   lines.push(`holding: ${hist([...sim.guests.values()].map((g) => g.holding))}`);
   lines.push('');
   for (const hab of sim.world.habitats.values()) {

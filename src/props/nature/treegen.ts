@@ -128,7 +128,9 @@ export function growTree(spec: TreeSpec, rng: Rng, start: V3, dir: V3, length: n
       const rt = (t - K.range[0]) / Math.max(1e-6, K.range[1] - K.range[0]);
       const ang = K.angle[0] + (K.angle[1] - K.angle[0]) * rt + rng.range(-1, 1) * (K.angleJitter ?? 0.12);
       const cd = coneDir(pd, ang, az, new THREE.Vector3());
-      if (K.outward) {
+      // (not for limbs off the trunk: the trunk is the axis, and its slight lean
+      // would otherwise swing every limb to one side)
+      if (K.outward && level > 0) {
         _a.set(sp.x, 0, sp.z);
         if (_a.lengthSq() > 1e-4) {
           _a.normalize();
@@ -148,10 +150,10 @@ export function growTree(spec: TreeSpec, rng: Rng, start: V3, dir: V3, length: n
   return { branches };
 }
 
-/** Radial segment count for a tube of base radius r. */
-export function radialFor(r: number): number {
-  const m = detail().seg;
-  const base = r > 0.5 ? 16 : r > 0.25 ? 10 : r > 0.12 ? 8 : r > 0.06 ? 6 : r > 0.03 ? 5 : 4;
+/** Radial segment count for a tube of base radius r (× mul, e.g. 0.5 for LODs). */
+export function radialFor(r: number, mul = 1): number {
+  const m = detail().seg * mul;
+  const base = r > 1.0 ? 22 : r > 0.5 ? 16 : r > 0.25 ? 10 : r > 0.12 ? 8 : r > 0.06 ? 6 : r > 0.03 ? 5 : 4;
   return Math.max(3, Math.round(base * m));
 }
 
@@ -167,6 +169,12 @@ export interface BarkOptions {
   thinFrom?: number;
   /** Species spec: honours LevelSpec.minMeshRadius. */
   spec?: TreeSpec;
+  /** Radial segment multiplier (LODs). */
+  radialMul?: number;
+  /** Skip branches whose base radius is below this (m). */
+  minRadius?: number;
+  /** No end caps (LODs: hidden in the crown). */
+  noCaps?: boolean;
 }
 
 /** Mesh the skeleton's branches as bark tubes. */
@@ -175,7 +183,7 @@ export function meshBark(sk: Skeleton, md: MeshData, o: BarkOptions = {}): void 
   for (const b of sk.branches) {
     if (o.maxLevel !== undefined && b.level > o.maxLevel) continue;
     const L = b.radii[0];
-    const minR = o.spec?.levels[b.level]?.minMeshRadius ?? 0.004;
+    const minR = Math.max(o.spec?.levels[b.level]?.minMeshRadius ?? 0.004, o.minRadius ?? 0);
     if (L < minR) continue;
     let pts = b.pts;
     let radii = b.radii;
@@ -194,11 +202,11 @@ export function meshBark(sk: Skeleton, md: MeshData, o: BarkOptions = {}): void 
     const uRepeat = Math.max(1, Math.round(circ / BARK_U));
     const crown = o.crown;
     addTube(md, pts, radii, {
-      radial: radialFor(L),
+      radial: radialFor(L, o.radialMul ?? 1),
       uRepeat,
       vPerMetre: 1 / BARK_V,
       v0: b.level * 0.37,
-      capEnd: true,
+      capEnd: !o.noCaps,
       radiusMod: b.level === 0 && o.trunkMod ? (i, a, p) => o.trunkMod!(i, a, p, b) : undefined,
       color: (_i, _a, p, out) => {
         tint[0] = tint[1] = tint[2] = 1;

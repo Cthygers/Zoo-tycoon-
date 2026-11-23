@@ -144,7 +144,7 @@ function genBoards(): Surface {
       const knot = hf(bi, 13, 5) > 0.55 ? 1 - sm(0.12, 0.3, kd) : 0;
       const edge = Math.min(bt, 1 - bt) * (1.2 / NB); // metres to board edge
       const groove = 1 - sm(0.0015, 0.004, edge);
-      let l = 0.3 * (1 + tone * 0.32) * (1 - late * 0.18 + grain * 0.07 + blot * 0.06);
+      let l = 0.255 * (1 + tone * 0.32) * (1 - late * 0.18 + grain * 0.07 + blot * 0.06);
       l *= 1 - knot * 0.45;
       l *= 1 - groove * 0.7 - jointLine * 0.5;
       B.r[i] = l * 1.08;
@@ -178,7 +178,7 @@ function genHardwood(): Surface {
       const pore = sm(0.55, 0.8, tileNoise(u * 64, v * 256, 64, 256, 1505));
       const ck = tileNoise(u * 4, v * 60, 4, 60, 1506);
       const check = (1 - sm(0, 0.05, Math.abs(ck))) * sm(0.35, 0.6, tileFbm(u, v, 3, 2, 2, 1507));
-      let l = 0.165 * (1 + fine * 0.1 + mid * 0.1 + blot * 0.12 - ring * 0.14);
+      let l = 0.14 * (1 + fine * 0.1 + mid * 0.1 + blot * 0.12 - ring * 0.14);
       l *= 1 - pore * 0.12 - check * 0.45;
       B.r[i] = l * 1.32;
       B.g[i] = l * 0.86;
@@ -663,6 +663,35 @@ function genFalls(): Surface {
   return finish(B, 0.5, 0.004);
 }
 
+/**
+ * Aerated water / foam for fountain splash rings: white bubbly lace (alpha)
+ * with streaks along V (the outward flow direction). 0.5 m repeat.
+ */
+function genFoam(): Surface {
+  const S = 128;
+  const B = buf(S);
+  for (let y = 0; y < S; y++)
+    for (let x = 0; x < S; x++) {
+      const u = x / S;
+      const v = y / S;
+      const i = y * S + x;
+      const lace = tileFbm(u, v, 12, 12, 3, 1160);
+      const fine = tileFbm(u, v, 32, 32, 2, 1161);
+      const streak = tileFbm(u, v, 24, 4, 2, 1162);
+      // thin bubbly filaments rather than blotches
+      const fil = 1 - Math.abs(lace * 1.6);
+      const a = clamp01((fil - 0.35) * 1.6 + fine * 0.35 + streak * 0.2);
+      B.r[i] = 0.82 + fine * 0.05;
+      B.g[i] = 0.86 + fine * 0.05;
+      B.b[i] = 0.88 + fine * 0.05;
+      B.a[i] = a;
+      B.ht[i] = lace * 0.5 + fine * 0.5;
+      B.rough[i] = 0.35;
+      B.ao[i] = 1;
+    }
+  return finish(B, 0.5, 0.002);
+}
+
 /** Raw meat: dark red muscle fibres with fat marbling. 0.3 m repeat. */
 function genMeat(): Surface {
   const S = 128;
@@ -790,6 +819,7 @@ export type StructSurface =
   | 'net'
   | 'water'
   | 'falls'
+  | 'foam'
   | 'meat';
 
 const GEN: Record<StructSurface, () => Surface> = {
@@ -806,6 +836,7 @@ const GEN: Record<StructSurface, () => Surface> = {
   net: genNet,
   water: genWater,
   falls: genFalls,
+  foam: genFoam,
   meat: genMeat,
 };
 

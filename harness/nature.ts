@@ -13,6 +13,8 @@
 //   ?sun=<deg elevation>       sun elevation (default 42)
 //   ?az=<deg>                  camera azimuth offset for close/row views
 //   ?layer=1                   place the defs through the real PropsLayer (instancing path)
+//   ?lod=1                     build the distant LOD (buildLod) instead of the full model
+//   ?view=lodcmp&id=<defId>    full (left) vs LOD (right) of one variant, &dist=<m> camera distance
 import * as THREE from 'three';
 import { EventBus } from '../src/core/events';
 import { World } from '../src/core/world';
@@ -33,7 +35,9 @@ const wind = params.get('wind') !== '0';
 const sunElev = (Number(params.get('sun') ?? '42') * Math.PI) / 180;
 const azOff = (Number(params.get('az') ?? '0') * Math.PI) / 180;
 const useLayer = params.get('layer') === '1';
+const useLod = params.get('lod') === '1';
 setNatureQuality(q);
+const QS: QualitySettings = { level: q, pixelRatio: 1, antialias: true, shadows: true, shadowMapSize: 2048, grassDensity: 0.5, postFX: false, detailDistance: 40, creatureDetail: 1 };
 
 const TREES = ['tree_acacia', 'tree_baobab', 'tree_oak', 'tree_pine', 'tree_birch', 'tree_palm', 'bamboo'];
 const PLANTS = ['bush_savanna', 'bush_fern', 'grass_tall', 'reeds', 'cactus', 'flower_bed', 'hedge'];
@@ -145,7 +149,7 @@ interface Placed {
 const placed: Placed[] = [];
 const stats: string[] = [];
 
-function build(id: string, variant: number): THREE.Object3D {
+function build(id: string, variant: number, lod = useLod): THREE.Object3D {
   const spec = PROP_SPECS[id];
   if (!spec) {
     const def = OBJECTS_BY_ID[id];
@@ -157,7 +161,7 @@ function build(id: string, variant: number): THREE.Object3D {
     return g;
   }
   const t0 = performance.now();
-  const o = spec.build(variant % spec.variants);
+  const o = lod && spec.buildLod ? spec.buildLod(variant % spec.variants, QS) : spec.build(variant % spec.variants, QS);
   const ms = performance.now() - t0;
   let tris = 0;
   let meshes = 0;
@@ -174,12 +178,12 @@ function build(id: string, variant: number): THREE.Object3D {
     m.receiveShadow = true;
     setupWindMesh(m);
   });
-  stats.push(`${id}#${variant}: ${tris} tris, ${meshes} meshes (${parts.join(', ')}), ${ms.toFixed(0)} ms`);
+  stats.push(`${id}#${variant}${lod && spec.buildLod ? ' LOD' : ''}: ${tris} tris, ${meshes} meshes (${parts.join(', ')}), ${ms.toFixed(0)} ms`);
   return o;
 }
 
-function place(id: string, variant: number, x: number, z: number, fig = true): Placed {
-  const obj = build(id, variant);
+function place(id: string, variant: number, x: number, z: number, fig = true, lod = useLod): Placed {
+  const obj = build(id, variant, lod);
   obj.position.set(x, 0, z);
   scene.add(obj);
   const box = new THREE.Box3().setFromObject(obj);
@@ -236,8 +240,7 @@ if (view === 'atlas') {
   const world = new World(events, 7);
   const ids = [...TREES, ...PLANTS, ...ROCKS];
   void import('../src/props').then(({ createPropsLayer }) => {
-    const quality: QualitySettings = { level: q, pixelRatio: 1, antialias: true, shadows: true, shadowMapSize: 2048, grassDensity: 0.5, postFX: false, detailDistance: 40, creatureDetail: 1 };
-    const layer = createPropsLayer(world, events, scene, quality);
+    const layer = createPropsLayer(world, events, scene, QS);
     let tx = 10;
     for (const id of ids) {
       for (let k = 0; k < 3; k++) world.addObject(id, tx, 30 + k * 3, 0, k * 13 + 1);
@@ -256,6 +259,18 @@ if (view === 'atlas') {
     };
     loop();
   });
+} else if (view === 'lodcmp') {
+  // full vs LOD of one variant, side by side, from a chosen distance
+  const probe = build(focusId, variantParam, false);
+  const pbox = new THREE.Box3().setFromObject(probe);
+  const psize = pbox.getSize(new THREE.Vector3());
+  const gap = Math.max(psize.x, psize.z) * 0.6 + 1;
+  place(focusId, variantParam, -gap, 0, false, false);
+  place(focusId, variantParam, gap, 0, false, true);
+  const h = pbox.max.y;
+  const dist = Number(params.get('dist') ?? String(Math.max(gap * 4, h * 2.2)));
+  lookFrom(new THREE.Vector3(0, h * 0.45, 0), dist, Number(params.get('elev') ?? '0.3'), azOff);
+  fitShadow(0, 0, Math.max(12, gap * 3));
 } else if (view === 'close' || view === 'row') {
   const spec = PROP_SPECS[focusId];
   const n = view === 'row' ? (spec?.variants ?? 1) : 1;

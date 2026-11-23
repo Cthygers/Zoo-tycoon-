@@ -10,6 +10,8 @@
 //   &yaw=<deg>&pitch=<deg>&dist=<m>   camera overrides
 //   &labels=0                 hide labels
 //   &t=<sec>                  animation time for unique props (static frame)
+//   &q=low|medium|high        builder quality tier
+//   &lod=1                    build the distant LOD (buildLod) where the def has one
 import * as THREE from 'three';
 import { EventBus } from '../src/core/events';
 import { World } from '../src/core/world';
@@ -29,6 +31,11 @@ const showLabels = params.get('labels') !== '0';
 const fixedT = params.has('t') ? Number(params.get('t')) : null;
 /** In layer mode the content sits around world (72, 72) (map interior). */
 const ORIGIN = useLayer ? 72 : 0;
+/** Full build, or the LOD when ?lod=1 and the def has one. */
+function buildOf(id: string, v: number): THREE.Object3D {
+  const spec = PROP_SPECS[id];
+  return useLod && spec.buildLod ? spec.buildLod(v, quality) : spec.build(v, quality);
+}
 
 const ORDER = [
   'entrance_gate',
@@ -53,8 +60,9 @@ const ORDER = [
   'info_sign',
 ];
 
+const useLod = params.get('lod') === '1';
 const quality: QualitySettings = {
-  level: 'medium',
+  level: (params.get('q') as QualitySettings['level']) ?? 'medium',
   pixelRatio: 1,
   antialias: true,
   shadows: true,
@@ -269,8 +277,7 @@ if (view === 'close' && focusId && focusId.includes(',')) {
   }
   const off = (x - 0.6) / 2;
   ids.forEach((id, k) => {
-    const spec = PROP_SPECS[id];
-    const o = spec.build(onlyVariant ?? 0);
+    const o = buildOf(id, onlyVariant ?? 0);
     const px = xs[k] - off;
     o.position.set(px, 0, 0);
     scene.add(o);
@@ -293,7 +300,7 @@ if (view === 'close' && focusId && focusId.includes(',')) {
   const span = Math.max(def.size[0], def.size[1]) * TILE + 2.5;
   vs.forEach((v, k) => {
     const x = (k - (vs.length - 1) / 2) * span;
-    const o = spec.build(v);
+    const o = buildOf(focusId, v);
     o.position.set(x, 0, 0);
     scene.add(o);
     o.updateMatrixWorld(true);
@@ -324,7 +331,7 @@ if (view === 'close' && focusId && focusId.includes(',')) {
       world.addObject(id, tx, tz, 0, 7);
     } else if (spec) {
       const t0 = performance.now();
-      o = spec.build(0);
+      o = buildOf(id, 0);
       buildMs.push(`${id} ${(performance.now() - t0).toFixed(0)}ms`);
       o.position.set(x, 0, z);
       scene.add(o);

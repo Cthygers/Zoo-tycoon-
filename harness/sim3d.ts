@@ -60,6 +60,8 @@ try {
     setLitter() {},
     pickObject: () => null,
     setHighlight() {},
+    setQuality() {},
+    prewarm: async () => {},
     dispose() {},
   };
 }

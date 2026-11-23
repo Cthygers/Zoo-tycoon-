@@ -1,8 +1,9 @@
 // UI harness: runs the full Wildhaven UI against mock subsystems (default) or
 // the real ones (?real=1).
 //
-//   ?screen=loading | menu | game | drawer | panel-animal | panel-habitat | panel-guest |
-//           build-fence | build-path | build-terrain | build-object | build-animal | finance | goals | settings
+//   ?screen=loading | menu | game | drawer | panel-animal | panel-habitat | panel-guest | panel-object |
+//           build-fence | build-path | build-terrain | build-object | build-animal |
+//           bulldoze-fence | bulldoze-area | finance | goals | settings | thumbs
 //   &cat=animals            (drawer category)
 //   &real=1                 use the real sim / renderer / props / models / views
 //   &q=low|medium|high
@@ -15,7 +16,7 @@ import type { Tool } from '../src/core/types';
 import { createGameUI, showLoadingScreen, showMainMenu, type CategoryId, type GameUIHandle } from '../src/ui';
 import { buildCatalog } from '../src/ui/catalog';
 import { ThumbnailService } from '../src/ui/thumbs';
-import { MockCreatures, MockProps, MockRenderContext, MockSim, MockViews } from './ui-mock';
+import { MockAudio, MockCreatures, MockProps, MockRenderContext, MockSim, MockViews } from './ui-mock';
 
 const params = new URLSearchParams(location.search);
 const screen = params.get('screen') ?? 'game';
@@ -28,13 +29,14 @@ const w = window as unknown as Record<string, unknown>;
 async function makeDeps(): Promise<UIDeps> {
   const events = new EventBus();
   if (real) {
-    const [{ createSimulation }, { createRenderContext }, { createPropsLayer }, { createCreatureFactory }, { createEntityViews }, { buildDemoZoo }] = await Promise.all([
+    const [{ createSimulation }, { createRenderContext }, { createPropsLayer }, { createCreatureFactory }, { createEntityViews }, { buildDemoZoo }, { createAudio }] = await Promise.all([
       import('../src/sim'),
       import('../src/render'),
       import('../src/props'),
       import('../src/models'),
       import('../src/views'),
       import('../src/demo'),
+      import('../src/audio'),
     ]);
     const sim = createSimulation(events, 42);
     sim.newGame();
@@ -48,17 +50,21 @@ async function makeDeps(): Promise<UIDeps> {
     const ctx = await createRenderContext(gameEl, sim.world, events, q);
     const props = createPropsLayer(sim.world, events, ctx.scene, ctx.quality);
     const creatures = createCreatureFactory(ctx.quality);
+    ctx.scene.add(creatures.root);
     await creatures.preload(['zebra', 'giraffe', 'lion']);
     const views = createEntityViews(sim, ctx, creatures, props);
+    const audio = createAudio(sim, events);
     events.emit('worldReset', {});
-    return { sim, ctx, props, creatures, views, save: () => console.log('[harness] save'), newGame: () => sim.newGame() };
+    return { sim, ctx, props, creatures, views, audio, save: () => console.log('[harness] save'), newGame: () => sim.newGame() };
   }
   const sim = new MockSim(events);
   const ctx = new MockRenderContext(gameEl, sim.world, events, q);
   const props = new MockProps(sim.world, events, ctx.scene);
   const creatures = new MockCreatures();
   const views = new MockViews(sim, ctx, creatures);
-  return { sim, ctx, props, creatures, views, save: () => console.log('[harness] save'), newGame: () => sim.newGame() };
+  const audio = new MockAudio();
+  w.__cues = audio.cues;
+  return { sim, ctx, props, creatures, views, audio, save: () => console.log('[harness] save'), newGame: () => sim.newGame() };
 }
 
 function ndcOf(deps: UIDeps, x: number, z: number): { x: number; y: number } {
@@ -131,6 +137,7 @@ async function boot() {
     deps.ctx.setTimeOfDay(deps.sim.minuteOfDay, deps.sim.day);
     ui.update(dt);
     deps.views.update(dt);
+    deps.creatures.update(deps.ctx.camera);
     deps.props.update(dt, deps.ctx.nightFactor, deps.ctx.camera);
     deps.ctx.update(dt);
     deps.ctx.render();
@@ -250,6 +257,23 @@ async function boot() {
       const p = ndcOf(deps, sx, sz);
       ui.tools.down(p.x, p.y);
       ui.tools.up(p.x, p.y, true);
+      break;
+    }
+    case 'bulldoze-fence':
+    case 'bulldoze-area': {
+      // the east side of the first habitat: tap it (fence mode) or sweep a rectangle over it (area mode)
+      const h = habitatNamed('Savanna Plains');
+      const ex = (h.maxX + 1) * TILE,
+        ez = ((h.minZ + h.maxZ + 1) / 2) * TILE;
+      ui.camera.setView(ex, ez, 34, 0.9, 0.75);
+      ui.update(0);
+      tool({ kind: 'bulldoze' });
+      if (screen === 'bulldoze-fence') {
+        ui.tools.setBulldozeMode('fence');
+        const p = ndcOf(deps, ex + 0.3, ez);
+        ui.tools.down(p.x, p.y);
+        ui.tools.up(p.x, p.y, true);
+      } else drag(ui, deps, { x: ex - 3 * TILE, z: ez - 2 * TILE }, { x: ex + 1 * TILE, z: ez + 2 * TILE });
       break;
     }
     case 'finance':

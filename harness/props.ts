@@ -10,6 +10,10 @@
 //   ?many=1                        ~300 placed objects (draw-call test)
 //   ?hl=<defId>|none               object to highlight (default tree_oak)
 //   ?cam=x,y,z&at=x,y,z            explicit camera
+//   ?prewarm=1                     run props.prewarm() first (logs the time)
+//   ?switchq=low|medium|high       switch the props quality tier at runtime after a few frames
+//   ?dispose=1                     dispose the layer after a few frames (leak / error check)
+//   ?view=fade                     camera inside a tree canopy (near-camera foliage fade)
 import * as THREE from 'three';
 import { EventBus } from '../src/core/events';
 import { World, type EdgeRef } from '../src/core/world';
@@ -570,6 +574,8 @@ const views: Record<string, { cam: [number, number, number]; at: [number, number
   litter: { cam: [30, 2.6, 62], at: [28, 0, 56] },
   guest: { cam: [36, 14, 72], at: [30, 1, 52] },
   ghosts: { cam: [60, 4, 76], at: [60, 1.2, 66] },
+  fade: { cam: [17, 5.2, 18], at: [13, 0.5, 8] },
+  lamps: { cam: [40, 9, 66], at: [32, 0.5, 52] },
 };
 const v = views[view] ?? views.overview;
 if (params.has('cam')) v.cam = params.get('cam')!.split(',').map(Number) as [number, number, number];
@@ -605,7 +611,23 @@ if (ctx) {
 if (params.has('wind')) windUniforms.uWindStrength.value = Number(params.get('wind'));
 let frames = 0;
 let last = performance.now();
+const switchTo = params.get('switchq') as QualityLevel | null;
+const disposeAfter = params.get('dispose') === '1';
+let disposed = false;
 const loop = () => {
+  if (disposed) return;
+  if (switchTo && frames === 3) {
+    const t0 = performance.now();
+    props.setQuality(QUALITY[switchTo]);
+    console.log(`[props-stats] setQuality(${switchTo}) took ${(performance.now() - t0).toFixed(0)} ms`);
+  }
+  if (disposeAfter && frames === 6) {
+    props.dispose();
+    disposed = true;
+    renderer.render(scene, camera);
+    console.log(`[props-stats] disposed; scene children ${scene.children.length} geoms ${renderer.info.memory.geometries} tex ${renderer.info.memory.textures}`);
+    return;
+  }
   const now = performance.now();
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
@@ -622,11 +644,17 @@ const loop = () => {
   frames++;
   const ri = ctx ? ctx.debugInfo() : renderer.info.render;
   const d = props.debugInfo();
-  info.textContent = `${qLevel} ${view}${night ? ' night' : ''} ${d.backend}  objects ${world.objects.size}  calls ${ri.calls}  tris ${(ri.triangles / 1000).toFixed(0)}k  batches ${d.liveBatches}/${d.batches} inst ${d.instances} uniq ${d.uniques} fenceMeshes ${d.fenceMeshes}`;
+  info.textContent = `${qLevel} ${view}${night ? ' night' : ''} ${d.backend}  objects ${world.objects.size}  calls ${ri.calls}  tris ${(ri.triangles / 1000).toFixed(0)}k  batches ${d.liveBatches}/${d.batches} inst ${d.instances} drawn ${d.drawn} uniq ${d.uniques} fenceMeshes ${d.fenceMeshes} lod ${d.lodObjects}/${d.lodSwitches} fade ${d.fade.toFixed(2)} pools ${d.night.poolTris} halos ${d.night.halos}`;
   if (frames === 4) console.log(`[props-stats] ${info.textContent}  programs ${renderer.info.programs?.length ?? 0} geoms ${renderer.info.memory.geometries} tex ${renderer.info.memory.textures}`);
   requestAnimationFrame(loop);
 };
-requestAnimationFrame(loop);
+if (params.get('prewarm') === '1') {
+  const t0 = performance.now();
+  void props.prewarm().then(() => {
+    console.log(`[props-stats] prewarm ${(performance.now() - t0).toFixed(0)} ms, templates ${props.debugInfo().templates}`);
+    requestAnimationFrame(loop);
+  });
+} else requestAnimationFrame(loop);
 
 window.addEventListener('resize', () => {
   if (ctx) return ctx.resize(container.clientWidth, container.clientHeight);

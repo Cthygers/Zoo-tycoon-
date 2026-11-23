@@ -9,7 +9,7 @@ import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { hashFloat as hashF, Noise, Rng } from '../../core/rng';
 import { barkMat, barkTextures } from './barks';
 import { addTube, groupOf, MeshData, v3, type V3 } from './geo';
-import { barkMaterial, cachedTexture, rockMaterial, type RockMaterial } from './mats';
+import { barkMaterial, cachedTexture, natureQuality, rockMaterial, type RockMaterial } from './mats';
 import { albedoHeightTexture, Img, lin, mix, pfbm, pworley, sat, sstep } from './tex';
 
 // ---------------------------------------------------------------------------
@@ -111,20 +111,21 @@ function graniteMat(): RockMaterial {
 }
 
 function sandstoneMat(): RockMaterial {
-  return rockMaterial('sandstone', { triTex: cachedTexture('rock-sandstone', () => albedoHeightTexture(genSandstone())), tile: 1.5, bump: 0.014, roughness: 0.9, surfRoughness: 0.95, surfTint: 0x8fa060 });
+  return rockMaterial('sandstone', { triTex: cachedTexture('rock-sandstone', () => albedoHeightTexture(genSandstone())), tile: 1.5, bump: 0.02, roughness: 0.9, surfRoughness: 0.95, surfTint: 0x8fa060 });
 }
 
 function iceMat(): RockMaterial {
   return rockMaterial('ice', {
     triTex: cachedTexture('rock-ice', () => albedoHeightTexture(genIce())),
     tile: 1.2,
-    bump: 0.006,
-    roughness: 0.12,
-    surfRoughness: 0.85,
-    surfTint: 0xffffff,
-    emissive: 0x0d2a40,
-    emissiveIntensity: 0.35,
-    envMapIntensity: 1.4,
+    bump: 0.008,
+    roughness: 0.3,
+    surfRoughness: 0.88,
+    surfTint: 0xf4f7fa,
+    // faint blue "subsurface" lift in shadowed ice
+    emissive: 0x0a1e30,
+    emissiveIntensity: 0.18,
+    envMapIntensity: 1.1,
   });
 }
 
@@ -148,6 +149,10 @@ interface RockOpts {
   detail: number;
   /** Planar fracture cuts. */
   cuts: number;
+  /** Extra explicit cut planes (unit normal, offset in metres). */
+  planes?: { n: V3; d: number }[];
+  /** Random cut normals' vertical component range (default [-0.25, 1.1]). */
+  cutY?: [number, number];
   /** Plane offset as a fraction of the support distance. */
   cutDepth: [number, number];
   /** Displacement amplitude (fraction of mean radius) and frequency (per m). */
@@ -181,10 +186,11 @@ function rockShape(rng: Rng, o: RockOpts): RockShape {
   const mean = (rx + ry + rz) / 3;
   const planes: { n: V3; d: number }[] = [];
   for (let k = 0; k < o.cuts; k++) {
-    const n = v3(rng.gauss(), rng.range(-0.25, 1.1), rng.gauss()).normalize();
+    const n = v3(rng.gauss(), rng.range(o.cutY?.[0] ?? -0.25, o.cutY?.[1] ?? 1.1), rng.gauss()).normalize();
     const support = Math.sqrt(n.x * n.x * rx * rx + n.y * n.y * ry * ry + n.z * n.z * rz * rz);
     planes.push({ n, d: support * rng.range(o.cutDepth[0], o.cutDepth[1]) });
   }
+  if (o.planes) planes.push(...o.planes);
   const disp = new Float32Array(pos.count);
   const p = v3();
   const dir = v3();
@@ -308,7 +314,7 @@ function appendRock(md: MeshData, shape: RockShape, m: THREE.Matrix4, paint: Roc
     b = mix(b, 0.05, mm);
     surf = Math.max(surf, mm);
     if (paint.snow) {
-      const sn = sstep(0.62, 0.85, n.y + noise.noise3(p.x * 2, p.y * 2, p.z * 2) * 0.2) * paint.snow;
+      const sn = sstep(0.42, 0.78, n.y + noise.noise3(p.x * 2, p.y * 2, p.z * 2) * 0.22) * paint.snow;
       r = mix(r, 0.88, sn);
       gg = mix(gg, 0.9, sn);
       b = mix(b, 0.93, sn);
@@ -320,6 +326,17 @@ function appendRock(md: MeshData, shape: RockShape, m: THREE.Matrix4, paint: Roc
   if (idx) for (let k = 0; k < idx.count; k++) md.idx.push(base + idx.getX(k));
   else for (let k = 0; k < vcount; k++) md.idx.push(base + k);
   md.useExtra = true;
+}
+
+/**
+ * Icosphere subdivision for the tier: `d` is the high-tier detail; medium
+ * drops one level on the big (d ≥ 5) rocks, low one level everywhere.
+ */
+function rockDetail(d: number): number {
+  const q = natureQuality();
+  if (q === 'low') return Math.max(1, d - (d >= 5 ? 2 : 1));
+  if (q === 'medium' && d >= 5) return d - 1;
+  return d;
 }
 
 const mtx = (x: number, y: number, z: number, yaw: number, s = 1, tiltX = 0, tiltZ = 0): THREE.Matrix4 =>
@@ -369,16 +386,25 @@ export function buildRockSmall(variant: number): THREE.Group {
 }
 
 export function buildBoulder(variant: number): THREE.Group {
+  return boulder(variant, false);
+}
+
+/** Distant boulder: same fractured shape sampled on a coarser sphere, no loose stones. */
+export function buildBoulderLod(variant: number): THREE.Group {
+  return boulder(variant, true);
+}
+
+function boulder(variant: number, lod: boolean): THREE.Group {
   const rng = new Rng(9200 + variant * 7919);
   const md = new MeshData();
   const rx = rng.range(0.9, 1.02);
   const ry = rng.range(0.72, 0.88);
   const rz = rng.range(0.78, 0.95);
-  const shape = rockShape(rng, { radii: [rx, ry, rz], detail: 5, cuts: 5 + rng.int(0, 2), cutDepth: [0.6, 0.82], noise: 0.06, freq: 1.5, flatBase: 0.55, seed: 200 + variant });
+  const shape = rockShape(rng, { radii: [rx, ry, rz], detail: lod ? 2 : rockDetail(5), cuts: 5 + rng.int(0, 2), cutDepth: [0.6, 0.82], noise: 0.06, freq: 1.5, flatBase: 0.55, seed: 200 + variant });
   const sink = ry * 0.22;
   appendRock(md, shape, mtx(0, -minY(shape) - sink, 0, rng.range(0, 6.28)), { base: variant === 2 ? WARM_GRANITE : GRANITE, vary: 0.14, lichen: 0.8, moss: 0.45, seed: 31 + variant });
   // a couple of loose stones at the foot
-  for (let k = 0; k < 2; k++) {
+  for (let k = 0; k < (lod ? 0 : 2); k++) {
     const r = rng.range(0.12, 0.22);
     const a = rng.range(0, 6.28);
     const s2 = rockShape(rng, { radii: [r * 1.2, r * 0.7, r], detail: 1, cuts: 3, cutDepth: [0.5, 0.8], noise: 0.1, freq: 6, flatBase: 0.4, seed: 260 + k + variant * 3 });
@@ -388,127 +414,91 @@ export function buildBoulder(variant: number): THREE.Group {
 }
 
 /**
- * Sandstone ledge: a bedded prism with a squarish, irregular footprint,
- * near-vertical sides cut by horizontal bedding grooves, a weathered
- * bevel and a flat, slightly dished top.
+ * Sandstone kopje: two or three weathered blocks stepping up toward the back
+ * (−Z, ≈ 0.5 m steps: climbable). Each block is a fractured, noise-displaced
+ * mass with a flat bedding-plane top, near-vertical joint faces and softly
+ * rounded edges; bedding shows as faint banding, not as stacked slabs.
  */
-function slabShape(o: { rx: number; rz: number; h: number; seed: number; bed: number }): RockShape {
-  const noise = new Noise(o.seed);
-  const N = Math.max(14, Math.round(20 * Math.min(1.15, Math.max(0.75, (o.rx + o.rz) / 2.6))));
-  const rows = Math.max(5, Math.round((o.h + 0.15) / 0.09));
-  const pos: number[] = [];
-  const cav: number[] = [];
-  const idx: number[] = [];
-  const foot = (a: number): number => {
-    const c = Math.abs(Math.cos(a));
-    const sn = Math.abs(Math.sin(a));
-    const e = 3.2;
-    const se = Math.pow(Math.pow(c / o.rx, e) + Math.pow(sn / o.rz, e), -1 / e);
-    const notch = Math.max(0, noise.noise2(Math.cos(a) * 2.2 + 7, Math.sin(a) * 2.2) - 0.35) * 0.45;
-    return se * (1 + noise.noise2(Math.cos(a) * 1.1, Math.sin(a) * 1.1) * 0.18 + noise.noise2(Math.cos(a) * 4, Math.sin(a) * 4) * 0.05 - notch);
-  };
-  const y0 = -0.15;
-  for (let r = 0; r <= rows; r++) {
-    const y = y0 + ((o.h - y0) * r) / rows;
-    const yy = y / o.bed + noise.noise2(y * 3, 0.5) * 0.15;
-    const f = yy - Math.floor(yy);
-    const groove = 1 - sstep(0.0, 0.35, Math.min(f, 1 - f) * 2);
-    const bevel = sstep(o.h - 0.16, o.h, y);
-    for (let j = 0; j < N; j++) {
-      const a = (j / N) * Math.PI * 2;
-      const fr = foot(a);
-      const n3 = noise.noise3(Math.cos(a) * fr * 1.2, y * 2.5, Math.sin(a) * fr * 1.2) * 0.05;
-      const rr = fr * (1 - groove * 0.055 - bevel * 0.12 + n3);
-      pos.push(Math.cos(a) * rr, y - bevel * 0.03, Math.sin(a) * rr);
-      cav.push(-groove * 0.9 + n3 * 4);
-    }
-  }
-  // top: two inner rings and a centre
-  const topRings = [0.8, 0.45];
-  for (const k of topRings) {
-    for (let j = 0; j < N; j++) {
-      const a = (j / N) * Math.PI * 2;
-      const fr = foot(a) * k * 0.88;
-      const x = Math.cos(a) * fr;
-      const z = Math.sin(a) * fr;
-      pos.push(x, o.h - 0.03 + noise.noise2(x * 1.5, z * 1.5) * 0.035 - (1 - k) * 0.015, z);
-      cav.push(0.2);
-    }
-  }
-  pos.push(0, o.h - 0.035, 0);
-  cav.push(0.2);
-  const ring = (r: number) => r * N;
-  const totalRings = rows + 1 + topRings.length;
-  for (let r = 0; r < totalRings - 1; r++) {
-    const a0 = ring(r);
-    const b0 = ring(r + 1);
-    for (let j = 0; j < N; j++) {
-      const j1 = (j + 1) % N;
-      idx.push(a0 + j, b0 + j, b0 + j1, a0 + j, b0 + j1, a0 + j1);
-    }
-  }
-  const c = totalRings * N;
-  const last = ring(totalRings - 1);
-  for (let j = 0; j < N; j++) idx.push(last + j, c, last + ((j + 1) % N));
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  geo.setIndex(idx);
-  geo.computeVertexNormals();
-  return { geo, disp: new Float32Array(cav) };
+export function buildOutcrop(variant: number): THREE.Group {
+  return outcrop(variant, false);
 }
 
-export function buildOutcrop(variant: number): THREE.Group {
+/** Distant outcrop: the same blocks on coarser spheres, no loose stones. */
+export function buildOutcropLod(variant: number): THREE.Group {
+  return outcrop(variant, true);
+}
+
+function outcrop(variant: number, lod: boolean): THREE.Group {
   const rng = new Rng(9300 + variant * 7919);
   const md = new MeshData();
-  // stepped sandstone ledges rising toward the back (−Z), each step ≈ 0.5 m: climbable
-  const tiers = variant % 2 === 1 ? 4 : 3;
-  const slabs: { x: number; y: number; z: number; rx: number; rz: number; h: number }[] = [];
-  let y = 0;
-  let x = 0;
-  let z = 0.2;
-  let rx = rng.range(1.75, 1.9);
-  let rz = rng.range(1.45, 1.7);
+  const tall = variant % 2 === 1;
   const side = rng.chance(0.5) ? 1 : -1;
-  for (let k = 0; k < tiers; k++) {
-    const h = rng.range(0.48, 0.62);
-    slabs.push({ x, y, z, rx, rz, h });
-    y += h - 0.06;
-    z -= rng.range(0.3, 0.55);
-    x += side * rng.range(0.1, 0.45) * (k % 2 ? -0.6 : 1);
-    rx *= rng.range(0.62, 0.8);
-    rz *= rng.range(0.58, 0.78);
-  }
-  const dip = rng.range(-0.06, 0.06);
-  slabs.forEach((s, k) => {
-    const shape = slabShape({ rx: s.rx, rz: s.rz, h: s.h + (k === 0 ? 0 : 0.15), seed: 300 + k + variant * 7, bed: rng.range(0.15, 0.22) });
-    appendRock(md, shape, mtx(s.x, s.y - (k === 0 ? 0 : 0.15), s.z, rng.range(-0.6, 0.6), 1, dip * (k ? 1 : 0.4), rng.range(-0.04, 0.04) * (k ? 1 : 0.3)), { base: [0.7, 0.56, 0.43], vary: 0.16, lichen: 0.45, moss: 0.08, bands: 0.6, bleach: 0.8, seed: 50 + k });
+  // [radii, centre x, z, top height above ground, detail]
+  const blocks: { r: [number, number, number]; x: number; z: number; top: number; det: number }[] = [
+    { r: [1.8, 0.75, 1.5], x: 0, z: 0.25, top: rng.range(0.48, 0.6), det: 4 },
+    { r: [1.25, 0.85, 1.05], x: side * rng.range(0.15, 0.45), z: -0.55, top: rng.range(0.98, 1.12), det: 3 },
+  ];
+  // third block: a higher step on tall variants, otherwise a split-off slab tipped against the base
+  if (tall) blocks.push({ r: [0.8, 0.7, 0.7], x: -side * rng.range(0.0, 0.35), z: -1.0, top: rng.range(1.48, 1.62), det: 3 });
+  else blocks.push({ r: [0.75, 0.38, 0.6], x: -side * rng.range(1.3, 1.5), z: rng.range(0.7, 1.0), top: rng.range(0.42, 0.55), det: 2 });
+  const dip = rng.range(-0.05, 0.05);
+  blocks.forEach((b, k) => {
+    const tipped = !tall && k === 2;
+    const [rx, ry, rz] = b.r;
+    // flat bedding-plane top (slightly dipping) + flat base; vertical joints from the random cuts
+    const topN = v3(dip * 0.6, 1, rng.range(-0.04, 0.04)).normalize();
+    const shape = rockShape(rng, {
+      radii: [rx, ry, rz],
+      detail: lod ? Math.min(2, b.det) : rockDetail(b.det),
+      cuts: 8,
+      cutY: [-0.15, 0.25],
+      cutDepth: [0.6, 0.82],
+      planes: [{ n: topN, d: ry * 0.55 }],
+      noise: 0.085,
+      freq: 1.25,
+      strata: 0.16,
+      strataAmt: 0.18,
+      flatBase: 0.5,
+      seed: 300 + k + variant * 7,
+    });
+    shape.geo.computeBoundingBox();
+    const top = shape.geo.boundingBox!.max.y;
+    const y = b.top - top;
+    const tx = tipped ? side * 0.3 : rng.range(-0.06, 0.06);
+    const tz = tipped ? 0.18 : rng.range(-0.06, 0.06);
+    appendRock(md, shape, mtx(b.x, y, b.z, rng.range(-0.5, 0.5), 1, tx, tz), { base: [0.6, 0.5, 0.41], vary: 0.2, lichen: 0.6, moss: 0.06, bands: 0.35, bleach: 0.6, seed: 50 + k });
   });
   // tumbled blocks at the foot
-  for (let k = 0; k < 2; k++) {
-    const r = rng.range(0.22, 0.34);
-    const a = rng.range(-0.5, 0.5) + (k ? Math.PI * 0.32 : -Math.PI * 0.28);
-    const s2 = rockShape(rng, { radii: [r * 1.4, r * 0.75, r], detail: 2, cuts: 6, cutDepth: [0.5, 0.75], noise: 0.06, freq: 4, flatBase: 0.4, seed: 360 + k + variant * 5 });
-    appendRock(md, s2, mtx(Math.sin(a) * 1.85, -minY(s2) - r * 0.2, Math.cos(a) * 1.7, rng.range(0, 6.28)), { base: [0.68, 0.55, 0.42], vary: 0.2, lichen: 0.3, moss: 0.1, bands: 0.5, seed: 60 + k });
+  for (let k = 0; k < (lod ? 0 : 3); k++) {
+    const r = rng.range(0.16, 0.3);
+    const a = rng.range(-0.6, 0.6) + (k === 0 ? Math.PI * 0.3 : k === 1 ? -Math.PI * 0.3 : Math.PI);
+    const s2 = rockShape(rng, { radii: [r * 1.3, r * 0.75, r], detail: k === 2 ? 1 : 2, cuts: 5, cutDepth: [0.5, 0.75], noise: 0.06, freq: 4, flatBase: 0.4, seed: 360 + k + variant * 5 });
+    appendRock(md, s2, mtx(Math.sin(a) * 1.9, -minY(s2) - r * 0.2, Math.cos(a) * 1.75, rng.range(0, 6.28)), { base: [0.6, 0.5, 0.41], vary: 0.2, lichen: 0.3, moss: 0.08, bands: 0.4, seed: 60 + k });
   }
   return finishRocks(md, sandstoneMat());
 }
 
+/**
+ * Ice / snow rockery for polar habitats: rounded, wind-polished blocks of
+ * blue-white ice (smooth normals, a few fresh fracture faces) under heavy
+ * snow caps, sitting in a snow drift.
+ */
 export function buildIceRocks(variant: number): THREE.Group {
   const rng = new Rng(9400 + variant * 7919);
   const md = new MeshData();
   const blocks = [
-    { r: [0.72, 0.62, 0.6] as [number, number, number], x: 0, z: 0 },
-    { r: [0.45, 0.4, 0.4] as [number, number, number], x: 0.75, z: 0.35 },
-    { r: [0.32, 0.26, 0.3] as [number, number, number], x: -0.6, z: 0.55 },
+    { r: [0.72, 0.62, 0.6] as [number, number, number], x: 0, z: 0, det: 3 },
+    { r: [0.45, 0.4, 0.4] as [number, number, number], x: 0.75, z: 0.35, det: 2 },
+    { r: [0.32, 0.26, 0.3] as [number, number, number], x: -0.6, z: 0.55, det: 1 },
   ];
-  if (variant % 2) blocks.push({ r: [0.38, 0.5, 0.36], x: -0.35, z: -0.6 });
+  if (variant % 2) blocks.push({ r: [0.38, 0.5, 0.36], x: -0.35, z: -0.6, det: 2 });
   blocks.forEach((b, k) => {
-    const shape = rockShape(rng, { radii: [b.r[0] * 1.25, b.r[1] * 1.3, b.r[2] * 1.25], detail: k === 0 ? 2 : 1, cuts: 10, cutDepth: [0.35, 0.68], noise: 0.05, freq: 2.5, flatBase: 0.5, flat: true, seed: 400 + k + variant * 11 });
-    appendRock(md, shape, mtx(b.x * rng.range(0.9, 1.1), -minY(shape) - b.r[1] * 0.15, b.z * rng.range(0.9, 1.1), rng.range(0, 6.28)), { base: [0.5, 0.72, 0.88], vary: 0.08, lichen: 0, moss: 0, snow: 1, seed: 70 + k });
+    const shape = rockShape(rng, { radii: [b.r[0] * 1.25, b.r[1] * 1.3, b.r[2] * 1.25], detail: rockDetail(b.det), cuts: 9, cutDepth: [0.48, 0.74], noise: 0.05, freq: 2.0, flatBase: 0.5, seed: 400 + k + variant * 11 });
+    appendRock(md, shape, mtx(b.x * rng.range(0.9, 1.1), -minY(shape) - b.r[1] * 0.15, b.z * rng.range(0.9, 1.1), rng.range(0, 6.28)), { base: [0.54, 0.69, 0.8], vary: 0.12, lichen: 0, moss: 0, snow: 1, seed: 70 + k });
   });
   // snow drift around the base
-  const drift = rockShape(rng, { radii: [1.0, 0.4, 0.82], detail: 2, cuts: 0, cutDepth: [1, 1], noise: 0.4, freq: 2.2, flatBase: 0.1, seed: 480 + variant });
-  appendRock(md, drift, mtx(0.05, -0.2, 0.1, rng.range(0, 6.28)), { base: [0.9, 0.92, 0.95], vary: 0.02, lichen: 0, moss: 0, snow: 1, seed: 90 });
+  const drift = rockShape(rng, { radii: [1.05, 0.4, 0.85], detail: 2, cuts: 0, cutDepth: [1, 1], noise: 0.35, freq: 2.2, flatBase: 0.1, seed: 480 + variant });
+  appendRock(md, drift, mtx(0.05, -0.22, 0.1, rng.range(0, 6.28)), { base: [0.9, 0.92, 0.95], vary: 0.03, lichen: 0, moss: 0, snow: 1, seed: 90 });
   return finishRocks(md, iceMat(), 'ice');
 }
 
@@ -613,8 +603,8 @@ export function buildLog(variant: number): THREE.Group {
   const eg = ends.build();
   eg.computeVertexNormals();
   const endT = barkTextures('endgrain');
-  const endMat = barkMaterial('endgrain', endT.map, endT.normal, { roughness: 0.85 });
-  const g = groupOf([[bark, barkMat('oak', 0), 'bark']]);
+  const endMat = barkMaterial('endgrain', endT.map, endT.normal, { roughness: 0.85, fade: false });
+  const g = groupOf([[bark, barkMat('oak', 0.003), 'bark']]);
   const em = new THREE.Mesh(eg, endMat);
   em.name = 'endgrain';
   g.add(em);
