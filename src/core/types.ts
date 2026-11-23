@@ -311,6 +311,12 @@ export interface CommandResult {
   ok: boolean;
   cost: number;
   reason?: string;
+  /**
+   * Set on a successful (or dry-run) command whose outcome is probably not what
+   * the player wants, e.g. fences that close an area which still won't become a
+   * habitat ("a path runs inside the fence"). The UI shows it as a warning.
+   */
+  warning?: string;
 }
 
 export type Tool =

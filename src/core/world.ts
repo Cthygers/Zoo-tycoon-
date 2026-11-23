@@ -44,6 +44,8 @@ export interface WorldSave {
   habitatNames: Record<string, string>;
   /** Run-length encoded habitatOf ([id, count, id, count, ...]) so habitat ids survive save/load. */
   habitatRle?: number[];
+  /** Next fresh habitat id, so ids of deleted habitats are never handed out again after a load. */
+  nextHabitatId?: number;
 }
 
 export class World {
@@ -685,6 +687,7 @@ export class World {
         Array.from(this.habitatNames).filter(([id]) => this.habitats.has(id)),
       ),
       habitatRle: rleEncode(this.habitatOf),
+      nextHabitatId: this.nextHabitatId,
     };
   }
 
@@ -710,7 +713,7 @@ export class World {
     let maxId = 0;
     for (const k of this.habitatNames.keys()) maxId = Math.max(maxId, k);
     for (let i = 0; i < this.habitatOf.length; i++) maxId = Math.max(maxId, this.habitatOf[i]);
-    this.nextHabitatId = maxId + 1;
+    this.nextHabitatId = Math.max(s.nextHabitatId ?? 0, maxId + 1);
     this.habitats = new Map();
     this.recomputeHabitats();
     this.revision++;
