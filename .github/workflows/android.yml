@@ -30,10 +30,17 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      # The default package list includes 'tools', which current SDK command-line
+      # tools no longer provide; the Android Gradle plugin fetches what else it needs.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Sync Capacitor
         run: npx cap sync android
+
+      - name: Check committed Android project is in sync
+        run: git diff --exit-code -- android/capacitor.settings.gradle android/app/capacitor.build.gradle
 
       - name: Build debug APK
         working-directory: android
