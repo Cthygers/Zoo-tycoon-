@@ -16,7 +16,9 @@ creatures.update(camera)  CrowdRenderer.update:
                           · held items (humans) → item batch
                           · lazily builds missing LOD meshes (≤ 4 ms / frame, one
                             clustering pass at a time)
-                          · uploads the rows of each batch data texture in use
+                          · uploads only what changed: the texels of creatures re-posed this
+                            frame (far ones animate at a reduced rate), moved instance matrices,
+                            and each pass's draw list when it differs from the last one
 renderer.render()         three.js BatchedMesh: per pass (shadow + main) culls instances against the
                           camera, compacts + sorts them, ONE multi-draw per batch
 ```

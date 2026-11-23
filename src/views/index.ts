@@ -1,5 +1,9 @@
 // Entity views: keep a CreatureModel in the scene for every animal, guest and
 // staff member in the simulation, animate them, and handle picking/selection.
+//
+// The models of the entities already in the sim are created by prepare()
+// (loading screen, in short tasks) or, without it, all at once on the first
+// update(); later arrivals are created from the sim's events.
 
 import * as THREE from 'three';
 import {
@@ -30,7 +34,19 @@ interface EntityView {
   animDt: number;
 }
 
+/** Entity views plus the loading-screen step that creates the initial models. */
+export interface EntityViews extends IEntityViews {
+  /**
+   * Create the model of every entity in the sim, yielding to the browser
+   * between short slices so the loading screen keeps animating (the first
+   * model of each body type builds its mesh, a long task on a phone).
+   */
+  prepare(onProgress?: (fraction: number) => void): Promise<void>;
+}
+
 const TWO_PI = Math.PI * 2;
+/** Main-thread time (ms) prepare() spends creating models before it yields. */
+const PREPARE_SLICE_MS = 12;
 
 function angleLerp(a: number, b: number, t: number): number {
   let d = (b - a) % TWO_PI;
@@ -44,7 +60,7 @@ export function createEntityViews(
   ctx: IRenderContext,
   creatures: ICreatureFactory,
   props: IPropsLayer,
-): IEntityViews {
+): EntityViews {
   const root = new THREE.Group();
   root.name = 'entities';
   ctx.scene.add(root);
@@ -152,11 +168,38 @@ export function createEntityViews(
     if (selected && selected.kind === kind && selected.id === id) setSelected(null);
   }
 
+  /** Every entity of the sim, animals first (their species meshes are preloaded). */
+  function allEntities(): [Kind, number][] {
+    const out: [Kind, number][] = [];
+    for (const id of sim.animals.keys()) out.push(['animal', id]);
+    for (const id of sim.guests.keys()) out.push(['guest', id]);
+    for (const id of sim.staff.keys()) out.push(['staff', id]);
+    return out;
+  }
+
+  // False until the initial models exist (prepare() or the first update()).
+  let populated = false;
+  let disposed = false;
+
   function rebuildAll(): void {
     for (const v of Array.from(views.values())) remove(v.kind, v.id);
-    for (const id of sim.animals.keys()) create('animal', id);
-    for (const id of sim.guests.keys()) create('guest', id);
-    for (const id of sim.staff.keys()) create('staff', id);
+    for (const [kind, id] of allEntities()) create(kind, id);
+    populated = true;
+  }
+
+  async function prepare(onProgress?: (fraction: number) => void): Promise<void> {
+    const todo = allEntities();
+    let slice = performance.now();
+    for (let i = 0; i < todo.length; i++) {
+      if (disposed || populated) return;
+      create(todo[i][0], todo[i][1]);
+      onProgress?.((i + 1) / todo.length);
+      if (performance.now() - slice > PREPARE_SLICE_MS) {
+        await new Promise<void>((r) => setTimeout(r, 0));
+        slice = performance.now();
+      }
+    }
+    populated = true;
   }
 
   const offs = [
@@ -244,6 +287,7 @@ export function createEntityViews(
   }
 
   function update(dt: number): void {
+    if (!populated) rebuildAll();
     const scaled = dt * SPEED_MULTIPLIERS[sim.speed];
     reconcileTimer -= dt;
     if (reconcileTimer <= 0) {
@@ -369,6 +413,7 @@ export function createEntityViews(
   }
 
   function dispose(): void {
+    disposed = true;
     offs.forEach((off) => off());
     for (const v of Array.from(views.values())) remove(v.kind, v.id);
     ctx.scene.remove(root);
@@ -377,6 +422,5 @@ export function createEntityViews(
     ringMat.dispose();
   }
 
-  rebuildAll();
-  return { update, pick, setSelected, positionOf, dispose };
+  return { update, pick, setSelected, positionOf, dispose, prepare };
 }

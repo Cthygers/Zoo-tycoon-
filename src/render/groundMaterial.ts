@@ -322,7 +322,7 @@ const MAIN = /* glsl */ `
   }
 
   // ---- wet shore band, underwater absorption of the bed (per channel:
-  //      red goes first → green-teal shallows, dark deep pools)
+  //      red goes first, then green → teal shallows, dark deep pools)
   float wy = vWPos.y - WATER_Y;
   float wet = 1.0 - smoothstep(0.0, 0.16, wy);
   float underwater = 1.0 - smoothstep(-0.02, 0.02, wy);
@@ -334,7 +334,7 @@ const MAIN = /* glsl */ `
     float wd = max(-wy, 0.0);
     float vy = max(normalize(cameraPosition - vWPos).y, 0.25);
     float path = wd / vy + wd * 0.4;
-    gAlb *= mix(vec3(1.0), exp(-path * vec3(0.42, 0.15, 0.2)), underwater);
+    gAlb *= mix(vec3(1.0), exp(-path * vec3(0.5, 0.19, 0.14)), underwater);
   }
   diffuseColor.rgb = gAlb;
 `;
@@ -417,7 +417,16 @@ export function createGroundMaterial(textures: GroundTextureSet, typeTex: THREE.
           // bright ground (snow): light bouncing between it, nearby sunlit snow
           // and the haze adds a neutral fill the sky-only environment lacks, so
           // shade on snow is a soft grey-blue instead of saturated sky blue
-          float gBright = smoothstep(0.38, 0.55, gLuma(gAlb));
+          // light bounced from nearby sunlit snow fills everything in its shade,
+          // not only the snow: rock / dirt patches in a snowfield get it too
+          ivec2 gTc = ivec2(floor(vWPos.xz / TILE_M));
+          float gSnowNear = 0.0;
+          gSnowNear += layerAt(gTc) == 5 ? 0.2 : 0.0;
+          gSnowNear += layerAt(gTc + ivec2(2, 0)) == 5 ? 0.2 : 0.0;
+          gSnowNear += layerAt(gTc + ivec2(-2, 0)) == 5 ? 0.2 : 0.0;
+          gSnowNear += layerAt(gTc + ivec2(0, 2)) == 5 ? 0.2 : 0.0;
+          gSnowNear += layerAt(gTc + ivec2(0, -2)) == 5 ? 0.2 : 0.0;
+          float gBright = max(smoothstep(0.38, 0.55, gLuma(gAlb)), smoothstep(0.35, 0.85, gSnowNear));
           vec3 gInd = reflectedLight.indirectDiffuse;
           reflectedLight.indirectDiffuse = mix(gInd, vec3(gLuma(gInd)), gBright * 0.45) * (1.0 + 0.8 * gBright);
           // under water there is no air/ground specular interface

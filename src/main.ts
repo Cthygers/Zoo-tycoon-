@@ -10,11 +10,13 @@ import type { QualityLevel } from './core/contracts';
 import { EventBus } from './core/events';
 import { createCreatureFactory } from './models';
 import { createPropsLayer } from './props';
+import { paintAtlasesOffThread } from './props/nature';
 import { createRenderContext, detectQuality } from './render';
 import { createSimulation } from './sim';
 import { createGameUI, showLoadingScreen, showMainMenu } from './ui';
 import { createEntityViews } from './views';
 import { buildDemoZoo } from './demo';
+import { warmUpShaders } from './loader';
 
 function storageGet(k: string): string | null {
   try {
@@ -53,6 +55,10 @@ async function boot() {
   const qParam = params.get('q') as QualityLevel | null;
   let quality = qParam ?? (storageGet(QUALITY_KEY) as QualityLevel | null) ?? detectQuality();
   const saveText = demo ? null : storageGet(SAVE_KEY);
+  // Paint the foliage atlases in a worker from the start (behind the menu, the
+  // sim and the terrain build), so props.prewarm() only has to compose them.
+  let onFoliageProgress = (_fraction: number) => {};
+  const foliage = paintAtlasesOffThread((f) => onFoliageProgress(f));
   const choice = demo ? 'new' : await showMainMenu(uiRoot, {
     hasSave: !!saveText,
     quality,
@@ -67,8 +73,13 @@ async function boot() {
   loader.setProgress(0.03, 'Surveying the land…');
   await nextFrame();
 
+  // ?seed=<n> makes a new zoo (and the demo layout) reproducible, so screenshots
+  // and draw-call numbers can be compared between builds; otherwise it is random.
+  const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
+  const seed = Number.isFinite(seedParam) ? seedParam : undefined;
+
   const events = new EventBus();
-  const sim = createSimulation(events);
+  const sim = createSimulation(events, seed);
   let loaded = false;
   // Message shown once the UI exists, when Continue could not load the save.
   let loadFailure: string | null = null;
@@ -99,7 +110,7 @@ async function boot() {
       })()
     : null;
   if (demo) {
-    const report = buildDemoZoo(sim);
+    const report = buildDemoZoo(sim, seed);
     console.log('[demo]', JSON.stringify(report));
     // Warm up from opening time so guests arrive (and get hungry) naturally and
     // are spread around the zoo by the time the camera shows up.
@@ -120,6 +131,9 @@ async function boot() {
   loader.setProgress(0.25, 'Planting trees…');
   await nextFrame();
   const props = createPropsLayer(sim.world, events, ctx.scene, ctx.quality);
+  // Usually done by now; waiting keeps prewarm from painting the rest again.
+  onFoliageProgress = (f) => loader.setProgress(0.25 + 0.075 * f, 'Planting trees…');
+  await foliage;
   await props.prewarm((f) => loader.setProgress(0.25 + 0.15 * f, 'Planting trees…'));
 
   loader.setProgress(0.4, 'Welcoming the animals…');
@@ -129,17 +143,17 @@ async function boot() {
   // Build only the species already in the zoo; others are built when first bought.
   const present = new Set<string>();
   for (const a of sim.animals.values()) present.add(a.speciesId);
-  await creatures.preload([...present], (f) => loader.setProgress(0.4 + 0.45 * f, 'Welcoming the animals…'));
+  await creatures.preload([...present], (f) => loader.setProgress(0.4 + 0.35 * f, 'Welcoming the animals…'));
 
-  loader.setProgress(0.88, 'Opening the gates…');
+  loader.setProgress(0.75, 'Opening the gates…');
+  const gates = (from: number, to: number) => (f: number) => loader.setProgress(from + (to - from) * f, 'Opening the gates…');
   await nextFrame();
   const views = createEntityViews(sim, ctx, creatures, props);
   // Create every creature model now and build their distance LODs while the
   // loading screen is up, so the first frames don't draw full meshes everywhere.
+  await views.prepare(gates(0.75, 0.79));
   views.update(0);
-  if (creatures.warmLods) {
-    await creatures.warmLods((f) => loader.setProgress(0.88 + 0.1 * f, 'Opening the gates…'));
-  }
+  if (creatures.warmLods) await creatures.warmLods(gates(0.79, 0.83));
 
   const save = () => {
     if (demo) return; // never overwrite the player's save with the showcase zoo
@@ -185,29 +199,27 @@ async function boot() {
   events.on('litterRemoved', () => (litterDirty = true));
   events.on('worldReset', () => (litterDirty = true));
 
-  // Compile every shader program behind the loading screen: props, creatures,
-  // night lights and the selection ring all exist now. One night frame and one
-  // frame at the loaded time also build the shadow-depth and night-only program
-  // variants, so the first minutes of play and the first dusk don't stall.
-  loader.setProgress(0.985, 'Opening the gates…');
-  await nextFrame();
-  const drawWarmupFrame = (minute: number) => {
+  // Compile and first-draw every shader program behind the loading screen, a
+  // few materials per frame (see loader.ts): props, creatures, night lights and
+  // the selection ring all exist now. Warming up at night also draws the
+  // night-only objects, so the first minutes of play and the first dusk don't stall.
+  const updateLayers = (minute: number) => {
     ctx.setTimeOfDay(minute, sim.day);
     ctx.settle();
     creatures.update(ctx.camera);
     props.update(0, ctx.nightFactor, ctx.camera);
     ctx.update(0);
-    ctx.render();
   };
+  await nextFrame();
   try {
-    await ctx.renderer.compileAsync(ctx.scene, ctx.camera);
-    drawWarmupFrame(22 * 60);
-    await nextFrame();
+    updateLayers(22 * 60);
+    await warmUpShaders(ctx, nextFrame, gates(0.83, 0.99));
   } catch (err) {
     console.warn('[boot] shader warm-up failed', err);
   }
   // Start with exposure and sky lighting already adapted to the loaded time.
-  drawWarmupFrame(sim.minuteOfDay);
+  updateLayers(sim.minuteOfDay);
+  ctx.render();
 
   loader.setProgress(1, 'Welcome to Wildhaven!');
   await nextFrame();

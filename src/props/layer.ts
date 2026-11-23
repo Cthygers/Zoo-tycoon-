@@ -14,7 +14,10 @@
 //    parts vanish when they would be a few pixels big (small details of big
 //    buildings go first, flower beds / hedges / boulders stay at overview);
 //  - shadow casting: only parts of props big enough to matter, only within
-//    tier.shadowNear / shadowFar metres of the camera focus;
+//    tier.shadowNear / shadowFar metres of the camera focus; on the batched
+//    back-end opaque casters cast from shadow-only batches (one shadow draw
+//    for all their materials), only alpha-tested / swaying parts cast from
+//    their own batch;
 //  - LOD: templates whose PropSpec has buildLod get both versions; objects
 //    swap by camera distance with hysteresis (checked every few frames).
 // Vegetation materials get a near-camera fade (lod/fade.ts); lamps and lit
@@ -28,6 +31,7 @@ import type { EventBus, TileRect } from '../core/events';
 import { hashFloat } from '../core/rng';
 import type { Litter, ObjectDef, PlacedObject } from '../core/types';
 import type { World } from '../core/world';
+import { useEnvMapIntensity } from '../render/envIntensity';
 import { OBJECTS_BY_ID, rotatedSize } from '../data/objects';
 import { createFenceSegment, disposeFenceStyles, fenceDetail, fenceStyle, FenceRenderer } from './fences';
 import { Highlighter } from './highlight';
@@ -51,6 +55,11 @@ const DEFAULT_GLOW = new THREE.Color(0xffd9a0);
 const LOD_INTERVAL = 8;
 /** Far LOD level starts at this multiple of the tier's lodDist. */
 const LOD_FAR = 2.2;
+/**
+ * Sway (m per m of height) below which a part casts a still shadow from a
+ * shadow-only batch: tree trunks move a few cm, less than a shadow-map texel.
+ */
+const SHADOW_STILL_SWAY = 0.005;
 
 // ---------------------------------------------------------------------------
 // Templates
@@ -69,6 +78,8 @@ interface TemplatePart {
   /** LOD levels it is drawn at: bit 0 = full detail, bit 1 = mid distance, bit 2 = far. */
   levels: number;
   batch: PropBatch | null;
+  /** Shadow-only batch it casts from (null = casts from `batch`; undefined = not decided yet). */
+  shadowBatch?: MultiBatch | null;
   /** Per-instance colour when the part's material was merged into a shared tinted one. */
   tint: THREE.Color | null;
 }
@@ -101,6 +112,8 @@ interface ObjRec {
   matrix: THREE.Matrix4;
   scale: number;
   slots: Slot[];
+  /** Per part: its instance in a shadow-only batch (null when it casts from its own batch or not at all). */
+  shadowSlots: (Slot | null)[];
   unique: THREE.Object3D | null;
   /** Current LOD level (0 = full, 1 = mid, 2 = far). */
   lod: number;
@@ -193,6 +206,10 @@ export class PropsLayer implements IPropsLayer {
   private sizeClass = new Map<string, { h: number; r: number; tall: boolean }>();
   private batches = new Map<string, PropBatch>();
   private batchList: PropBatch[] = [];
+  /** Shadow-only batches by depth-pass side + index layout (also in batchList). */
+  private shadowBatches = new Map<string, MultiBatch>();
+  /** Position-only copies of caster geometries for the shadow-only batches. */
+  private shadowGeos = new WeakMap<THREE.BufferGeometry, THREE.BufferGeometry>();
   /** Geometries created by splitting multi-material meshes (owned). */
   private splitGeos: THREE.BufferGeometry[] = [];
   readonly backend: 'instanced' | 'batched';
@@ -411,6 +428,10 @@ export class PropsLayer implements IPropsLayer {
       this.seenMats.add(m);
       // a stock MeshStandardMaterial without shader hooks can share a batch with its colour variants
       if (m.constructor === THREE.MeshStandardMaterial && !Object.prototype.hasOwnProperty.call(m, 'onBeforeCompile')) this.plainMats.add(m);
+      // three ignores envMapIntensity under scene.environment: honour it (after the check
+      // above, so colour variants still merge; their merged copy is registered here too)
+      const sm = m as THREE.MeshStandardMaterial;
+      if (sm.isMeshStandardMaterial && sm.envMapIntensity !== 1) useEnvMapIntensity(sm);
     }
     if (hasSway(m)) applyWind(m);
     const fade = this.fadeMats.has(m) ? null : fadeModeOf(m);
@@ -490,6 +511,47 @@ export class PropsLayer implements IPropsLayer {
     return b;
   }
 
+  /**
+   * Shadow-only batch for a part, or null when it must cast from its own batch:
+   * alpha-tested cards and visibly swaying parts need their material's depth shader.
+   */
+  private shadowBatchFor(part: TemplatePart): MultiBatch | null {
+    if (part.shadowBatch !== undefined) return part.shadowBatch;
+    const m = part.material;
+    const sway = typeof m.userData.sway === 'number' ? m.userData.sway : 0;
+    let b: MultiBatch | null = null;
+    if (this.backend === 'batched' && sway < SHADOW_STILL_SWAY && !(m.alphaTest > 0) && !(m as THREE.MeshStandardMaterial).alphaMap && !m.alphaHash && !m.transparent) {
+      // the depth pass draws back faces of single-sided materials (three's default shadow side)
+      const side = m.shadowSide ?? (m.side === THREE.DoubleSide ? THREE.DoubleSide : m.side === THREE.BackSide ? THREE.FrontSide : THREE.BackSide);
+      const key = `${side}|${part.geometry.index ? 'idx' : '-'}`;
+      b = this.shadowBatches.get(key) ?? null;
+      if (!b) {
+        const mat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
+        mat.name = 'prop-shadow-casters';
+        mat.shadowSide = side;
+        b = new MultiBatch(mat, this.quality.shadows, this.objRoot, true);
+        this.shadowBatches.set(key, b);
+        this.batchList.push(b);
+      }
+    }
+    part.shadowBatch = b;
+    return b;
+  }
+
+  /** Position-only copy of a geometry (attributes shared) for a shadow-only batch. */
+  private shadowGeometry(g: THREE.BufferGeometry): THREE.BufferGeometry {
+    let s = this.shadowGeos.get(g);
+    if (!s) {
+      s = new THREE.BufferGeometry();
+      s.setAttribute('position', g.getAttribute('position'));
+      if (g.index) s.setIndex(g.index);
+      if (!g.boundingSphere) g.computeBoundingSphere();
+      s.boundingSphere = g.boundingSphere;
+      this.shadowGeos.set(g, s);
+    }
+    return s;
+  }
+
   /** Culling parameters of one part of one placed object. */
   private partParams(tpl: Template, part: TemplatePart, scale: number, lod: number): InstParams {
     const T = this.tier;
@@ -525,10 +587,11 @@ export class PropsLayer implements IPropsLayer {
     return s;
   }
 
-  /** Is this def big enough to cast shadows on the current tier (tiny props never do)? */
+  /** Is this def big enough to cast shadows on the current tier (tiny and thin props never do)? */
   private castsClass(defId: string): boolean {
     const c = this.sizeClass.get(defId);
-    return !c || c.h > this.tier.castH || c.r > this.tier.castR;
+    const T = this.tier;
+    return !c || ((c.h > T.castH || c.r > T.castR) && c.r >= T.castMinR);
   }
 
   /** LOD level used by the shadow pass: one coarser than the view on tiers with shadowLodBias. */
@@ -560,7 +623,7 @@ export class PropsLayer implements IPropsLayer {
     }
     const spec = this.specFor(o.defId);
     const tpl = this.template(o.defId, this.variantOf(spec, o.seed));
-    const rec: ObjRec = { obj: o, tpl, matrix: new THREE.Matrix4(), scale: 1, slots: [], unique: null, lod: 0 };
+    const rec: ObjRec = { obj: o, tpl, matrix: new THREE.Matrix4(), scale: 1, slots: [], shadowSlots: [], unique: null, lod: 0 };
     rec.scale = this.computeMatrix(o, spec, rec.matrix);
     if (spec.unique) {
       // holder carries the placement; the clone keeps the builder's own root transform
@@ -577,10 +640,20 @@ export class PropsLayer implements IPropsLayer {
       for (const p of tpl.parts) {
         const b = this.batchFor(p);
         this.tmpM.multiplyMatrices(rec.matrix, p.local);
+        const params = this.partParams(tpl, p, rec.scale, rec.lod);
+        const sb = params.shadow > 0 ? this.shadowBatchFor(p) : null;
+        let shadowSlot: Slot | null = null;
+        if (sb) {
+          // it casts from the shadow-only batch instead
+          shadowSlot = { batch: sb, index: -1 };
+          shadowSlot.index = sb.add(this.shadowGeometry(p.geometry), this.tmpM, { id: o.id, slot: shadowSlot }, { cull: Infinity, shadow: params.shadow, lodOn: false, shadowOn: params.shadowOn });
+          params.shadow = 0;
+        }
+        rec.shadowSlots.push(shadowSlot);
         // the slot object is shared with the batch so swap-remove back-ends can re-index it
         const slot: Slot = { batch: b, index: -1 };
         rec.slots.push(slot);
-        slot.index = b.add(p.geometry, this.tmpM, { id: o.id, slot }, this.partParams(tpl, p, rec.scale, rec.lod));
+        slot.index = b.add(p.geometry, this.tmpM, { id: o.id, slot }, params);
       }
       if (tpl.hasLod) this.lodRecs.push(rec);
     }
@@ -611,7 +684,9 @@ export class PropsLayer implements IPropsLayer {
     const rec = this.recs.get(id);
     if (!rec) return;
     for (const s of rec.slots) s.batch.remove(s.index);
+    for (const s of rec.shadowSlots) s?.batch.remove(s.index);
     rec.slots.length = 0;
+    rec.shadowSlots.length = 0;
     if (rec.unique) {
       this.uniqueRoot.remove(rec.unique);
       const i = this.uniques.indexOf(rec);
@@ -653,6 +728,8 @@ export class PropsLayer implements IPropsLayer {
       rec.slots.forEach((s, i) => {
         this.tmpM.multiplyMatrices(rec.matrix, rec.tpl.parts[i].local);
         s.batch.set(s.index, this.tmpM);
+        const ss = rec.shadowSlots[i];
+        if (ss) ss.batch.set(ss.index, this.tmpM);
       });
       if (rec.tpl.emitters.length) this.night.setObject(o.id, rec.tpl.emitters, rec.matrix);
     }
@@ -739,7 +816,10 @@ export class PropsLayer implements IPropsLayer {
       const sl = this.shadowLevel(rec.tpl, lvl);
       for (let i = 0; i < rec.slots.length; i++) {
         const s = rec.slots[i];
-        s.batch.setLodOn(s.index, ((parts[i].levels >> lvl) & 1) === 1, ((parts[i].levels >> sl) & 1) === 1);
+        const shadowOn = ((parts[i].levels >> sl) & 1) === 1;
+        s.batch.setLodOn(s.index, ((parts[i].levels >> lvl) & 1) === 1, shadowOn);
+        const ss = rec.shadowSlots[i];
+        if (ss) ss.batch.setLodOn(ss.index, false, shadowOn);
       }
     }
   }
@@ -800,7 +880,7 @@ export class PropsLayer implements IPropsLayer {
     let bestId: number | null = null;
     const hits = this.hits;
     for (const b of this.batchList) {
-      if (b.size() === 0) continue;
+      if (b.size() === 0 || b.shadowOnly) continue;
       hits.length = 0;
       b.mesh.raycast(raycaster, hits);
       for (const h of hits) {
@@ -875,6 +955,7 @@ export class PropsLayer implements IPropsLayer {
     let inst = 0;
     let drawn = 0;
     for (const b of this.batchList) {
+      if (b.shadowOnly) continue;
       const n = b.size();
       if (n > 0) live++;
       inst += n;
@@ -929,6 +1010,8 @@ export class PropsLayer implements IPropsLayer {
     for (const b of this.batchList) b.dispose();
     this.batchList = [];
     this.batches.clear();
+    for (const b of this.shadowBatches.values()) (b.mesh.material as THREE.Material).dispose();
+    this.shadowBatches.clear();
     const geos = new Set<THREE.BufferGeometry>();
     const mats = new Set<THREE.Material>();
     for (const t of this.templates.values())

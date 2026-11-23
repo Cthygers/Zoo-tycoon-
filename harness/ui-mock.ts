@@ -369,8 +369,9 @@ export class MockSim implements ISimulation {
     return c <= 0 || this.money >= c;
   }
 
-  private res(ok: boolean, cost: number, reason: string | undefined, dry: boolean, at?: { x: number; z: number }): CommandResult {
+  private res(ok: boolean, cost: number, reason: string | undefined, dry: boolean, at?: { x: number; z: number }, warning?: string): CommandResult {
     const r: CommandResult = reason ? { ok, cost, reason } : { ok, cost };
+    if (ok && warning) r.warning = warning;
     if (!dry) {
       this.events.emit('commandResult', at ? { ...r, x: at.x, z: at.z } : r);
       if (!ok && reason) this.events.emit('notify', { text: reason, kind: 'warn', focus: at });
@@ -573,8 +574,8 @@ export class MockSim implements ISimulation {
     if (!hab) return this.res(false, sp.cost, 'Animals must be placed inside a fenced habitat', dryRun, at);
     if (w.isTileSolid(t.x, t.z)) return this.res(false, sp.cost, 'Something is in the way — pick an open spot', dryRun, at);
     if (!this.canAfford(sp.cost)) return this.res(false, sp.cost, this.noMoney(sp.cost), dryRun, at);
-    const warn = hab.minFenceStrength < sp.danger ? `Warning: the fence is too weak for a ${sp.name}` : undefined;
-    if (dryRun) return this.res(true, sp.cost, warn, true, at);
+    const warn = hab.minFenceStrength < sp.danger ? `The fence is too weak for a ${sp.name}` : undefined;
+    if (dryRun) return this.res(true, sp.cost, undefined, true, at, warn);
     const id = this.nextId++;
     this.animals.set(id, {
       id,
@@ -599,7 +600,7 @@ export class MockSim implements ISimulation {
       seed: id,
     });
     this.events.emit('animalAdded', { id });
-    return this.res(true, sp.cost, warn, false, at);
+    return this.res(true, sp.cost, undefined, false, at, warn);
   }
 
   moveAnimal(animalId: number, wx: number, wz: number, dryRun = false): CommandResult {

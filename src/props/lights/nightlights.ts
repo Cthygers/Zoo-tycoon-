@@ -1,14 +1,18 @@
 // Night lighting for lamps, lit windows and kiosks that scales to hundreds of
 // lamps on a phone:
-//  - light pools: every emitter gets a terrain-conforming ground patch (1 m
-//    grid, merged into ONE mesh) shaded with an inverse-square / cosine
-//    falloff from the light's real position, softly saturated near the bulb.
-//    The pool multiplies the moonlit ground by a warm gain, so it respects
-//    albedo, texture and shadows (dst × (1 + E·warm)): in linear light in the
-//    HDR pipeline (post-FX tier), and in display space in the LDR pipeline,
-//    where the same physical gain is a smaller multiplier (≈ gain^(1/2.2)).
-//    LDR tiers add a faint warm fill on top (a second draw of the same mesh):
-//    a multiply cannot warm the moon-graded blue-green of a dark lawn.
+//  - light pools: ONE terrain-conforming ground mesh on a shared 1 m grid.
+//    Every grid vertex sums the light of all emitters around it (inverse-
+//    square / cosine falloff from each light's real position) and saturates
+//    the sum, so overlapping pools (double lamp heads, kiosk bulbs, windows)
+//    add up like light instead of compounding, and every ground point is
+//    covered once. The pool lights the moonlit ground it covers, so it
+//    respects albedo, texture and shadows:
+//      HDR pipeline (post-FX tier, linear light):  dst × (1 + s), s ≤ 3
+//      LDR pipeline (display space):               dst × (1 + s − dst), s ≤ 1.5
+//    The LDR form is a multiply with a shoulder: dark ground gets ≈ ×(1 + s),
+//    brighter paving rolls off toward white instead of clipping. LDR tiers add a
+//    faint warm fill first (a second draw of the same mesh): a multiply
+//    cannot warm the moon-graded blue-green of a dark lawn.
 //  - halos: one camera-facing soft sprite per lamp head (ONE instanced draw)
 //    so lamps read as glowing even without bloom, sized to stay under the
 //    bloom threshold.
@@ -23,20 +27,44 @@ import type { World } from '../../core/world';
 /** Warm ≈2700 K lamp colour (linear-ish, as used by the shaders). */
 const WARM = new THREE.Color(0xffc68a);
 /**
- * Pool tint in the HDR pipeline: more saturated, because the night grade
- * desaturates the frame (scotopic vision) and the multiply keeps the moonlit
- * ground's blue cast.
+ * Pool tint in the HDR pipeline: about lamp light over moonlight per channel
+ * (the multiply scales moonlit ground), kept off pure red: the night grade
+ * maps dim light to rod vision, which barely sees red, so the pool must lift
+ * green too to leave the scotopic range, where its warmth shows again.
  */
-const WARM_HDR = new THREE.Color(1.0, 0.42, 0.11);
+const WARM_HDR = new THREE.Color(1.0, 0.5, 0.2);
 /**
  * Pool tint in the LDR pipeline: saturated for the same reason (the moonlit
  * grade is in the framebuffer), but less so, as the multiply is in display space.
  */
 const WARM_LDR = new THREE.Color(1.0, 0.5, 0.18);
-const POINT_INTENSITY = 1.6;
-const POINT_RANGE = 14;
+/**
+ * Peak pool gain at full night (s at saturated light, red channel). HDR: the
+ * multiplier stays under 4× in linear light, so lamp-lit paving keeps its
+ * texture through the tone curve; LDR: the shoulder blend dst × (1 + s − dst)
+ * stays below white for any moonlit surface darker than ≈0.4 (display).
+ */
+const POOL_GAIN_HDR = 3.0;
+const POOL_GAIN_LDR = 1.5;
+/** Additive warm fill of LDR tiers at saturated light. */
+const FILL_GAIN = 0.14;
+/**
+ * Point lights (high tier) light what stands near a lamp: guests, benches,
+ * kiosk walls. Their range ends just past the ground under the lamp, which the
+ * pools already light, so the ground is not lit twice (and the pools of the
+ * lamps that have a point light don't stand out).
+ */
+const POINT_INTENSITY = 0.6;
+const POINT_RANGE = 3.8;
 /** Reference lamp height for the falloff normalisation (m). */
 const H0 = 3.2;
+/** Pool mesh height above the walk surface (m); small, so walls standing in a pool show no lit seam. */
+const POOL_LIFT = 0.02;
+/** Window light: relative strength, and height of its virtual source above the window (m). */
+const WINDOW_INTENSITY = 0.18;
+const WINDOW_LIFT = 1;
+/** Light below which a pool cell is not drawn. */
+const POOL_MIN = 0.004;
 
 export type EmitterKind = 'lamp' | 'window';
 
@@ -49,7 +77,7 @@ export interface LocalEmitter {
 }
 
 /** A placed light source in world space. */
-interface WorldEmitter {
+export interface WorldEmitter {
   x: number;
   y: number;
   z: number;
@@ -59,6 +87,82 @@ interface WorldEmitter {
   pz: number;
   radius: number;
   intensity: number;
+}
+
+// ---------------------------------------------------------------------------
+// Pool mesh
+
+/**
+ * Ground light of a summed emitter irradiance (1 = right under one standard
+ * lamp): ≈ linear when dim, saturating toward 1 where lights overlap, so a
+ * double lamp is brighter than a single one but nothing gets a hot spot.
+ */
+export function poolLight(e: number): number {
+  return 1 - Math.exp(-1.2 * e);
+}
+
+/** Irradiance (1 = right under a standard lamp) at a ground point from one emitter, with the pool's edge fade. */
+function emitterLight(em: WorldEmitter, x: number, y: number, z: number): number {
+  const rc = Math.hypot(x - em.px, z - em.pz);
+  if (rc >= em.radius) return 0;
+  // point light on a horizontal surface: E = I cos(theta) / dist^2, normalised to 1 under an H0 lamp
+  const h = Math.max(em.y - y, 0.35);
+  const r2 = (x - em.x) ** 2 + (z - em.z) ** 2;
+  const e = (H0 * H0 * h) / Math.pow(h * h + r2, 1.5);
+  const t = THREE.MathUtils.clamp((rc - em.radius * 0.5) / (em.radius * 0.5), 0, 1);
+  return e * (1 - t * t * (3 - 2 * t)) * em.intensity;
+}
+
+export interface PoolGrid {
+  /** xyz per vertex. */
+  position: Float32Array;
+  /** Saturated ground light 0..1 per vertex (poolLight of the summed irradiance). */
+  light: Float32Array;
+  /** Two triangles per lit 1 m cell; every cell appears once. */
+  index: number[];
+}
+
+/**
+ * Drape one 1 m grid over the ground under all emitters: vertices are shared
+ * between overlapping pools and carry the summed light, so the mesh covers
+ * each ground point exactly once. `surfaceY(x, z)` gives the mesh height.
+ */
+export function buildPoolGrid(emitters: Iterable<WorldEmitter>, surfaceY: (x: number, z: number) => number): PoolGrid {
+  const key = (x: number, z: number) => (x + 4096) * 8192 + (z + 4096);
+  const vert = new Map<number, number>();
+  const pos: number[] = [];
+  const sum: number[] = [];
+  for (const em of emitters) {
+    // one ring beyond the pool so its edge cells are complete
+    const x0 = Math.floor(em.px - em.radius) - 1;
+    const x1 = Math.ceil(em.px + em.radius) + 1;
+    const z0 = Math.floor(em.pz - em.radius) - 1;
+    const z1 = Math.ceil(em.pz + em.radius) + 1;
+    for (let z = z0; z <= z1; z++)
+      for (let x = x0; x <= x1; x++) {
+        const k = key(x, z);
+        let v = vert.get(k);
+        if (v === undefined) {
+          v = sum.length;
+          vert.set(k, v);
+          pos.push(x, surfaceY(x, z), z);
+          sum.push(0);
+        }
+        sum[v] += emitterLight(em, x, pos[v * 3 + 1], z);
+      }
+  }
+  const light = new Float32Array(sum.length);
+  for (let i = 0; i < sum.length; i++) light[i] = poolLight(sum[i]);
+  const index: number[] = [];
+  for (const [k, a] of vert) {
+    const b = vert.get(k + 1); // (x, z + 1)
+    const c = vert.get(k + 8192); // (x + 1, z)
+    const d = vert.get(k + 8193); // (x + 1, z + 1)
+    if (b === undefined || c === undefined || d === undefined) continue;
+    if (Math.max(light[a], light[b], light[c], light[d]) < POOL_MIN) continue;
+    index.push(a, b, c, c, b, d);
+  }
+  return { position: new Float32Array(pos), light, index };
 }
 
 // ---------------------------------------------------------------------------
@@ -125,39 +229,21 @@ export function findEmitters(parts: { geometry: THREE.BufferGeometry; material: 
 // Shaders
 
 const POOL_VERT = /* glsl */ `
-attribute vec3 aLamp;
-attribute vec4 aPool;
-varying vec3 vW;
-varying vec3 vLamp;
-varying vec4 vPool;
+attribute float aLight;
+varying float vLight;
 void main() {
-  vec4 w = modelMatrix * vec4( position, 1.0 );
-  vW = w.xyz;
-  vLamp = aLamp;
-  vPool = aPool;
-  gl_Position = projectionMatrix * viewMatrix * w;
+  vLight = aLight;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
 }
 `;
 
 const POOL_FRAG = /* glsl */ `
-precision highp float;
+precision mediump float;
 uniform vec3 uColor;
 uniform float uGain;
-varying vec3 vW;
-varying vec3 vLamp;
-varying vec4 vPool;
+varying float vLight;
 void main() {
-  vec2 d = vW.xz - vLamp.xz;
-  float r2 = dot( d, d );
-  float h = max( vLamp.y - vW.y, 0.35 );
-  // point light on a horizontal surface: E = I cos(theta) / dist^2, normalised to 1 under a ${H0} m lamp,
-  // with a soft knee so low lamps / raised ground never get a hot spot
-  float E = ${(H0 * H0).toFixed(3)} * h / pow( h * h + r2, 1.5 );
-  E /= 1.0 + 0.4 * E;
-  float rc = length( vW.xz - vPool.xy );
-  float edge = 1.0 - smoothstep( vPool.z * 0.5, vPool.z, rc );
-  float k = E * edge * vPool.w * uGain;
-  gl_FragColor = vec4( uColor * k, 1.0 );
+  gl_FragColor = vec4( uColor * ( vLight * uGain ), 1.0 );
 }
 `;
 
@@ -194,12 +280,6 @@ void main() {
 
 // ---------------------------------------------------------------------------
 
-export interface NightTier {
-  /** Real point lights near the focus (0 = none). */
-  pointLights: number;
-  /** HDR (float target, multiply-add pools) vs LDR additive. Decided per frame from the render target. */
-}
-
 export class NightLights {
   readonly group = new THREE.Group();
   private readonly poolMat: THREE.ShaderMaterial;
@@ -233,10 +313,12 @@ export class NightLights {
       depthTest: true,
       toneMapped: false,
       fog: false,
+      // a slope-scaled pull toward the camera would let the pool paint a
+      // band of every wall standing in it: keep it to depth-precision size
       polygonOffset: true,
-      polygonOffsetFactor: -2,
-      polygonOffsetUnits: -4,
-      // dst × (1 + pool colour)
+      polygonOffsetFactor: -0.5,
+      polygonOffsetUnits: -2,
+      // dst × (1 + s) (HDR) or dst × (1 + s − dst) (LDR), see configureBlend
       blending: THREE.CustomBlending,
       blendEquation: THREE.AddEquation,
       blendSrc: THREE.DstColorFactor,
@@ -269,13 +351,15 @@ export class NightLights {
     this.fillMat = this.poolMat.clone();
     this.fillMat.name = 'props/lightPoolFill';
     this.fillMat.blendSrc = THREE.OneFactor;
+    this.fillMat.blendDst = THREE.OneFactor;
     this.fillMat.uniforms.uColor.value.copy(WARM);
     this.fill = new THREE.Mesh(this.pools.geometry, this.fillMat);
     this.fill.name = 'lamp-light-fill';
-    this.fill.renderOrder = -1;
+    // before the pools, so their shoulder also rolls off the fill
+    this.fill.renderOrder = -2;
     this.fill.visible = false;
     this.fill.onBeforeRender = () => {
-      this.fillMat.uniforms.uGain.value = this.night * 0.16;
+      this.fillMat.uniforms.uGain.value = this.night * FILL_GAIN;
     };
     this.group.add(this.fill);
     this.halos = this.makeHalos(16);
@@ -302,13 +386,12 @@ export class NightLights {
 
   private configureBlend(renderer: THREE.WebGLRenderer): void {
     const hdr = renderer.getRenderTarget() !== null;
-    const u = this.poolMat.uniforms;
-    // peak gain under a standard lamp: HDR ×(1 + 2.5) on red in linear light
-    // (bright pavement stays clear of white after the night exposure); LDR
-    // ×(1 + 1.6) in display space plus the warm fill, about the same light
-    // after tone mapping
-    u.uGain.value = this.night * (hdr ? 3.5 : 2.2);
-    u.uColor.value.copy(hdr ? WARM_HDR : WARM_LDR);
+    const m = this.poolMat;
+    // HDR: plain multiply in linear light (the tone curve rolls off highlights);
+    // LDR: the shoulder blend dst × (1 + s − dst) (header), which rolls off instead of clipping
+    m.blendDst = hdr ? THREE.OneFactor : THREE.OneMinusDstColorFactor;
+    m.uniforms.uGain.value = this.night * (hdr ? POOL_GAIN_HDR : POOL_GAIN_LDR);
+    m.uniforms.uColor.value.copy(hdr ? WARM_HDR : WARM_LDR);
   }
 
   /** Set (or clear with null / []) the emitters of one placed object. */
@@ -321,26 +404,22 @@ export class NightLights {
     const e = matrix.elements;
     for (const em of emitters) {
       _v.copy(em.pos).applyMatrix4(matrix);
-      let px = _v.x;
-      let pz = _v.z;
-      let radius: number;
-      let intensity: number;
-      const ground = this.world.heightAt(_v.x, _v.z);
-      const h = Math.max(_v.y - ground, 0.5);
       if (em.kind === 'lamp') {
-        radius = THREE.MathUtils.clamp(h * 1.9 + 0.6, 3, 8);
-        intensity = 1;
-      } else {
-        // rotate the local spill direction by the placement matrix
-        const dx = em.dir ? e[0] * em.dir.x + e[8] * em.dir.y : 0;
-        const dz = em.dir ? e[2] * em.dir.x + e[10] * em.dir.y : 1;
-        const l = Math.hypot(dx, dz) || 1;
-        px += (dx / l) * 1.1;
-        pz += (dz / l) * 1.1;
-        radius = 2.8;
-        intensity = 0.55;
+        const h = Math.max(_v.y - this.world.heightAt(_v.x, _v.z), 0.5);
+        const radius = THREE.MathUtils.clamp(h * 1.9 + 0.6, 3, 8);
+        list.push({ x: _v.x, y: _v.y, z: _v.z, kind: em.kind, px: _v.x, pz: _v.z, radius, intensity: 1 });
+        continue;
       }
-      list.push({ x: _v.x, y: _v.y, z: _v.z, kind: em.kind, px, pz, radius, intensity });
+      // rotate the local spill direction by the placement matrix
+      const dx = em.dir ? e[0] * em.dir.x + e[8] * em.dir.y : 0;
+      const dz = em.dir ? e[2] * em.dir.x + e[10] * em.dir.y : 1;
+      const l = Math.hypot(dx, dz) || 1;
+      const px = _v.x + (dx / l) * 1.1;
+      const pz = _v.z + (dz / l) * 1.1;
+      // a lit window is a broad, dim source: light it from above the pool
+      // centre so the pool is a soft patch in front of the shop, not a hot
+      // line along the wall foot
+      list.push({ x: px, y: _v.y + WINDOW_LIFT, z: pz, kind: em.kind, px, pz, radius: 2.8, intensity: WINDOW_INTENSITY });
     }
     this.entries.set(id, list);
     this.dirty = true;
@@ -381,49 +460,20 @@ export class NightLights {
 
   private rebuild(): void {
     this.dirty = false;
-    const pos: number[] = [];
-    const lamp: number[] = [];
-    const pool: number[] = [];
-    const idx: number[] = [];
     let lamps = 0;
+    const all: WorldEmitter[] = [];
     for (const list of this.entries.values())
       for (const em of list) {
+        all.push(em);
         if (em.kind === 'lamp') lamps++;
-        const R = em.radius;
-        const x0 = Math.floor(em.px - R);
-        const z0 = Math.floor(em.pz - R);
-        const n = Math.ceil(em.px + R) - x0;
-        const m = Math.ceil(em.pz + R) - z0;
-        const base = pos.length / 3;
-        for (let j = 0; j <= m; j++)
-          for (let i = 0; i <= n; i++) {
-            const x = x0 + i;
-            const z = z0 + j;
-            const y = Math.max(this.world.walkHeightAt(x, z), WATER_LEVEL + 0.02) + 0.03;
-            pos.push(x, y, z);
-            lamp.push(em.x, em.y, em.z);
-            pool.push(em.px, em.pz, R, em.intensity);
-          }
-        const lim = (R + 0.75) * (R + 0.75);
-        for (let j = 0; j < m; j++)
-          for (let i = 0; i < n; i++) {
-            const cx = x0 + i + 0.5 - em.px;
-            const cz = z0 + j + 0.5 - em.pz;
-            if (cx * cx + cz * cz > lim) continue;
-            const a = base + j * (n + 1) + i;
-            const b = a + 1;
-            const c = a + (n + 1);
-            const d = c + 1;
-            idx.push(a, c, b, b, c, d);
-          }
       }
+    const grid = buildPoolGrid(all, (x, z) => Math.max(this.world.walkHeightAt(x, z), WATER_LEVEL + 0.02) + POOL_LIFT);
     const old = this.pools.geometry;
     const g = new THREE.BufferGeometry();
-    if (idx.length) {
-      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-      g.setAttribute('aLamp', new THREE.Float32BufferAttribute(lamp, 3));
-      g.setAttribute('aPool', new THREE.Float32BufferAttribute(pool, 4));
-      g.setIndex(pos.length / 3 > 65535 ? new THREE.Uint32BufferAttribute(idx, 1) : new THREE.Uint16BufferAttribute(idx, 1));
+    if (grid.index.length) {
+      g.setAttribute('position', new THREE.BufferAttribute(grid.position, 3));
+      g.setAttribute('aLight', new THREE.BufferAttribute(grid.light, 1));
+      g.setIndex(grid.light.length > 65535 ? new THREE.Uint32BufferAttribute(grid.index, 1) : new THREE.Uint16BufferAttribute(grid.index, 1));
       g.computeBoundingSphere();
     }
     this.pools.geometry = g;

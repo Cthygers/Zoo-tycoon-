@@ -7,6 +7,7 @@ import type { StaffRole } from '../core/types';
 import { OBJECTS_BY_ID } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
 import { foodScale } from './animals';
+import type { OpenEnclosure } from './enclosures';
 import { STAFF_SALARY, STAFF_TITLE, personName, staffAppearance, singularName } from './names';
 import { FAR, N_TILES } from './nav';
 import type { Simulation } from './simulation';
@@ -16,16 +17,18 @@ import { approach, personY, standFacing, walkToNext } from './walker';
 const DX = [1, -1, 0, 0];
 const DZ = [0, 0, 1, -1];
 
+/** Food (hunger units) a keeper leaves for one animal. */
+function ration(a: AnimalSim): number {
+  const sp = SPECIES_BY_ID[a.speciesId];
+  return sp ? foodScale(sp) * (0.4 + 0.6 * a.growth) * 1.4 * 1.5 : 0;
+}
+
 /** Food stock a keeper leaves in a habitat (hunger units). */
 export function foodCapacity(sim: Simulation, habId: number): number {
   const hab = sim.world.habitats.get(habId);
   if (!hab) return 0;
   let cap = 0;
-  for (const a of sim.animals.values()) {
-    if (a.escaped || a.habitatId !== habId) continue;
-    const sp = SPECIES_BY_ID[a.speciesId];
-    if (sp) cap += foodScale(sp) * (0.4 + 0.6 * a.growth) * 1.4 * 1.5;
-  }
+  for (const a of sim.animals.values()) if (!a.escaped && a.habitatId === habId) cap += ration(a);
   if (cap <= 0) return 0;
   let feeder = false;
   for (const oid of hab.objects) {
@@ -33,6 +36,13 @@ export function foodCapacity(sim: Simulation, habId: number): number {
     if (o && OBJECTS_BY_ID[o.defId]?.serves === 'food') feeder = true;
   }
   return Math.max(2, cap) * (feeder ? 1.5 : 1);
+}
+
+/** Food (and tub water) a keeper leaves for the animals lingering in an opened enclosure. */
+export function enclosureCapacity(sim: Simulation, enc: OpenEnclosure): number {
+  let cap = 0;
+  for (const a of sim.enclosures.residents(enc)) cap += ration(a);
+  return cap > 0 ? Math.max(2, cap) : 0;
 }
 
 function hasFeeder(sim: Simulation, habId: number): boolean {
@@ -249,6 +259,35 @@ export class StaffSystem {
         best = hab.id;
       }
     }
+    // animals lingering in an opened enclosure still need feeding, and water when no pond or trough is left
+    let bestOpen: OpenEnclosure | undefined;
+    for (const enc of sim.enclosures.open) {
+      const cap = enclosureCapacity(sim, enc);
+      if (cap <= 0) continue;
+      const foodNeed = Math.max(0, 1 - enc.food / cap);
+      const own = sim.enclosures.footprintWater(enc);
+      const waterNeed = own.edge.length || own.troughs.length ? 0 : Math.max(0, 1 - enc.water / cap);
+      const need = Math.max(foodNeed, waterNeed) * 1.2;
+      if (need < 0.45 || this.assigned('service', enc.id, s)) continue;
+      const d = sim.guestSys.distance(`open:${enc.id}`, s.tile);
+      if (d === FAR) {
+        blocked++;
+        continue;
+      }
+      const score = need / (1 + d / 30);
+      if (score > bestScore) {
+        bestScore = score;
+        bestOpen = enc;
+      }
+    }
+    if (bestOpen) {
+      s.noAccessWarned = false;
+      s.job = 'service';
+      s.jobRef = bestOpen.id;
+      s.goalKey = `open:${bestOpen.id}`;
+      s.task = `Feeding the animals of ${bestOpen.name}`;
+      return true;
+    }
     if (!best) {
       if (blocked && !s.noAccessWarned) {
         s.noAccessWarned = true;
@@ -379,23 +418,26 @@ export class StaffSystem {
       cz = (((s.tile / MAP_W) | 0) + 0.5) * TILE;
     if (s.job === 'service' || s.job === 'heal') {
       const hab = w.habitats.get(s.jobRef);
-      if (!hab) {
+      const enc = hab || s.job !== 'service' ? undefined : sim.enclosures.find(s.jobRef);
+      if (!hab && !enc) {
         s.job = 'none';
         s.timer = 0.5;
         return;
       }
+      // face the habitat (or the opened enclosure's old footprint) from the path
+      const inside = (i: number) => (hab ? w.habitatOf[i] === hab.id : sim.enclosures.openOf[i] === s.jobRef);
       const x = s.tile % MAP_W,
         z = (s.tile / MAP_W) | 0;
       for (let k = 0; k < 4; k++)
         for (let st = 1; st <= 2; st++) {
           const nx = x + DX[k] * st,
             nz = z + DZ[k] * st;
-          if (!w.inBounds(nx, nz) || w.habitatOf[nz * MAP_W + nx] !== hab.id) continue;
+          if (!w.inBounds(nx, nz) || !inside(nz * MAP_W + nx)) continue;
           s.ax = cx + DX[k] * 0.6;
           s.az = cz + DZ[k] * 0.6;
           s.faceHeading = Math.atan2(DX[k], DZ[k]);
           s.phase = 1;
-          s.timer = s.job === 'heal' ? 5 : hasFeeder(sim, hab.id) ? 3 : 5.5;
+          s.timer = s.job === 'heal' ? 5 : hab && hasFeeder(sim, hab.id) ? 3 : 5.5;
           return;
         }
       s.job = 'none';
@@ -427,6 +469,27 @@ export class StaffSystem {
     s.timer = 1;
   }
 
+  /** A keeper leaves food just inside an opened enclosure's old footprint, and a tub of water if no pond or trough is left. */
+  private serviceOpen(s: StaffSim, enc: OpenEnclosure) {
+    const sim = this.sim;
+    const w = sim.world;
+    const cap = enclosureCapacity(sim, enc);
+    enc.food = Math.max(enc.food, cap);
+    const own = sim.enclosures.footprintWater(enc);
+    if (!own.edge.length && !own.troughs.length) enc.water = Math.max(enc.water, cap);
+    // just past the old fence line, one or two tiles from the path
+    for (const d of [2.2, 4.2]) {
+      const fx = s.x + Math.sin(s.faceHeading) * d,
+        fz = s.z + Math.cos(s.faceHeading) * d;
+      const t = w.tileOfWorld(fx, fz);
+      if (w.inBounds(t.x, t.z) && sim.enclosures.openOf[w.idx(t.x, t.z)] === enc.id) {
+        enc.spotX = fx;
+        enc.spotZ = fz;
+        return;
+      }
+    }
+  }
+
   private finishWork(s: StaffSim) {
     const sim = this.sim;
     const w = sim.world;
@@ -436,7 +499,9 @@ export class StaffSystem {
       case 'service': {
         const hab = w.habitats.get(s.jobRef);
         const rt = sim.habitatRuntime(s.jobRef);
-        if (hab && rt) {
+        const enc = hab ? undefined : sim.enclosures.find(s.jobRef);
+        if (enc) this.serviceOpen(s, enc);
+        else if (hab && rt) {
           rt.food = Math.max(rt.food, foodCapacity(sim, hab.id));
           rt.sinceService = 0;
           // food is left just inside the fence where the keeper stands

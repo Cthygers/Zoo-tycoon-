@@ -30,6 +30,8 @@ export const DECK_Y = WATER_LEVEL + 0.25;
 
 /** Entrance gate tile (centre of the south edge). Path starts here. */
 export const ENTRANCE_TILE = { x: Math.floor(MAP_W / 2), z: MAP_H - 1 };
+/** Tile rect of the paved plaza at the gate: its paths can't be bulldozed (guests must always get in). */
+export const ENTRANCE_PLAZA = { x0: ENTRANCE_TILE.x - 2, z0: ENTRANCE_TILE.z - 2, x1: ENTRANCE_TILE.x + 2, z1: ENTRANCE_TILE.z };
 
 /** Game clock: game-minutes that pass per simulated second at 1x speed. */
 export const GAME_MINUTES_PER_SECOND = 3; // a full day ≈ 8 real minutes at 1x (opening hours ≈ 4 min)

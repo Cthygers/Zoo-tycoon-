@@ -6,11 +6,15 @@
 //  - closing the gap again gives the new habitat the old name, and the animals'
 //    home moves to it, so strays can still be brought back;
 //  - references to a vanished habitat id (animal homes, staff jobs) are cleared,
-//    so they can never point at some later habitat.
+//    so they can never point at some later habitat;
+//  - keepers still feed (and water) the animals lingering in it, from the paths
+//    beside the old footprint.
 
-import type { Habitat } from '../core/types';
+import { MAP_W } from '../core/constants';
+import { Terrain, type Habitat } from '../core/types';
 import { N_TILES } from './nav';
 import type { Simulation } from './simulation';
+import type { AnimalSim } from './state';
 
 /** A habitat whose fence was opened (its tiles are public now). */
 export interface OpenEnclosure {
@@ -20,6 +24,13 @@ export interface OpenEnclosure {
   tiles: number[];
   /** Simulated time (s) when the fence was opened. */
   openedAt: number;
+  /** Food a keeper left for the animals lingering in it (hunger units, like HabitatRuntime.food). */
+  food: number;
+  /** Water a keeper left in a tub, for a footprint without a pond or trough (thirst units). */
+  water: number;
+  /** Where the keeper left them (world metres, -1 = nowhere yet). */
+  spotX: number;
+  spotZ: number;
 }
 
 /** Save form: tiles as sorted runs [start, length, start, length, ...]. */
@@ -28,7 +39,22 @@ export interface OpenEnclosureSave {
   name: string;
   runs: number[];
   openedAt: number;
+  food?: number;
+  water?: number;
+  spotX?: number;
+  spotZ?: number;
 }
+
+/** Drinking spots left inside an opened enclosure's footprint. */
+export interface FootprintWater {
+  /** Land tiles at the water's edge. */
+  edge: number[];
+  /** Water trough object ids. */
+  troughs: number[];
+}
+
+const DX = [1, -1, 0, 0];
+const DZ = [0, 0, 1, -1];
 
 /** Opened enclosures remembered at most (oldest are forgotten first). */
 const MAX_OPEN = 8;
@@ -55,13 +81,80 @@ export class EnclosureMemory {
     this.open.length = 0;
     for (const s of saved) {
       if (!s || !s.id || this.sim.world.habitats.has(s.id) || !Array.isArray(s.runs)) continue;
-      this.open.push({ id: s.id, name: String(s.name ?? ''), tiles: decodeRuns(s.runs), openedAt: s.openedAt ?? this.sim.time });
+      this.open.push({
+        id: s.id,
+        name: String(s.name ?? ''),
+        tiles: decodeRuns(s.runs),
+        openedAt: s.openedAt ?? this.sim.time,
+        food: s.food ?? 0,
+        water: s.water ?? 0,
+        spotX: s.spotX ?? -1,
+        spotZ: s.spotZ ?? -1,
+      });
     }
     this.rebuildMask();
   }
 
   serialize(): OpenEnclosureSave[] {
-    return this.open.map((e) => ({ id: e.id, name: e.name, runs: encodeRuns(e.tiles), openedAt: e.openedAt }));
+    return this.open.map((e) => ({
+      id: e.id,
+      name: e.name,
+      runs: encodeRuns(e.tiles),
+      openedAt: e.openedAt,
+      food: Math.round(e.food * 100) / 100,
+      water: Math.round(e.water * 100) / 100,
+      spotX: Math.round(e.spotX * 100) / 100,
+      spotZ: Math.round(e.spotZ * 100) / 100,
+    }));
+  }
+
+  /** Animals still lingering in the old footprint (their home, not loose yet). */
+  residents(enc: OpenEnclosure): AnimalSim[] {
+    const out: AnimalSim[] = [];
+    for (const a of this.sim.animals.values()) if (a.home === enc.id && !a.escaped && !a.habitatId) out.push(a);
+    return out;
+  }
+
+  /** Path tiles within two steps of the old footprint: where a keeper can stand to service it. */
+  serviceTiles(enc: OpenEnclosure, out: number[]): void {
+    const w = this.sim.world;
+    for (const t of enc.tiles) {
+      if (this.openOf[t] !== enc.id) continue;
+      const x = t % MAP_W,
+        z = (t / MAP_W) | 0;
+      for (let k = 0; k < 4; k++)
+        for (let st = 1; st <= 2; st++) {
+          const nx = x + DX[k] * st,
+            nz = z + DZ[k] * st;
+          if (w.inBounds(nx, nz) && w.path[w.idx(nx, nz)] && this.openOf[w.idx(nx, nz)] !== enc.id) out.push(w.idx(nx, nz));
+        }
+    }
+  }
+
+  /** The pond edges and troughs still inside the old footprint. */
+  footprintWater(enc: OpenEnclosure): FootprintWater {
+    const w = this.sim.world;
+    const water = (i: number) => w.terrain[i] === Terrain.Water || w.terrain[i] === Terrain.DeepWater;
+    const res: FootprintWater = { edge: [], troughs: [] };
+    for (const t of enc.tiles) {
+      if (this.openOf[t] !== enc.id) continue;
+      const oid = w.objectGrid[t];
+      if (oid && w.objects.get(oid)?.defId === 'water_trough' && !res.troughs.includes(oid)) res.troughs.push(oid);
+      if (water(t)) continue;
+      const x = t % MAP_W,
+        z = (t / MAP_W) | 0;
+      for (let k = 0; k < 4; k++) {
+        const nx = x + DX[k],
+          nz = z + DZ[k];
+        if (!w.inBounds(nx, nz)) continue;
+        const n = w.idx(nx, nz);
+        if (this.openOf[n] === enc.id && water(n) && !w.fenceBetween(x, z, nx, nz)) {
+          res.edge.push(t);
+          break;
+        }
+      }
+    }
+    return res;
   }
 
   /** After World.recomputeHabitats: note vanished habitats and give re-closed ones their old identity. */
@@ -77,7 +170,10 @@ export class EnclosureMemory {
       for (const t of hab.tiles) if (!w.habitatOf[t]) publicTiles++;
       const opened = publicTiles * 2 > hab.tiles.length;
       this.sim.forgetHabitat(id, opened);
-      if (opened) this.open.push({ id, name: hab.name, tiles: hab.tiles, openedAt: this.sim.time });
+      // what the keeper left in the habitat stays where it was
+      const rt = this.sim.habRt.get(id);
+      if (opened)
+        this.open.push({ id, name: hab.name, tiles: hab.tiles, openedAt: this.sim.time, food: rt?.food ?? 0, water: 0, spotX: rt?.spotX ?? -1, spotZ: rt?.spotZ ?? -1 });
     }
     while (this.open.length > MAX_OPEN) this.sim.forgetHabitat(this.open.shift()!.id, false);
     for (const [id, hab] of w.habitats) {

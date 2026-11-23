@@ -7,7 +7,7 @@ import type { IAudio, IRenderContext, ISimulation, QualityLevel } from '../core/
 import type { LedgerEntry } from '../core/types';
 import { button, el, escapeHtml, fmtClock, fmtMoney, fmtPct, setText, storageSet, swallowPointer, toggleClass } from './dom';
 import { icon, type IconName } from './icons';
-import type { MessageLog } from './notify';
+import { UnreadBadge, type MessageLog } from './notify';
 import { logoSvg } from './screens';
 import { showDialog } from './panels';
 import { cue } from './sound';
@@ -23,6 +23,8 @@ export interface ZooPanelHost {
   newGame(): void;
   toast(text: string, kind: 'info' | 'good' | 'warn' | 'bad'): void;
   qualityChanged(q: QualityLevel): void;
+  /** A quality change is still being applied (creature meshes rebuild over a few seconds). */
+  qualityApplying(): boolean;
   /** Recent notifications (toasts), newest first. */
   log: MessageLog;
   /** Fly the camera to a ground point (a message's location). */
@@ -48,6 +50,7 @@ export class ZooPanel {
   private tab: ZooTab = 'finance';
   private refreshFn: (() => void) | null = null;
   private acc = 0;
+  private unread: UnreadBadge;
 
   constructor(private host: ZooPanelHost) {
     const tabs = el('div', 'wh-tabs');
@@ -60,6 +63,7 @@ export class ZooPanel {
       tabs.append(b);
     }
     tabs.append(el('div', 'wh-tabs-spacer'));
+    this.unread = new UnreadBadge(this.tabBtns.get('messages')!, host.log, 'Messages');
     const modal = el('div', 'wh-modal wh-glass-2', [
       tabs,
       el('div', 'wh-modal-main', [el('div', 'wh-modal-head', [this.heading, button('wh-btn-ghost wh-btn-icon', 'close', null, () => this.close(), 'Close')]), this.body]),
@@ -98,11 +102,12 @@ export class ZooPanel {
   }
 
   update(dt: number): void {
-    if (!this.isOpen || !this.refreshFn) return;
+    if (!this.isOpen) return;
     this.acc += dt;
     if (this.acc < 0.5) return;
     this.acc = 0;
-    this.refreshFn();
+    this.refreshFn?.();
+    this.unread.update();
   }
 
   showTab(tab: ZooTab): void {
@@ -117,8 +122,9 @@ export class ZooPanel {
     else if (tab === 'goals') this.refreshFn = this.goalsTab();
     else if (tab === 'stats') this.refreshFn = this.statsTab();
     else if (tab === 'messages') this.refreshFn = this.messagesTab();
-    else this.settingsTab();
+    else this.refreshFn = this.settingsTab();
     this.refreshFn?.();
+    this.unread.update();
   }
 
   // ------------------------------------------------------------ finance
@@ -302,6 +308,7 @@ export class ZooPanel {
     this.body.append(list);
     let shown = -1;
     return () => {
+      log.markRead();
       if (log.version === shown) return;
       shown = log.version;
       list.textContent = '';
@@ -328,10 +335,12 @@ export class ZooPanel {
   }
 
   // ------------------------------------------------------------ settings
-  private settingsTab(): void {
+  private settingsTab(): () => void {
     const ctx = this.host.ctx;
     const seg = el('div', 'wh-segtext');
     const levels: QualityLevel[] = ['low', 'medium', 'high'];
+    const applying = el('span', { class: 'wh-applying hidden', attrs: { role: 'status' }, html: '<i class="wh-spin"></i>Applying graphics settings…' });
+    const refresh = () => toggleClass(applying, 'hidden', !this.host.qualityApplying());
     const qBtns = levels.map((q) =>
       button(ctx.quality.level === q ? 'on' : '', null, q[0].toUpperCase() + q.slice(1), () => {
         if (ctx.quality.level === q) return;
@@ -339,6 +348,7 @@ export class ZooPanel {
         storageSet(QUALITY_KEY, q);
         this.host.qualityChanged(q);
         qBtns.forEach((b, i) => toggleClass(b, 'on', levels[i] === q));
+        refresh();
       }),
     );
     seg.append(...qBtns);
@@ -355,8 +365,10 @@ export class ZooPanel {
     sw.setAttribute('aria-checked', String(audio.enabled));
     const row = (title: string, sub: string, ctrl: HTMLElement) =>
       el('div', 'wh-setting', [el('div', { class: 'wh-setting-t', html: `<b>${escapeHtml(title)}</b><span>${escapeHtml(sub)}</span>` }), ctrl]);
+    const quality = row('Graphics quality', 'Lower settings save battery and run smoother on older phones. Edge smoothing changes after a restart.', seg);
+    quality.firstElementChild!.append(applying);
     this.body.append(
-      row('Graphics quality', 'Lower settings save battery and run smoother on older phones. Edge smoothing changes after a restart.', seg),
+      quality,
       row('Sound', 'Ambient sounds and effects.', sw),
       row(
         'Save game',
@@ -390,6 +402,7 @@ export class ZooPanel {
           '<span class="wh-only-mouse">Camera: drag to pan, right-drag to rotate, wheel to zoom, WASD / QE to move and turn. Esc closes panels, R rotates, Space pauses.</span>',
       }),
     );
+    return refresh;
   }
 
   dispose(): void {

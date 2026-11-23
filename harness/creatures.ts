@@ -1,6 +1,7 @@
 // Visual harness for the creature module.
 //   ?species=zebra&action=walk&speed=1.5&t=1.3&sex=M&yaw=30&dist=5&pitch=12&detail=1&growth=1
 //   ?grid=1                 all species side by side (+ a 1.8 m human for scale)
+//   ?grid=1&species=zebra,lion&ages=1,0.5,0.2&action=sleep   chosen species at several growths
 //   ?humans=1               a crowd of people with different actions / held items
 //   ?live=1                 keep animating (default: freeze at t when t is given)
 //   ?crowd=N                N people + a few herds spread over 120 m (LOD / draw-call stress test)
@@ -135,19 +136,24 @@ function human(app: Partial<HumanAppearance>, role: 'guest' | StaffRole, seed: n
 async function build(): Promise<THREE.Vector3> {
   const target = new THREE.Vector3();
   if (q.get('grid')) {
-    const ids = SPECIES.map((s) => s.id);
-    await factory.preload(ids);
+    const only = q.get('species')?.split(',');
+    const species = only ? SPECIES.filter((s) => only.includes(s.id)) : SPECIES;
+    await factory.preload(species.map((s) => s.id));
+    // ?ages=1,0.5,0.2: one model per growth for every species (juvenile proportions)
+    const ages = (q.get('ages') ?? String(num('growth', 1))).split(',').map(Number);
     let x = 1.2;
     const action = q.get('action') ?? 'idle';
-    for (const s of SPECIES) {
-      const m = factory.createAnimal(s.id, { seed: 3, sex: (q.get('sex') as 'M' | 'F') ?? 'M', growth: 1 });
-      const w = Math.max(0.8, m.radius * 2.0);
-      x += w / 2;
-      m.object.position.set(x, 0, 0);
-      m.object.rotation.y = Math.PI / 2 - 0.5;
-      x += w / 2 + 0.6;
-      scene.add(m.object);
-      entries.push({ model: m, anim: { action, speed: 0 } });
+    for (const s of species) {
+      for (const growth of ages) {
+        const m = factory.createAnimal(s.id, { seed: 3, sex: (q.get('sex') as 'M' | 'F') ?? 'M', growth });
+        const w = Math.max(0.8, m.radius * 2.0);
+        x += w / 2;
+        m.object.position.set(x, 0, 0);
+        m.object.rotation.y = Math.PI / 2 - 0.5;
+        x += w / 2 + 0.6;
+        scene.add(m.object);
+        entries.push({ model: m, anim: { action, speed: num('speed', 0) * m.object.scale.y, swimming: action === 'swim' } });
+      }
     }
     try {
       const h = human({}, 'guest', 1);

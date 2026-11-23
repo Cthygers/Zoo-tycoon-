@@ -166,8 +166,9 @@ function headPrims(): Prim[] {
 
 function earPrims(): Prim[] {
   const left: Prim[] = [
+    // no carved cup: carving the thin plate folds it into back-facing slivers that show as holes;
+    // the coat paints the inside instead
     ellipsoid('ear.L', [0.085, 2.21, 1.75], [0.03, 0.05, 0.018], { rot: [-0.3, 0.4, -0.35], blend: 0.02, part: 'ear', region: 'ears' }),
-    ellipsoid('ear.L', [0.088, 2.215, 1.757], [0.019, 0.035, 0.01], { rot: [-0.3, 0.4, -0.35], sub: true, blend: 0.005, part: 'ear', region: 'ears' }),
   ];
   return [...left, ...mirrorX(left)];
 }
@@ -249,8 +250,11 @@ function camelCoat(eye: Vec3) {
     const ex = ax - eye[0], ey = y - eye[1], ez = z - eye[2];
     const ed = Math.sqrt(ex * ex + ey * ey + ez * ez);
     if (ed < 0.04) blendHex(c.color, 0x2c1f16, smooth(0.04, 0.024, ed) * 0.85);
-    // ears: darker rims
-    if (c.part === 'ear') blendHex(c.color, 0x6b5036, 0.4);
+    // ears: darker, with paler hair in the opening (facing forward / outward)
+    if (c.part === 'ear') {
+      blendHex(c.color, 0x6b5036, 0.4);
+      blendHex(c.color, 0xcdb58e, smooth(0.2, 0.7, c.nz * 0.8 + Math.sign(x) * c.nx * 0.4) * 0.5);
+    }
     // calluses, pads, nails
     const cal = c.pw('callus');
     if (cal > 0.25) {
@@ -538,6 +542,8 @@ function design(ctx: DesignContext): CreatureDesign {
     anim: driver(makeDriver(ctx.def.height, ctx.def.walkSpeed, ctx.def.runSpeed)),
     babyScale: 0.4,
     babyHead: 1.25,
+    // calves stand on long legs
+    babyLegs: 1.3,
     height: 2.25,
     radius: 0.75,
   };

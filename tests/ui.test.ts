@@ -14,6 +14,8 @@ class FakeEl {
   textContent = '';
   innerHTML = '';
   title = '';
+  /** Every fake toast is one line tall. */
+  offsetHeight = 44;
   style: Record<string, string> = {};
   classList = {
     add: (c: string) => {
@@ -86,6 +88,23 @@ describe('Toasts', () => {
     expect(visible(t)).toContain('Gift shop opened');
   });
 
+  it('only shows what fits above the dock, and brings back what an open drawer pushed off', () => {
+    const t = make();
+    t.setRoom(60); // room for one toast (44 px + 8 px gap)
+    t.show('A guest complained', 'warn');
+    t.show('Tilly is hungry', 'warn');
+    expect(visible(t)).toEqual(['A guest complained']);
+    // a build drawer opens over the column: nothing fits, the barely seen toast waits too
+    t.setRoom(10);
+    expect(visible(t)).toEqual([]);
+    t.show('A baby giraffe was born!', 'good');
+    expect(visible(t)).toEqual([]);
+    // the drawer closes: the waiting toasts come back, as many as fit
+    t.setRoom(200);
+    expect(visible(t)).toEqual(['A guest complained', 'Tilly is hungry']);
+    expect(t.log.entries).toHaveLength(3);
+  });
+
   it('merges repeats of the same message', () => {
     const t = make();
     t.show('Tilly is hungry', 'bad');
@@ -107,6 +126,22 @@ describe('MessageLog', () => {
     expect(log.entries).toHaveLength(40);
     expect(log.entries[0]).toMatchObject({ count: 2, minute: 200 });
     expect(log.version).toBeGreaterThan(v);
+  });
+});
+
+describe('MessageLog unread warnings', () => {
+  it('counts warnings and problems since the log was last read', () => {
+    const log = new MessageLog();
+    log.add('Zoo saved', 'good', undefined, 1, 600);
+    log.add('A guest says hi', 'info', undefined, 1, 601);
+    expect(log.unread).toBe(0);
+    log.add('Guests want benches', 'warn', undefined, 1, 602);
+    expect(log).toMatchObject({ unread: 1, unreadBad: false });
+    log.add('Tilly is hungry', 'bad', undefined, 1, 603);
+    log.add('Tilly is hungry', 'bad', undefined, 1, 604); // a repeat is news too
+    expect(log).toMatchObject({ unread: 3, unreadBad: true });
+    log.markRead();
+    expect(log).toMatchObject({ unread: 0, unreadBad: false });
   });
 });
 

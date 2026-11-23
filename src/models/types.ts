@@ -291,6 +291,14 @@ export interface CreatureDesign {
   /** Extra head scale of a newborn, default 1.3. */
   babyHead?: number;
   /**
+   * Lower-leg scale of a newborn (the legs' `lower` bones: forearm / gaskin
+   * and everything below), easing linearly to 1 with growth. Foals and calves
+   * have long legs for their size (≈ 1.1–1.3), cubs short ones (≈ 0.8–0.9).
+   * The quadruped driver lifts or lowers the standing body to match, so the
+   * feet stay on the ground; lying and swimming heights are unchanged.
+   */
+  babyLegs?: number;
+  /**
    * Juvenile scale of single bones (children inherit it), easing to 1 over
    * growth 0.15 … 0.95: features that grow in with age (tusks, horns ≈ 0.05–0.1;
    * give them their own bone at the base) or that young animals have

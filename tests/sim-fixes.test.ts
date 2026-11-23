@@ -75,6 +75,61 @@ describe('opened enclosures', () => {
     expect(stray2.habitatId).toBe(hab.id);
   });
 
+  it('keepers still feed the animals lingering in an opened enclosure, and they drink from what is left in it', () => {
+    const { sim } = newSim(13);
+    const hid = buildZoo(sim);
+    const ids = buyHerd(sim, 'zebra', 4);
+    hire(sim);
+    expect(sim.removeFences([GAP]).ok).toBe(true);
+    const enc = sim.enclosures.find(hid)!;
+    expect(enc).toBeTruthy();
+    enc.food = 0;
+    const residents = () => ids.map((id) => sim.animals.get(id)!).filter((a) => !a.escaped && !a.habitatId && a.home === hid);
+    for (const a of residents()) {
+      a.needs.hunger = 0.3;
+      a.needs.thirst = 0.3;
+      a.think = 0;
+    }
+    // a keeper walks over from the avenue and leaves food from the path beside the old fence
+    sim.setSpeed(1);
+    const keeper = [...sim.staff.values()].find((s) => s.role === 'keeper')!;
+    let assigned = false;
+    let fed = 0;
+    for (let i = 0; i < 1200 && !fed; i++) {
+      sim.update(0.1);
+      if (keeper.job === 'service' && keeper.jobRef === hid) assigned = true;
+      fed = enc.food;
+    }
+    expect(assigned).toBe(true);
+    expect(fed).toBeGreaterThan(0);
+    expect(enc.spotX).toBeGreaterThan(0);
+    // the pond and the trough are still inside the old footprint: no tub needed
+    expect(enc.water).toBe(0);
+    for (const a of residents()) {
+      a.needs.hunger = 0.3; // hungry again, now that there is food
+      a.think = 0;
+    }
+    for (let i = 0; i < 600; i++) sim.update(0.1);
+    const left = residents();
+    expect(left.length).toBeGreaterThan(0);
+    for (const a of left) {
+      expect(a.needs.thirst).toBeGreaterThan(0.5);
+      expect(a.needs.hunger).toBeGreaterThan(0.5);
+    }
+    expect(enc.food).toBeLessThan(fed); // they ate the keeper's food
+
+    // without a pond or trough the keeper brings water in a tub, and it survives a save
+    expect(sim.bulldoze({ x0: 31, z0: 50, x1: 31, z1: 50 }).ok).toBe(true); // the trough
+    sim.world.setTerrainRect({ x0: HAB.x0, z0: HAB.z0, x1: HAB.x1, z1: HAB.z1 }, 1);
+    expect(sim.enclosures.footprintWater(enc)).toEqual({ edge: [], troughs: [] });
+    enc.food = 0;
+    for (let i = 0; i < 1200 && !enc.water; i++) sim.update(0.1);
+    expect(enc.water).toBeGreaterThan(0);
+    const sim2 = createSimulation(new EventBus(), 13) as Simulation;
+    sim2.load(sim.serialize());
+    expect(sim2.enclosures.find(hid)).toMatchObject({ food: expect.any(Number), water: expect.closeTo(enc.water, 1) });
+  });
+
   it('enlarging a habitat (remove a side, fence a bigger area) keeps its name and contains its animals', () => {
     const { sim, log } = newSim(12);
     const hid = buildZoo(sim);

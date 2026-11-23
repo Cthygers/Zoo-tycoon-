@@ -145,8 +145,9 @@ function teethPrims(): Prim[] {
 
 function earPrims(): Prim[] {
   const left: Prim[] = [
+    // no carved cup: carving the thin plate folds it into back-facing slivers that show as holes;
+    // the coat paints the inside instead
     ellipsoid('ear.L', [0.185, 1.43, 1.28], [0.045, 0.06, 0.03], { rot: [0, 0.5, -0.3], blend: 0.025, part: 'ear', region: 'ears' }),
-    ellipsoid('ear.L', [0.19, 1.44, 1.295], [0.03, 0.045, 0.014], { rot: [0, 0.5, -0.3], sub: true, blend: 0.006, part: 'ear', region: 'ears' }),
   ];
   return [...left, ...mirrorX(left)];
 }
@@ -214,9 +215,11 @@ function hippoCoat(eye: Vec3) {
     blendHex(c.color, PINK, clamp01(face) * 0.75);
     // reddish "blood sweat" sheen
     blendHex(c.color, 0x7a4b3a, smooth(0.15, 0.45, fbm(x * 3, y * 3, z * 3, 2, 103)) * 0.14);
+    // broad warmer, browner patches on the flanks (no flat grey)
+    blendHex(c.color, 0x6e5a4f, smooth(-0.05, 0.3, fbm(x * 0.8, y * 0.8, z * 0.8, 2, 105)) * 0.45 * smooth(0.7, 0.1, c.ny));
     c.color2.copy(c.color).multiplyScalar(0.62);
     c.w = 0;
-    c.gloss = 0.18;
+    c.gloss = 0.1;
     // neck folds
     if (c.part === 'neck' || (c.pw('neck') > 0.3 && z > 0.8)) {
       c.s = (z - 0.95) / 0.075 + n * 0.8;
@@ -244,7 +247,7 @@ function hippoCoat(eye: Vec3) {
       const inner = smooth(0.2, 0.1, ax) * smooth(2.2, 2.04, z) * smooth(1.7, 1.85, z);
       blendHex(c.color, 0x4f3433, k * (1 - inner));
       blendHex(c.color, y > MOUTH_Y ? GUM : TONGUE, k * inner);
-      c.gloss = 0.45 * k + 0.18 * (1 - k);
+      c.gloss = 0.45 * k + 0.1 * (1 - k);
       c.w = 0;
     }
     if (c.part === 'tooth') {
@@ -257,6 +260,12 @@ function hippoCoat(eye: Vec3) {
       c.w = 0;
     }
     if (c.part === 'tuft') blendHex(c.color, 0x2a201c, 0.7);
+    // baked occlusion: neck folds, elbows and the gaps between legs and belly,
+    // eye turrets, ear roots and the mouth line (the bulky relief stays
+    // readable on every tier, also without micro detail)
+    const occ = c.ao(0.22);
+    c.color.multiplyScalar(1 - 0.55 * occ);
+    c.color2.multiplyScalar(1 - 0.55 * occ);
   };
 }
 
@@ -480,11 +489,14 @@ function design(ctx: DesignContext): CreatureDesign {
       tail: { scale: 0.3, aniso: [1, 1.5, 1] },
     },
     coat: hippoCoat(eye),
-    look: { skin: 'wrinkled', pattern: 'stripes', roughness: 0.62, sheen: 0.05, grain: 0.012, bump: 0.12, mottle: 0.1 },
+    // moist but not mirror-like: a glossier skin only reflects the sky and reads flat grey
+    look: { skin: 'wrinkled', pattern: 'stripes', roughness: 0.74, sheen: 0.05, grain: 0.012, bump: 0.12, mottle: 0.1 },
     eyes: [{ bone: 'head', pos: eye, radius: 0.026, color: 0x2a1609 }],
     anim: driver(makeDriver(ctx.def.height, ctx.def.walkSpeed, ctx.def.runSpeed)),
     babyScale: 0.25,
     babyHead: 1.2,
+    // calves are leggier than adults
+    babyLegs: 1.12,
     height: 1.55,
     radius: 1.0,
   };

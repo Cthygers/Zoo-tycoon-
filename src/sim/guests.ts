@@ -40,9 +40,15 @@ const FAIR_BASE = 13.5;
 const FAIR_PER_ATTRACTION = 0.25;
 /** Share of guests who stop to look at an exhibit they pass on the way somewhere else. */
 const GLANCE_CHANCE = 0.7;
+/** Longest look at an exhibit passed on the way to another (sim seconds, see arrive). */
+const GLANCE_SECONDS = 9;
 /** With more than this many tiles to go, guests walk briskly (this much faster than their stroll). */
 const BRISK_AFTER = 12;
 const BRISK = 1.2;
+/** Visit time left (sim seconds, ≈ 6 game hours) at which a party weighs distance as usual (see chooseHabitat). */
+const VISIT_AHEAD = 120;
+/** Visit time (sim seconds, ≈ 1 game hour) a new plan leaves spare for a stop on the way. */
+const PLAN_SLACK = 20;
 /**
  * Relative arrival rate for each hour of the day: a morning rush after the gates
  * open, a lunchtime plateau, then fewer and fewer newcomers towards closing.
@@ -114,6 +120,13 @@ export class GuestSystem {
       f = (out) => {
         const h = sim.world.habitats.get(id);
         if (h) for (const t of h.viewTiles) out.push(t);
+      };
+    } else if (key.startsWith('open:')) {
+      // an opened enclosure (keepers still service it): the paths beside its old footprint
+      const id = Number(key.slice(5));
+      f = (out) => {
+        const enc = sim.enclosures.find(id);
+        if (enc) sim.enclosures.serviceTiles(enc, out);
       };
     } else if (key.startsWith('t:')) {
       const t = Number(key.slice(2));
@@ -1102,6 +1115,8 @@ export class GuestSystem {
     if (!hab || this.crowdAt(habId) > Math.max(4, hab.viewTiles.length * 0.5)) return false;
     const n = this.partyNeeds(g);
     if (n.bladder < 0.3 || n.hunger < 0.3 || n.thirst < 0.3 || n.energy < 0.3) return false;
+    // not if the look would leave no time for the exhibit the party set out for (it can look on the way back)
+    if (g.plan && g.plan !== habId && this.tripTime(g, g.plan) + GLANCE_SECONDS > g.visitLeft) return false;
     // stand right here at the fence (the plan stays: think() resumes it afterwards)
     this.setGoal(g, 'view', `t:${g.tile}`, habId);
     this.arrive(g);
@@ -1573,8 +1588,11 @@ export class GuestSystem {
    * snack, a restroom or a look at another exhibit on the way). Otherwise it
    * weighs every exhibit it still has time for by what it would see: the
    * exhibit itself plus the unseen ones the walk there passes (most people
-   * stop for a look on the way). Nearer is likelier, though how far people
-   * are happy to head first differs, and crowded fence lines put them off.
+   * stop for a look on the way). What counts against an exhibit is the walk
+   * it adds to the way out, so the day makes a loop: with most of the visit
+   * ahead a party is happy to head for the far exhibits first, and on the way
+   * back the ones near the gate cost little. How far people are happy to go
+   * differs, and crowded fence lines put them off.
    */
   private chooseHabitat(g: GuestSim): boolean {
     const sim = this.sim;
@@ -1583,7 +1601,10 @@ export class GuestSystem {
       return true;
     }
     g.plan = 0;
-    const reach = 10 + 30 * hash01(g.seed, 23); // tiles
+    // tiles of detour they shrug off; more with a long visit ahead (VISIT_AHEAD sim seconds ≈ 6 game hours)
+    const reach = (10 + 30 * hash01(g.seed, 23)) * Math.min(2, Math.max(0.6, g.visitLeft / VISIT_AHEAD));
+    const home = this.distance('exit', g.tile);
+    const fresh = !g.viewed.length || home === FAR;
     let best = 0,
       bestScore = 0;
     for (const hab of sim.world.habitats.values()) {
@@ -1598,10 +1619,15 @@ export class GuestSystem {
       }
       const viewed = g.viewed.includes(hab.id);
       const d = this.distance(`hab:${hab.id}`, g.tile);
-      if (d === FAR || this.tripTime(g, hab.id) > g.visitLeft) continue;
+      // with room for a snack or restroom stop on the way, so the party still makes it there
+      if (d === FAR || this.tripTime(g, hab.id) + PLAN_SLACK > g.visitLeft) continue;
       const value = appeal * (viewed ? 0.1 : unseen ? 1 : 0.5) + this.sightsOnTheWay(g, hab.id);
       const crowd = this.crowdAt(hab.id) / Math.max(4, hab.viewTiles.length * 0.5);
-      const score = (value * (0.75 + 0.5 * sim.rng.float())) / ((1 + d / reach) * (1 + crowd * crowd));
+      // a party that has seen nothing yet picks where to head mostly by what it would see there and
+      // on the way (the round trip counts as its share of the visit left; it can catch the near
+      // exhibits coming back); later picks weigh the walk they add to the way out
+      const far = fresh ? 1 + this.tripTime(g, hab.id) / g.visitLeft : 1 + Math.max(0, d + this.habExitDist(hab.id) - home) / (2 * reach);
+      const score = (value * (0.75 + 0.5 * sim.rng.float())) / (far * (1 + crowd * crowd));
       if (score > bestScore) {
         bestScore = score;
         best = hab.id;
@@ -1928,7 +1954,7 @@ export class GuestSystem {
     const hab = sim.world.habitats.get(g.goalRef);
     g.action = 'watch';
     // a stop on the way somewhere is a shorter look than the exhibit the party came for
-    g.timer = g.plan && g.plan !== hab?.id ? rng.range(5, 9) : rng.range(9, 17);
+    g.timer = g.plan && g.plan !== hab?.id ? rng.range(5, GLANCE_SECONDS) : rng.range(9, 17);
     g.funRate = 0;
     if (!hab) return;
     let count = 0,

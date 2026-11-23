@@ -3,6 +3,7 @@
 //   createRenderContext(container, world, events, level) → IRenderContext
 //   detectQuality()                                      → QualityLevel
 //   qualitySettings(level)                               → QualitySettings
+//   useEnvMapIntensity(material)  (envIntensity.ts)      → honour envMapIntensity
 //
 // The context owns the WebGL2 renderer, camera, sky / time of day, sun & moon
 // lighting with shadows, PMREM environment, terrain (+ decorative outer
@@ -15,6 +16,7 @@ import { RenderContext } from './context';
 
 export { detectQuality, qualitySettings } from './quality';
 export { RenderContext } from './context';
+export { useEnvMapIntensity } from './envIntensity';
 /** Re-exported for compatibility; the source of truth is core/constants. */
 export { DECK_Y } from '../core/constants';
 
@@ -29,9 +31,11 @@ export async function createRenderContext(
   level: QualityLevel,
 ): Promise<IRenderContext> {
   const ctx = new RenderContext(container, world, events, level);
-  // Let the browser breathe once (loading screen can update), then warm up
-  // shaders so the first real frame does not hitch.
+  // Let the browser breathe once (loading screen can update), render the
+  // procedural textures in small passes, then warm up the scene's shaders so
+  // the first real frame does not hitch.
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  await ctx.prepare();
   try {
     await ctx.renderer.compileAsync(ctx.scene, ctx.camera);
   } catch {

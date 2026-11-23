@@ -399,7 +399,7 @@ export class RenderContext implements IRenderContext {
     this.camera.position.set(WORLD_W / 2, 35, WORLD_H + 10);
     this.camera.lookAt(this.focus);
 
-    // ---- procedural textures
+    // ---- procedural textures (rendered by prepare())
     this.textures = this.createTextures(env);
 
     // ---- sky
@@ -484,17 +484,24 @@ export class RenderContext implements IRenderContext {
     this.setFocus(this.focus.x, this.focus.z, this.viewRadius);
   }
 
+  /**
+   * Render the procedural textures in small GPU batches spread over many tasks
+   * (no long main-thread stall while loading). Call once before the first frame.
+   */
+  prepare(): Promise<void> {
+    return this.textures.generateAsync();
+  }
+
   private createTextures(env: EnvTier): GroundTextures {
     const aniso = Math.min(this.renderer.capabilities.getMaxAnisotropy(), env.anisotropy);
-    const t = new GroundTextures(this.renderer, env.groundRes, aniso);
-    t.generate();
-    return t;
+    return new GroundTextures(this.renderer, env.groundRes, aniso);
   }
 
   /** Regenerate the ground textures for another tier and re-point every user. */
   private replaceTextures(env: EnvTier) {
     const old = this.textures;
     const t = (this.textures = this.createTextures(env));
+    t.generate();
     this.groundU.uAlbedoArr.value = t.albedo;
     this.groundU.uDetailArr.value = t.detail;
     this.groundU.uNoise.value = t.noise;

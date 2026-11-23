@@ -12,14 +12,54 @@
 //     automatic capacity growth (instances and vertex / index buffers), and a
 //     per-frame bounding sphere so a batch with nothing on screen is skipped.
 //   * SkinnedBatch — per-instance bone matrices + look parameters in one float
-//     DataTexture (see skinning.ts), uploaded once per frame (only the rows in
-//     use).
+//     DataTexture (see skinning.ts); each frame only the blocks written since
+//     the last upload are sent (creatures animated at a reduced rate, see
+//     views, skip frames).
+//
+// Every texture upload costs a bind + texSubImage2D (and a GPU-process copy on
+// Android), so all three per-batch textures upload only what changed: the
+// matrix texture when an instance moved, the draw-id texture (one per pass)
+// when the culled / sorted list differs from the one on the GPU.
 
 import * as THREE from 'three';
 import type { CrowdUniforms } from './skinning';
 
 const _box = new THREE.Box3();
 const _v = new THREE.Vector3();
+
+// three.js internals of BatchedMesh used here (r187)
+interface BatchedInternals {
+  _indirectTexture: THREE.DataTexture;
+  _matricesTexture: THREE.DataTexture;
+}
+
+/**
+ * Draw-id texture (BatchedMesh's per-pass instance list) that uploads only when
+ * three writes a list different from the one on the GPU: three flags the list
+ * for upload on every pass, though a still crowd draws the same ids.
+ */
+export class DrawIdTexture extends THREE.DataTexture {
+  /** Ids last flagged for upload (null while three's constructor runs); starts impossible so the first list always uploads. */
+  private sent: Uint32Array | null = null;
+
+  constructor(size: number) {
+    super(new Uint32Array(size * size), size, size, THREE.RedIntegerFormat, THREE.UnsignedIntType);
+    this.sent = new Uint32Array(size * size).fill(0xffffffff);
+  }
+
+  override set needsUpdate(value: boolean) {
+    if (!value) return;
+    const ids = this.image.data as Uint32Array;
+    const sent = this.sent;
+    if (sent) {
+      let i = 0;
+      while (i < ids.length && ids[i] === sent[i]) i++;
+      if (i === ids.length) return;
+      sent.set(ids);
+    }
+    super.needsUpdate = true;
+  }
+}
 
 export interface BatchGeometryInfo {
   id: number;
@@ -40,6 +80,9 @@ export class FilteredBatch extends THREE.BatchedMesh {
   /** (id, main geometry id) pairs swapped to their shadow geometry for the current shadow pass. */
   private readonly swapped: number[] = [];
   private readonly geometries = new Map<string, BatchGeometryInfo>();
+  /** Draw-id textures of the main and shadow passes (swapped into three before each pass). */
+  private mainIds: DrawIdTexture;
+  private shadowIds: DrawIdTexture;
   private boundsCount = 0;
   private boundsRadius = 0;
   /** Live instances (not counting freed ids). */
@@ -53,6 +96,17 @@ export class FilteredBatch extends THREE.BatchedMesh {
     this.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 0);
     this.castShadow = true;
     this.receiveShadow = true;
+    [this.mainIds, this.shadowIds] = this.makeIdTextures();
+  }
+
+  /** Replace three's draw-id texture (after construction / growth) by one change-tracked texture per pass. */
+  private makeIdTextures(): [DrawIdTexture, DrawIdTexture] {
+    const internal = this as unknown as BatchedInternals;
+    const size = internal._indirectTexture.image.width;
+    internal._indirectTexture.dispose();
+    const main = new DrawIdTexture(size);
+    internal._indirectTexture = main;
+    return [main, new DrawIdTexture(size)];
   }
 
   /** Geometry id for a key, or -1 when the key was never added. */
@@ -128,7 +182,11 @@ export class FilteredBatch extends THREE.BatchedMesh {
   }
 
   protected grow(capacity: number): void {
+    // three disposes and re-creates the texture it holds (one of ours)
     this.setInstanceCount(capacity);
+    this.mainIds.dispose();
+    this.shadowIds.dispose();
+    [this.mainIds, this.shadowIds] = this.makeIdTextures();
     this.ensureFlags(capacity);
   }
 
@@ -178,6 +236,15 @@ export class FilteredBatch extends THREE.BatchedMesh {
     if (this.getGeometryIdAt(id) !== geometryId) this.setGeometryIdAt(id, geometryId);
   }
 
+  /** Same as BatchedMesh's, but an unchanged matrix does not re-upload the matrix texture (resting animals). */
+  override setMatrixAt(id: number, matrix: THREE.Matrix4): this {
+    const stored = (this as unknown as BatchedInternals)._matricesTexture.image.data as Float32Array;
+    const e = matrix.elements;
+    const o = id * 16;
+    for (let i = 0; i < 16; i++) if (stored[o + i] !== Math.fround(e[i])) return super.setMatrixAt(id, matrix);
+    return this;
+  }
+
   // ---- per-frame bounds (lets three skip the whole batch when nothing is in view)
   beginBounds(): void {
     _box.makeEmpty();
@@ -205,6 +272,18 @@ export class FilteredBatch extends THREE.BatchedMesh {
     _box.getCenter(s.center);
     s.radius = _box.getSize(_v).length() * 0.5 + this.boundsRadius;
     this.castShadow = this.anyShadow;
+  }
+
+  onBeforeRender(
+    renderer: THREE.WebGLRenderer,
+    scene: THREE.Scene,
+    camera: THREE.Camera,
+    geometry: THREE.BufferGeometry,
+    material: THREE.Material,
+    group: THREE.Group,
+  ): void {
+    (this as unknown as BatchedInternals)._indirectTexture = this.mainIds;
+    super.onBeforeRender(renderer, scene, camera, geometry, material, group);
   }
 
   // ---- shadow pass: hide instances that do not cast shadows
@@ -235,6 +314,7 @@ export class FilteredBatch extends THREE.BatchedMesh {
         }
       }
     }
+    (this as unknown as BatchedInternals)._indirectTexture = this.shadowIds;
     super.onBeforeShadow(renderer, scene, camera, shadowCamera, geometry, depthMaterial, group);
   }
 
@@ -254,11 +334,16 @@ export class FilteredBatch extends THREE.BatchedMesh {
 
   /** Instance ids of the last computed multi-draw list, in draw order. */
   lastDrawIds(out: number[] = []): number[] {
-    const tex = (this as unknown as { _indirectTexture: THREE.DataTexture })._indirectTexture;
-    const data = tex.image.data as Uint32Array;
+    const data = (this as unknown as BatchedInternals)._indirectTexture.image.data as Uint32Array;
     out.length = 0;
     for (let i = 0; i < this.lastDrawCount; i++) out.push(data[i]);
     return out;
+  }
+
+  dispose(): void {
+    // three disposes the texture it holds; the other pass's is ours to free
+    (this.mainIds === (this as unknown as BatchedInternals)._indirectTexture ? this.shadowIds : this.mainIds).dispose();
+    super.dispose();
   }
 }
 
@@ -276,6 +361,12 @@ export class SkinnedBatch extends FilteredBatch {
   texture: THREE.DataTexture;
   private readonly uniforms: CrowdUniforms[];
   private maxUsed = 0;
+  /** Texel span [lo, hi) written per texture row since the last flush. */
+  private dirtyLo = new Int32Array(0);
+  private dirtyHi = new Int32Array(0);
+  private anyDirty = false;
+  /** A new texture's first upload must be whole: update ranges would leave the rest of it undefined. */
+  private uploadWhole = true;
 
   constructor(
     name: string,
@@ -303,6 +394,10 @@ export class SkinnedBatch extends FilteredBatch {
     this.data = data;
     const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.FloatType);
     tex.needsUpdate = true;
+    this.uploadWhole = true;
+    this.dirtyLo = new Int32Array(h).fill(w);
+    this.dirtyHi = new Int32Array(h);
+    this.anyDirty = false;
     for (const u of this.uniforms) {
       u.crData.value = tex;
       u.crStride.value = this.stride;
@@ -322,31 +417,66 @@ export class SkinnedBatch extends FilteredBatch {
     const o = id * this.stride * 4;
     this.data.fill(0, o, o + this.stride * 4);
     if (id + 1 > this.maxUsed) this.maxUsed = id + 1;
+    this.markTexels(id * this.stride, (id + 1) * this.stride);
   }
 
-  /** Float offset of an instance's block in `data`. */
+  /** Flag texels [from, to) for the next flush. */
+  private markTexels(from: number, to: number): void {
+    const w = this.texture.image.width;
+    while (from < to) {
+      const row = Math.floor(from / w);
+      const x0 = from - row * w;
+      const x1 = Math.min(to - row * w, w);
+      if (x0 < this.dirtyLo[row]) this.dirtyLo[row] = x0;
+      if (x1 > this.dirtyHi[row]) this.dirtyHi[row] = x1;
+      from = row * w + x1;
+    }
+    this.anyDirty = true;
+  }
+
+  /**
+   * Float offset of an instance's look texels in `data`. Callers write them
+   * right after, so they are flagged for the next upload.
+   */
   offset(id: number): number {
-    return id * this.stride * 4;
+    const t = id * this.stride;
+    this.markTexels(t, t + this.look);
+    return t * 4;
   }
 
-  /** Float offset of an instance's first bone row. */
+  /**
+   * Float offset of an instance's first bone row. Callers write the pose right
+   * after, so the bone rows are flagged for the next upload (a creature that
+   * was not re-posed this frame uploads nothing).
+   */
   boneOffset(id: number): number {
-    return (id * this.stride + this.look) * 4;
+    const t = id * this.stride + this.look;
+    this.markTexels(t, t + this.bones * 3);
+    return t * 4;
   }
 
-  /** Mark the rows in use for upload (call once per frame after writing). */
+  /** Upload the texels written since the last flush (call once per frame after writing). */
   flush(): void {
-    if (!this.live) return;
+    if (!this.anyDirty && !this.uploadWhole) return;
     const tex = this.texture;
     const w = tex.image.width;
-    const rows = Math.min(tex.image.height, Math.ceil((this.maxUsed * this.stride) / w));
-    if (rows >= tex.image.height) {
-      tex.clearUpdateRanges();
-    } else {
-      tex.clearUpdateRanges();
-      for (let r = 0; r < rows; r++) tex.addUpdateRange(r * w * 4, w * 4);
+    tex.clearUpdateRanges();
+    if (!this.uploadWhole) {
+      let dirty = 0;
+      for (let r = 0; r < this.dirtyLo.length; r++) {
+        const n = this.dirtyHi[r] - this.dirtyLo[r];
+        if (n <= 0) continue;
+        tex.addUpdateRange((r * w + this.dirtyLo[r]) * 4, n * 4);
+        dirty += n;
+      }
+      // mostly rewritten (a crowd of walkers): one whole upload beats a call per row
+      if (this.dirtyLo.length > 1 && dirty * 4 >= this.maxUsed * this.stride * 3) tex.clearUpdateRanges();
     }
     tex.needsUpdate = true;
+    this.uploadWhole = false;
+    this.anyDirty = false;
+    this.dirtyLo.fill(w);
+    this.dirtyHi.fill(0);
   }
 
   dispose(): void {

@@ -91,10 +91,10 @@ function headPrims(): Prim[] {
     ellipsoid('head', hp(0, -0.05, 0.402), [0.033, 0.025, 0.02], { rot: [0.3, 0, 0], blend: 0.014, part: 'nose' }),
     // lower jaw
     ellipsoid('jaw', hp(0, -0.106, 0.22), [0.055, 0.034, 0.12], { rot: [0.12, 0, 0], blend: 0.035, part: 'chin' }),
-    // small rounded ears
+    // small rounded ears; no carved cup: carving the thin plate folds it into back-facing slivers
+    // that show as holes; the coat paints the inside instead
     ...symmetric([
       ellipsoid('ear.L', hp(0.086, 0.088, -0.005), [0.033, 0.031, 0.02], { rot: [-0.2, 0.4, -0.55], blend: 0.025, part: 'ear', region: 'ears' }),
-      ellipsoid('ear.L', hp(0.09, 0.092, 0.006), [0.019, 0.018, 0.009], { rot: [-0.2, 0.4, -0.55], sub: true, blend: 0.006, part: 'ear', region: 'ears' }),
     ]),
   ];
   return withRegion(P, 'head');

@@ -4,7 +4,7 @@
 
 import * as THREE from 'three';
 import type { NotifyKind } from '../core/events';
-import { el, escapeHtml, fmtMoney, setText, swallowPointer } from './dom';
+import { el, escapeHtml, fmtMoney, setText, swallowPointer, toggleClass } from './dom';
 import { icon, type IconName } from './icons';
 import { cue } from './sound';
 
@@ -17,6 +17,12 @@ const MIN_LIFE = 2400;
 /** Waiting toasts beyond this are dropped (oldest routine ones first); the message log keeps them. */
 const MAX_QUEUED = 6;
 const LOG_SIZE = 40;
+/** Gap between the cards of the toast column (px, as in .wh-toasts). */
+const GAP = 8;
+/** Height (px) assumed for a toast that has not been on screen yet: one line of text. */
+const TOAST_H = 44;
+/** Height (px) assumed for a "Goal complete" card that has not been on screen yet. */
+const CARD_H = 88;
 
 const urgent = (k: NotifyKind) => k === 'warn' || k === 'bad';
 
@@ -35,9 +41,17 @@ export class MessageLog {
   readonly entries: LogEntry[] = [];
   /** Bumped on every change, so a list can cheaply tell whether to re-render. */
   version = 0;
+  /** Warnings and problems logged since the Messages tab was last looked at. */
+  unread = 0;
+  /** At least one of them is a problem ('bad'), not just a warning. */
+  unreadBad = false;
 
   add(text: string, kind: NotifyKind, focus: { x: number; z: number } | undefined, day: number, minute: number): void {
     this.version++;
+    if (urgent(kind)) {
+      this.unread++;
+      if (kind === 'bad') this.unreadBad = true;
+    }
     const last = this.entries[0];
     if (last && last.text === text && last.kind === kind) {
       last.count++;
@@ -47,6 +61,38 @@ export class MessageLog {
     }
     this.entries.unshift({ text, kind, focus, day, minute, count: 1 });
     if (this.entries.length > LOG_SIZE) this.entries.length = LOG_SIZE;
+  }
+
+  /** The player is looking at the Messages tab. */
+  markRead(): void {
+    this.unread = 0;
+    this.unreadBad = false;
+  }
+}
+
+/** Count of unread warnings on a button (the menu button, the Messages tab); call update() to refresh. */
+export class UnreadBadge {
+  private readonly badge = el('span', { class: 'wh-badge hidden', attrs: { 'aria-hidden': 'true' } });
+  private shown = '';
+
+  /** `label`: the button's accessible name, which then also says how many are new. */
+  constructor(
+    private button: HTMLElement,
+    private log: MessageLog,
+    private label?: string,
+  ) {
+    button.append(this.badge);
+  }
+
+  update(): void {
+    const n = this.log.unread;
+    const key = n ? `${n}${this.log.unreadBad ? 'b' : ''}` : '';
+    if (key === this.shown) return;
+    this.shown = key;
+    toggleClass(this.badge, 'hidden', !n);
+    toggleClass(this.badge, 'bad', this.log.unreadBad);
+    setText(this.badge, n > 9 ? '9+' : String(n));
+    if (this.label) this.button.setAttribute('aria-label', n ? `${this.label} (${n} new warning${n > 1 ? 's' : ''})` : this.label);
   }
 }
 
@@ -60,19 +106,34 @@ interface ToastRec {
   timer: number;
   shownAt: number;
   expiresAt: number;
+  /** Measured height (px) once it has been on screen, 0 before. */
+  height: number;
+}
+
+/** Height (px) the live cards of a toast column take, gaps included (leaving ones don't count). */
+function columnHeight(col: HTMLElement): number {
+  let h = 0;
+  for (const c of col.children) if (!c.classList.contains('out')) h += (c as HTMLElement).offsetHeight + GAP;
+  return h;
 }
 
 /**
  * Toast stack. On a short screen only two fit, so extra messages wait in a queue
  * (warnings first) instead of pushing the visible ones off at once; while
- * something waits, visible toasts leave after MIN_LIFE. Every message is also
- * written to the log.
+ * something waits, visible toasts leave after MIN_LIFE. The column also never
+ * grows past the room GameUI gives it (setRoom), so it never covers the dock,
+ * an open build drawer or the tool bar: messages wait while there is no room.
+ * Every message is also written to the log.
  */
 export class Toasts {
   readonly root = el('div', 'wh-toasts');
   readonly log = new MessageLog();
   private list: ToastRec[] = [];
   private queue: ToastRec[] = [];
+  /** Height (px) the column may fill. */
+  private room = Infinity;
+  /** Ongoing-work line at the top of the column (e.g. applying graphics settings), if any. */
+  private status: HTMLElement | null = null;
 
   constructor(
     private onFocus: (x: number, z: number) => void,
@@ -97,11 +158,11 @@ export class Toasts {
       }
       return;
     }
-    const rec: ToastRec = { text, kind, focus, count: 1, root: null, countEl: null, timer: 0, shownAt: 0, expiresAt: 0 };
-    if (this.list.length >= this.capacity) {
+    const rec: ToastRec = { text, kind, focus, count: 1, root: null, countEl: null, timer: 0, shownAt: 0, expiresAt: 0, height: 0 };
+    if (this.list.length >= this.capacity || !this.fits(TOAST_H)) {
       // a warning takes the place of the oldest routine toast rather than waiting behind it
       const routine = urgent(kind) ? this.list.find((t) => !urgent(t.kind)) : undefined;
-      if (!routine) {
+      if (!routine || !this.fits(TOAST_H, routine)) {
         this.enqueue(rec);
         return;
       }
@@ -110,6 +171,55 @@ export class Toasts {
       if (performance.now() - routine.shownAt < MIN_LIFE) this.enqueue(this.requeued(routine));
     }
     this.display(rec);
+  }
+
+  /**
+   * Height (px) the column may fill below its top edge: GameUI keeps it clear of the
+   * dock, drawer and tool bar. Toasts that no longer fit leave, oldest first (and come
+   * back later if they were barely seen); waiting ones appear as room frees up.
+   */
+  setRoom(px: number): void {
+    this.room = px;
+    // the status line steps aside (but stays) while there is no room for it at all
+    if (this.status) toggleClass(this.status, 'hidden', TOAST_H + GAP > px);
+    // oldest first; they line up again in the order they were shown
+    const off: ToastRec[] = [];
+    while (this.list.length && columnHeight(this.root) > px) {
+      const t = this.list[0];
+      this.remove(t, false);
+      if (performance.now() - t.shownAt < MIN_LIFE) off.push(this.requeued(t));
+    }
+    if (off.length) {
+      this.queue.unshift(...off);
+      this.trimQueue();
+    }
+    this.fill();
+  }
+
+  /** Show (text) or clear (null) a line about ongoing work, with a spinner, at the top of the column. */
+  setStatus(text: string | null): void {
+    if (!text) {
+      this.status?.remove();
+      this.status = null;
+      return;
+    }
+    if (!this.status) {
+      this.status = el('div', { class: 'wh-toast wh-glass-2 info wh-toast-status', attrs: { role: 'status' } });
+      toggleClass(this.status, 'hidden', TOAST_H + GAP > this.room);
+      this.root.prepend(this.status);
+    }
+    this.status.innerHTML = `<i class="wh-spin"></i><span>${escapeHtml(text)}</span>`;
+  }
+
+  /** Would a toast of height `h` fit in the column (after `without` left)? */
+  private fits(h: number, without?: ToastRec): boolean {
+    const freed = without?.root ? without.root.offsetHeight + GAP : 0;
+    return columnHeight(this.root) - freed + h <= this.room;
+  }
+
+  /** Show waiting toasts while there is room for them. */
+  private fill(): void {
+    while (this.queue.length && this.list.length < this.capacity && this.fits(this.queue[0].height || TOAST_H)) this.display(this.queue.shift()!);
   }
 
   /** A fresh record (no DOM yet) for a toast that was evicted early. */
@@ -122,11 +232,15 @@ export class Toasts {
     const at = urgent(rec.kind) ? this.queue.findIndex((t) => !urgent(t.kind)) : -1;
     if (at < 0) this.queue.push(rec);
     else this.queue.splice(at, 0, rec);
-    if (this.queue.length > MAX_QUEUED) {
+    this.trimQueue();
+    this.hurry();
+  }
+
+  private trimQueue(): void {
+    while (this.queue.length > MAX_QUEUED) {
       const drop = this.queue.findIndex((t) => !urgent(t.kind));
       this.queue.splice(drop < 0 ? 0 : drop, 1);
     }
-    this.hurry();
   }
 
   /** Shorten what is on screen so the queue drains, but never below MIN_LIFE. */
@@ -167,6 +281,7 @@ export class Toasts {
     rec.shownAt = performance.now();
     this.list.push(rec);
     this.root.append(root);
+    rec.height = root.offsetHeight;
     this.schedule(rec, rec.shownAt + (this.queue.length ? MIN_LIFE : LIFE[rec.kind]));
   }
 
@@ -179,9 +294,7 @@ export class Toasts {
     const root = rec.root!;
     root.classList.add('out');
     window.setTimeout(() => root.remove(), 300);
-    if (!refill) return;
-    const next = this.queue.shift();
-    if (next) this.display(next);
+    if (refill) this.fill();
   }
 
   dispose(): void {
@@ -314,28 +427,59 @@ export class CostLabel {
 
 // ---------------------------------------------------------------------------
 const CONFETTI = ['#97c46c', '#e4d0a0', '#f2cf74', '#82bfd6', '#e88466', '#f3eee2'];
+/** How long a "Goal complete" card stays up (ms). */
+const CARD_LIFE = 4800;
+
+interface CardItem {
+  text: string;
+  reward: number;
+  /** Measured height (px) once it has been on screen, 0 before. */
+  height: number;
+}
+
+interface ShownCard {
+  item: CardItem;
+  card: HTMLElement;
+  shownAt: number;
+  closing: boolean;
+  close(): void;
+}
 
 /** "Goal complete" celebration card with a confetti burst. */
 export class Celebration {
-  private queue: { text: string; reward: number }[] = [];
-  private showing = false;
-  private card: HTMLElement | null = null;
+  private queue: CardItem[] = [];
+  /** The card on screen (until its fade-out ends). */
+  private current: ShownCard | null = null;
+  /** Height (px) the toast column may fill (see Toasts.setRoom). */
+  private room = Infinity;
 
   /** Cards are stacked at the top of the given column (the toast stack). */
   constructor(private root: HTMLElement) {}
 
   show(text: string, reward: number): void {
-    this.queue.push({ text, reward });
-    if (!this.showing) this.next();
+    this.queue.push({ text, reward, height: 0 });
+    this.next();
+  }
+
+  /**
+   * Height (px) the column may fill. A card waits while it would not fit, and one on
+   * screen steps aside when the room shrinks (coming back later if it was barely seen);
+   * toasts below a card make way for it (Toasts.setRoom).
+   */
+  setRoom(px: number): void {
+    this.room = px;
+    const cur = this.current;
+    if (!cur) this.next();
+    else if (!cur.closing && cur.card.offsetHeight + GAP > px) {
+      if (performance.now() - cur.shownAt < MIN_LIFE) this.queue.unshift(cur.item);
+      cur.close();
+    }
   }
 
   private next(): void {
-    const item = this.queue.shift();
-    if (!item) {
-      this.showing = false;
-      return;
-    }
-    this.showing = true;
+    const item = this.queue[0];
+    if (this.current || !item || (item.height || CARD_H) + GAP > this.room) return;
+    this.queue.shift();
     const card = el('div', 'wh-cele-card wh-glass-2');
     card.innerHTML = `<div class="wh-cele-badge">${icon('trophy')}</div><div><div class="wh-cele-k">Goal complete</div><div class="wh-cele-t">${escapeHtml(
       item.text,
@@ -354,27 +498,36 @@ export class Celebration {
     }
     card.append(conf);
     swallowPointer(card);
-    let done = false;
-    const close = () => {
-      if (done) return;
-      done = true;
-      card.classList.add('out');
-      window.setTimeout(() => {
-        card.remove();
-        this.next();
-      }, 380);
+    const cur: ShownCard = {
+      item,
+      card,
+      shownAt: performance.now(),
+      closing: false,
+      close: () => {
+        if (cur.closing) return;
+        cur.closing = true;
+        window.clearTimeout(timer);
+        card.classList.add('out');
+        window.setTimeout(() => {
+          card.remove();
+          if (this.current === cur) this.current = null;
+          this.next();
+        }, 380);
+      },
     };
     card.addEventListener('click', (ev) => {
       ev.stopPropagation();
-      close();
+      cur.close();
     });
-    this.card = card;
+    this.current = cur;
     this.root.prepend(card);
-    window.setTimeout(close, 4800);
+    item.height = card.offsetHeight;
+    const timer = window.setTimeout(cur.close, CARD_LIFE);
   }
 
   dispose(): void {
     this.queue = [];
-    this.card?.remove();
+    this.current?.card.remove();
+    this.current = null;
   }
 }

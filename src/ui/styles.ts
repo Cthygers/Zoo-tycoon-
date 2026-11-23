@@ -129,7 +129,21 @@ const CSS = /* css */ `
 .wh-seg .wh-btn .wh-ico { width: 18px; height: 18px; }
 .wh-seg .wh-btn.on { background: var(--wh-leaf); color: #142010; box-shadow: 0 2px 10px rgba(130, 180, 90, .35); }
 .wh-seg .wh-btn.on.paused { background: var(--wh-amber); }
-.wh-menubtn { pointer-events: auto; width: 46px; height: 46px; border-radius: 23px; padding: 0; }
+.wh-menubtn { pointer-events: auto; width: 46px; height: 46px; border-radius: 23px; padding: 0; position: relative; }
+/* unread warnings / problems in the message log (menu button, Messages tab) */
+.wh-badge {
+  position: absolute; top: -4px; right: -4px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+  background: var(--wh-amber); color: #2e2108; font-size: 11px; font-weight: 800; line-height: 18px; text-align: center;
+  pointer-events: none; box-shadow: 0 0 0 2px rgba(17, 23, 19, .85);
+}
+.wh-badge.bad { background: var(--wh-clay); color: #2b130b; }
+.wh-badge.hidden { display: none; }
+.wh-tab { position: relative; }
+.wh-tab .wh-badge { top: 50%; right: 10px; transform: translateY(-50%); box-shadow: none; }
+@media (orientation: portrait) { .wh-tab .wh-badge { top: 3px; right: 4px; transform: none; } }
+/* work in progress (e.g. applying a new graphics quality) */
+.wh-spin { width: 16px; height: 16px; flex: none; border-radius: 50%; border: 2px solid rgba(255, 255, 255, .18); border-top-color: var(--wh-leaf-2); animation: wh-spin .8s linear infinite; }
+@keyframes wh-spin { to { transform: rotate(360deg); } }
 
 @media (orientation: portrait) {
   .wh-ui { --wh-top-h: 104px; }
@@ -179,6 +193,8 @@ const CSS = /* css */ `
 .wh-toast .wh-toast-go { margin-left: auto; color: var(--wh-faint); }
 .wh-toast .wh-toast-go .wh-ico { width: 16px; height: 16px; color: inherit; }
 .wh-toast .wh-toast-count { font-size: 11px; font-weight: 700; background: rgba(255,255,255,.12); border-radius: 8px; padding: 1px 6px; }
+.wh-toast-status { pointer-events: none; cursor: default; }
+.wh-toast-status.hidden { display: none; }
 /* keep toasts centred over the visible 3D view, never on top of an open side sheet */
 @media (orientation: landscape) {
   .wh-ui.sheet-open .wh-toasts {
@@ -544,6 +560,9 @@ const CSS = /* css */ `
 .wh-setting-t { flex: 1; min-width: 0; }
 .wh-setting-t b { display: block; font-size: 14.5px; }
 .wh-setting-t span { font-size: 12px; color: var(--wh-muted); }
+.wh-setting-t .wh-applying { display: flex; align-items: center; gap: 6px; margin-top: 4px; color: var(--wh-leaf-2); font-weight: 600; }
+.wh-setting-t .wh-applying.hidden { display: none; }
+.wh-applying .wh-spin { width: 13px; height: 13px; }
 .wh-segtext { display: inline-flex; padding: 3px; border-radius: 14px; background: rgba(255,255,255,.06); border: 1px solid var(--wh-line); pointer-events: auto; }
 .wh-segtext .wh-btn { min-height: 40px; height: 40px; padding: 0 14px; border-radius: 11px; color: var(--wh-muted); font-weight: 650; position: relative; }
 .wh-segtext .wh-btn::after { content: ""; position: absolute; inset: -3px 0; }
@@ -667,6 +686,24 @@ const CSS = /* css */ `
   .wh-stat-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
   .wh-setting { min-height: 52px; padding: 6px 0; }
   .wh-tabs-title { padding-bottom: 4px; }
+}
+/* very short landscape phones (≤ 400 px tall, e.g. 800×360): a slimmer dock, drawer cards and tool bar,
+   so a tool bar over an open drawer still clears the top HUD. Buttons keep 44 px touch targets. */
+@media (orientation: landscape) and (max-height: 400px) {
+  .wh-bottom { gap: 6px; }
+  .wh-cat { height: 48px; gap: 2px; border-radius: 15px; }
+  .wh-cat .wh-ico { width: 21px; height: 21px; }
+  .wh-row { padding: 3px 10px 7px; }
+  .wh-card { padding: 4px 5px 5px; gap: 2px; }
+  .wh-thumb { height: 50px; }
+  .wh-card.wide .wh-thumb { height: 42px; }
+  .wh-toolbar { padding: 4px 4px 4px 5px; }
+  .wh-tb-thumb { width: 36px; height: 36px; border-radius: 10px; }
+  .wh-tb-opts .wh-btn, .wh-tb-done { height: 38px; min-height: 38px; position: relative; }
+  .wh-tb-opts .wh-btn::after, .wh-tb-done::after { content: ""; position: absolute; inset: -3px 0; }
+  .wh-confirm { padding: 4px; }
+  .wh-cf-ok, .wh-cf-no { height: 44px; }
+  .wh-cf-no { width: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .wh-ui *, .wh-screen * { animation-duration: .01ms !important; transition-duration: .01ms !important; }

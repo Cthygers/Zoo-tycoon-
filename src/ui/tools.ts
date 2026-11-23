@@ -3,7 +3,7 @@
 // gesture ends, a pending action that the player must confirm (✓ / ✗).
 
 import * as THREE from 'three';
-import { ENTRANCE_TILE, MAP_H, MAP_W, TILE, WATER_LEVEL } from '../core/constants';
+import { ENTRANCE_PLAZA, MAP_H, MAP_W, TILE, WATER_LEVEL } from '../core/constants';
 import type { ICreatureFactory, IPropsLayer, IRenderContext, ISimulation, SpeciesSuitability } from '../core/contracts';
 import type { TileRect } from '../core/events';
 import { PathType, Terrain, type CommandResult, type StaffRole, type Tool } from '../core/types';
@@ -65,7 +65,8 @@ type TP = { x: number; z: number };
 
 /** The paved plaza at the gate, which bulldozing leaves in place (mirrors the sim's protected entrance tiles). */
 function isEntrancePlaza(x: number, z: number): boolean {
-  return Math.abs(x - ENTRANCE_TILE.x) <= 2 && z >= ENTRANCE_TILE.z - 2 && z <= ENTRANCE_TILE.z;
+  const p = ENTRANCE_PLAZA;
+  return x >= p.x0 && x <= p.x1 && z >= p.z0 && z <= p.z1;
 }
 
 const removeStates: EdgeState[] = [];

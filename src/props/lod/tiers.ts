@@ -28,18 +28,22 @@ export interface PropsTier {
   fenceLod: number;
   /** Props cast shadows only when taller (m) … */
   castH: number;
-  /** … or wider (footprint radius, m) than this. */
+  /** … or wider (footprint radius, m) than this … */
   castR: number;
+  /** … and never when thinner (footprint radius, m) than this (lamp posts, signposts). */
+  castMinR: number;
 }
 
 export function propsTier(q: QualitySettings): PropsTier {
   const D = q.detailDistance;
   switch (q.level) {
     case 'low':
-      return { minCull: Math.max(D * 1.6, 38), cullK: 110, lodDist: 34, shadowNear: 30, shadowFar: 62, pointLights: 0, fade: true, lampGlow: 1, shadowLodBias: 1, fenceLod: 0, castH: 1.7, castR: 1.9 };
+      // every caster material is one more shadow-pass draw: only buildings, shelters, trees and
+      // bamboo cast (not shrubs, reeds, carts, feeders, small shelters or lamp posts)
+      return { minCull: Math.max(D * 1.6, 38), cullK: 110, lodDist: 34, shadowNear: 30, shadowFar: 62, pointLights: 0, fade: true, lampGlow: 1, shadowLodBias: 1, fenceLod: 0, castH: 2.7, castR: 2.2, castMinR: 0.75 };
     case 'high':
-      return { minCull: Math.max(D * 1.6, 70), cullK: 210, lodDist: 72, shadowNear: 70, shadowFar: 140, pointLights: 2, fade: true, lampGlow: 0.15, shadowLodBias: 0, fenceLod: 70, castH: 0.8, castR: 1.1 };
+      return { minCull: Math.max(D * 1.6, 70), cullK: 210, lodDist: 72, shadowNear: 70, shadowFar: 140, pointLights: 2, fade: true, lampGlow: 0.15, shadowLodBias: 0, fenceLod: 70, castH: 0.8, castR: 1.1, castMinR: 0 };
     default:
-      return { minCull: Math.max(D * 1.6, 55), cullK: 150, lodDist: 50, shadowNear: 46, shadowFar: 95, pointLights: 0, fade: true, lampGlow: 0.15, shadowLodBias: 1, fenceLod: 42, castH: 1.0, castR: 1.25 };
+      return { minCull: Math.max(D * 1.6, 55), cullK: 150, lodDist: 50, shadowNear: 46, shadowFar: 95, pointLights: 0, fade: true, lampGlow: 0.15, shadowLodBias: 1, fenceLod: 42, castH: 1.0, castR: 1.25, castMinR: 0 };
   }
 }

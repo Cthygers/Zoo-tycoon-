@@ -872,8 +872,11 @@ function design(ctx: DesignContext): CreatureDesign {
     anim: driver(d),
     babyScale: 0.3,
     babyHead: 1.3,
-    // calves have no visible tusks yet (milk tushes): they grow in with age
-    babyBones: { 'tusk.L': 0.06, 'tusk.R': 0.06 },
+    // calves are leggier than adults
+    babyLegs: 1.15,
+    // calves have no visible tusks yet (milk tushes): they grow in with age;
+    // and a short trunk (under the big baby head it would reach the ground)
+    babyBones: { 'tusk.L': 0.06, 'tusk.R': 0.06, trunk_1: 0.72 },
     height: male ? 3.25 : 3.15,
     radius: 1.4,
   };

@@ -2,7 +2,7 @@
 // catalogues), charge, mutate and report. Every command supports dryRun for
 // ghost previews: nothing changes and the result carries cost / validity.
 
-import { ENTRANCE_TILE, MAP_H, MAP_W, TILE } from '../core/constants';
+import { ENTRANCE_PLAZA, ENTRANCE_TILE, MAP_H, MAP_W, TILE } from '../core/constants';
 import type { TileRect } from '../core/events';
 import { PathType, Terrain, isWater, type AnimalState, type CommandResult, type Habitat, type PlacedObject, type SpeciesDef, type StaffRole } from '../core/types';
 import type { EdgeRef, EnclosureProblem } from '../core/world';
@@ -124,7 +124,8 @@ export class Commands {
 
   /** Entrance plaza tiles are protected from removal so guests can always get in. */
   private isProtectedPath(x: number, z: number): boolean {
-    return Math.abs(x - ENTRANCE_TILE.x) <= 2 && z >= ENTRANCE_TILE.z - 2 && z <= ENTRANCE_TILE.z;
+    const p = ENTRANCE_PLAZA;
+    return x >= p.x0 && x <= p.x1 && z >= p.z0 && z <= p.z1;
   }
 
   // ------------------------------------------------------------ terrain
@@ -474,24 +475,10 @@ export class Commands {
     if (dryRun) return this.result(true, 0, undefined, true, at);
     // guests queueing at / sitting on / walking to it change their plans first
     sim.guestSys.releaseObject(objectId);
-    w.removeObject(objectId); // clears its tiles, emits objectRemoved + habitatsChanged
-    o.tx = tx;
-    o.tz = tz;
-    o.rot = spot.rot;
-    this.reinsertObject(o);
+    w.moveObject(objectId, tx, tz, spot.rot);
     sim.markPopulationDirty();
     const c = w.objectCenter(o);
     return this.result(true, 0, undefined, false, { x: c.x, z: c.z });
-  }
-
-  /** Put a lifted object back under its own id (World.addObject would hand out a new one). Mirrors World.addObject. */
-  private reinsertObject(o: PlacedObject) {
-    const w = this.sim.world;
-    w.objects.set(o.id, o);
-    for (const t of w.footprint(o)) if (w.inBounds(t.x, t.z)) w.objectGrid[w.idx(t.x, t.z)] = o.id;
-    w.revision++;
-    w.events.emit('objectAdded', { id: o.id });
-    w.refreshHabitatStats();
   }
 
   /**
@@ -694,12 +681,12 @@ export class Commands {
     const spot = this.animalSpot(sp, wx, wz, null);
     if (spot.why) return this.result(false, sp.cost, spot.why, dryRun, at);
     if (!sim.canAfford(sp.cost)) return this.result(false, sp.cost, this.noMoney(sp.cost), dryRun, at);
-    if (dryRun) return this.result(true, sp.cost, spot.warning, true, at);
+    if (dryRun) return this.result(true, sp.cost, undefined, true, at, spot.warning);
     const a = sim.animalSys.create(speciesId, wx, wz, { adult: true });
     sim.spend('animalPurchases', sp.cost);
     sim.events.emit('animalAdded', { id: a.id });
     sim.markPopulationDirty();
-    return this.result(true, sp.cost, spot.warning, false, at);
+    return this.result(true, sp.cost, undefined, false, at, spot.warning);
   }
 
   /**
@@ -726,7 +713,9 @@ export class Commands {
     const ev = evaluateSpecies(w, hab, sp, sim.population(hab.id), sim.keeperCount(), adding);
     if (ev.compat < 0.5) warn.push(ev.issues.find((i) => i.includes('predators')) ?? 'it does not get along with the other animals here');
     else if (ev.score < 0.45) warn.push(`this habitat suits it poorly (${Math.round(ev.score * 100)}%): ${ev.issues[0] ?? ''}`);
-    return warn.length ? { warning: `Warning: ${warn.join('; ')}` } : {};
+    if (!warn.length) return {};
+    const text = warn.join('; ');
+    return { warning: text[0].toUpperCase() + text.slice(1) };
   }
 
   /** Carry an animal to a spot inside a habitat (its own or another one), free of charge. */
@@ -741,9 +730,9 @@ export class Commands {
     if (a.escaped) return this.result(false, 0, `${a.name} is on the loose — a keeper or vet has to catch it first`, dryRun, at);
     const spot = this.animalSpot(sp, wx, wz, a);
     if (spot.why) return this.result(false, 0, spot.why, dryRun, at);
-    if (dryRun) return this.result(true, 0, spot.warning, true, at);
+    if (dryRun) return this.result(true, 0, undefined, true, at, spot.warning);
     sim.animalSys.relocate(a, wx, wz);
-    return this.result(true, 0, spot.warning, false, at);
+    return this.result(true, 0, undefined, false, at, spot.warning);
   }
 
   /** What an animal fetches when rehomed: part of its price, more for grown, healthy animals. */

@@ -5,10 +5,13 @@
 import type { ISimulation, SimSpeed } from '../core/contracts';
 import { button, el, fmtClock, fmtMoney, iconEl, setText, swallowPointer, toggleClass } from './dom';
 import { icon } from './icons';
+import { UnreadBadge, type MessageLog } from './notify';
 
 export interface HudHost {
   sim: ISimulation;
-  openMenu(tab?: 'finance' | 'goals' | 'stats' | 'settings'): void;
+  /** Message log: the menu button shows how many warnings are unread. */
+  log: MessageLog;
+  openMenu(tab?: 'finance' | 'goals' | 'stats' | 'messages' | 'settings'): void;
   setSpeed(s: SimSpeed): void;
 }
 
@@ -25,6 +28,7 @@ export class Hud {
   private starsFg: HTMLElement;
   private ratingNum: HTMLElement;
   private speedBtns: HTMLButtonElement[] = [];
+  private unread: UnreadBadge;
   private shown = Number.NaN;
   private acc = 0;
   private night = -1;
@@ -69,7 +73,9 @@ export class Hud {
       seg.append(b);
     });
 
-    const menu = button('wh-menubtn wh-glass', 'menu', null, () => host.openMenu(), 'Zoo menu');
+    // with unread warnings, the menu opens on the Messages tab
+    const menu = button('wh-menubtn wh-glass', 'menu', null, () => host.openMenu(host.log.unread ? 'messages' : undefined), 'Zoo menu');
+    this.unread = new UnreadBadge(menu, host.log, 'Zoo menu');
 
     this.root = el('div', 'wh-top', [
       el('div', 'wh-top-left', [this.moneyChip, this.clockChip]),
@@ -123,6 +129,7 @@ export class Hud {
       toggleClass(this.speedBtns[i], 'on', sim.speed === i);
       toggleClass(this.speedBtns[i], 'paused', i === 0);
     }
+    this.unread.update();
   }
 
   dispose(): void {

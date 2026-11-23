@@ -147,6 +147,15 @@ export class LegRT {
   readonly footVec = new THREE.Vector3(); // ankle − toe joint (or − contact)
   readonly legLen: number;
   readonly hipRest = new THREE.Vector3();
+  /** Rest heights of the segments hip→knee, knee→ankle, ankle→toe joint, toe joint→contact. */
+  private readonly segY: [number, number, number, number];
+  /** Model-space scale of the foot and toe bones (juvenile legs / paws, see syncScale). */
+  kFoot = 1;
+  kToe = 1;
+  /** How much higher the hip joint stands than at rest because of the bone scales (m). */
+  lift = 0;
+  /** Effective (scaled) length of the IK chain, hip → ankle. */
+  reach: number;
 
   constructor(rig: RigRuntime, id: LegId, idx: number, r: ResolvedLeg) {
     this.id = id;
@@ -166,6 +175,32 @@ export class LegRT {
     }
     d.restVec(r.upper, this.hipRest);
     this.legLen = this.hipRest.y - r.contact.y;
+    const y = (b: number) => d.rest[b * 3 + 1];
+    const toeY = r.toe >= 0 ? y(r.toe) : r.contact.y;
+    this.segY = [this.hipRest.y - y(r.lower), y(r.lower) - y(r.foot), y(r.foot) - toeY, toeY - r.contact.y];
+    this.reach = this.chain.a + this.chain.b;
+  }
+
+  /**
+   * Pick up the per-instance bone scales (juvenile legs and paws) from the
+   * rig: foot / toe scales for planting, the extra standing height, the reach.
+   * The leg's parent bone is assumed unscaled.
+   */
+  syncScale(rig: RigRuntime): void {
+    const bs = rig.boneScale;
+    const r = this.r;
+    const kU = bs[r.upper];
+    const kL = kU * bs[r.lower];
+    this.kFoot = kL * bs[r.foot];
+    this.kToe = r.toe >= 0 ? this.kFoot * bs[r.toe] : this.kFoot;
+    const g = this.segY;
+    this.lift = (kU - 1) * g[0] + (kL - 1) * g[1] + (this.kFoot - 1) * g[2] + (this.kToe - 1) * g[3];
+    this.reach = this.chain.a * kU + this.chain.b * kL;
+  }
+
+  /** Hip joint height above the contact as drawn (rest leg length + juvenile lift). */
+  get scaledLen(): number {
+    return this.legLen + this.lift;
   }
 }
 
@@ -186,6 +221,15 @@ export class QuadState {
   chestY = 1;
   chestZ = 0;
   hipsZ = 0;
+  /**
+   * Extra standing height of the hind / front legs from juvenile proportions
+   * (m, + = longer legs). body() raises the standing trunk by it; lying and
+   * swimming poses ignore it.
+   */
+  liftH = 0;
+  liftF = 0;
+  /** Mean leg length as drawn / rest leg length: short-legged cubs take shorter, quicker steps. */
+  legK = 1;
   constructor(p: QuadParams) {
     this.p = p;
   }
@@ -237,8 +281,9 @@ export function initQuad(ctx: AnimCtx, p: QuadParams): QuadState {
   return st;
 }
 
-/** Advance gait phase from speed (driver.pre). */
+/** Advance gait phase from speed and pick up the juvenile leg proportions (driver.pre). */
 export function advanceGait(ctx: AnimCtx, st: QuadState): void {
+  syncLegScales(ctx, st);
   const p = st.p;
   st.speed += (ctx.speed - st.speed) * damp(0.18, ctx.dt);
   const v = st.speed;
@@ -248,11 +293,43 @@ export function advanceGait(ctx: AnimCtx, st: QuadState): void {
   if (st.wg > 0) blendGait(st.g, st.g, p.gallop, st.wg);
   const g = st.g;
   st.amp = smooth(0.015, 0.22, v);
-  st.stride = g.stride * clamp(Math.sqrt(Math.max(v, 1e-4) / g.refSpeed), 0.3, 1.45);
+  st.stride = g.stride * st.legK * clamp(Math.sqrt(Math.max(v, 1e-4) / g.refSpeed), 0.3, 1.45);
   st.freq = v > 1e-3 ? v / st.stride : 0;
   st.phase = fract(st.phase + st.freq * ctx.dt);
   const targetTurn = clamp(ctx.turnRate * 0.22, -0.4, 0.4);
   st.turn += (targetTurn - st.turn) * damp(0.3, ctx.dt);
+}
+
+/** Leg bone scales → per-leg planting data and the standing lift of the trunk (front / hind). */
+function syncLegScales(ctx: AnimCtx, st: QuadState): void {
+  let f = 0, nf = 0, h = 0, nh = 0, len = 0, scaled = 0;
+  for (const leg of st.legs) {
+    leg.syncScale(ctx.rig);
+    len += leg.legLen;
+    scaled += leg.scaledLen;
+    if (leg.front) {
+      f += leg.lift;
+      nf++;
+    } else {
+      h += leg.lift;
+      nh++;
+    }
+  }
+  // a rig with only one pair of legs (bipeds) lifts evenly
+  st.liftF = nf ? f / nf : nh ? h / nh : 0;
+  st.liftH = nh ? h / nh : st.liftF;
+  st.legK = len > 0 ? scaled / len : 1;
+}
+
+/**
+ * Raise the standing trunk by the juvenile leg lift (hips by liftH, pitched
+ * so the chest rises by liftF): long-legged foals stand taller, short-legged
+ * cubs lower, and the planted feet stay on the ground.
+ */
+export function standingLift(st: QuadState, pose: Pose, root: number): void {
+  if (st.liftH === 0 && st.liftF === 0) return;
+  pose.p[root].y += st.liftH;
+  rotParent(pose, root, 'x', -Math.atan2(st.liftF - st.liftH, Math.max(0.1, st.chestZ - st.hipsZ)));
 }
 
 /** Body motion for locomotion + breathing + turning bend. `still` scales locomotion bob (0 = none). */
@@ -262,6 +339,7 @@ export function body(ctx: AnimCtx, st: QuadState, pose: Pose, loco = 1): void {
   const a = st.amp * loco;
   const ph = st.phase * TAU;
   const hips = R.root;
+  standingLift(st, pose, hips);
   // vertical bob, roll, pitch
   pose.p[hips].y += -g.bob * a * (0.5 + 0.5 * Math.cos(ph * g.bobFreq));
   rotParent(pose, hips, 'z', g.roll * a * Math.sin(ph));
@@ -308,10 +386,10 @@ export function placeLeg(ctx: AnimCtx, st: unknown, pose: Pose, leg: LegRT, A: T
 export function plantLeg(ctx: AnimCtx, st: unknown, pose: Pose, leg: LegRT, C: THREE.Vector3, footPitch: number, toePitch: number): number {
   _T.copy(C);
   if (leg.r.toe >= 0) {
-    _V.copy(leg.toeVec).applyAxisAngle(_X, toePitch);
+    _V.copy(leg.toeVec).multiplyScalar(leg.kToe).applyAxisAngle(_X, toePitch);
     _T.add(_V);
   }
-  _A.copy(leg.footVec).applyAxisAngle(_X, footPitch).add(_T);
+  _A.copy(leg.footVec).multiplyScalar(leg.kFoot).applyAxisAngle(_X, footPitch).add(_T);
   return placeLeg(ctx, st, pose, leg, _A, footPitch, toePitch);
 }
 
@@ -518,7 +596,7 @@ export function lie(ctx: AnimCtx, st: QuadState, pose: Pose, headMode: 'up' | 'd
   for (const leg of st.legs) {
     rig.fkBone(pose, leg.r.upper);
     const H = rig.wp[leg.r.upper];
-    const reach = leg.chain.a + leg.chain.b;
+    const reach = leg.reach;
     if (leg.front) {
       if (L.front === 'tuck') {
         _A.set(H.x * 1.05, Math.max(0.04, leg.footVec.length() * 0.18), H.z + reach * 0.42);
@@ -614,7 +692,8 @@ export function actSit(ctx: AnimCtx, st: QuadState, pose: Pose): void {
   pose.p[R.root].y -= dropH;
   pose.p[R.root].z += dropH * 0.25;
   const dz = Math.max(0.1, st.chestZ - st.hipsZ);
-  const pitch = -Math.asin(clamp((dropH - (st.chestY - st.chestY * 0.98)) / dz, -0.95, 0.95));
+  // the chest stays on the straight forelegs (raised by their juvenile lift)
+  const pitch = -Math.asin(clamp((dropH - (st.chestY - st.chestY * 0.98) + st.liftF) / dz, -0.95, 0.95));
   rotParent(pose, R.root, 'x', pitch * 0.92);
   if (R.chest >= 0) rotLocal(pose, R.chest, 'x', -pitch * 0.25 + p.breath * Math.sin(ctx.time * TAU * 0.25));
   rig.fk(pose);
@@ -627,7 +706,7 @@ export function actSit(ctx: AnimCtx, st: QuadState, pose: Pose): void {
       const slant = Math.atan2(H.z - _C.z, Math.max(0.05, H.y - _C.y));
       plantLeg(ctx, st, pose, leg, _C, slant * 0.5, 0);
     } else {
-      const reach = leg.chain.a + leg.chain.b;
+      const reach = leg.reach;
       _A.set(H.x + leg.side * p.lie.hindSplay * 1.4, Math.max(0.04, leg.footVec.length() * 0.14), H.z - reach * 0.18);
       placeLeg(ctx, st, pose, leg, _A, -Math.PI * 0.47, -Math.PI * 0.42);
     }
@@ -693,8 +772,9 @@ export function actSwim(ctx: AnimCtx, st: QuadState, pose: Pose): void {
     rig.fkBone(pose, leg.r.upper);
     const H = rig.wp[leg.r.upper];
     const ph = (cyc + p.trot.offsets[leg.idx]) * TAU;
-    const rad = leg.legLen * 0.16;
-    _A.set(H.x, H.y - leg.legLen * 0.62 + Math.sin(ph) * rad * 0.6, H.z + Math.cos(ph) * rad + (leg.front ? leg.legLen * 0.1 : -leg.legLen * 0.15));
+    const len = leg.scaledLen;
+    const rad = len * 0.16;
+    _A.set(H.x, H.y - len * 0.62 + Math.sin(ph) * rad * 0.6, H.z + Math.cos(ph) * rad + (leg.front ? len * 0.1 : -len * 0.15));
     placeLeg(ctx, st, pose, leg, _A, (leg.front ? 0.6 : -0.4) + Math.sin(ph) * 0.4, 0.5);
   }
   neckHead(ctx, pose, -0.35, 0.2 * Math.sin(t * 0.5 + ctx.seed), -0.1, 0);

@@ -56,6 +56,9 @@ export function buildDemoZoo(sim: ISimulation, seed = 4242): DemoReport {
   line(8, 10, 63, 10); // northern walk
   line(36, 10, 36, avenueZ); // central spine
   line(37, 27, 62, 27); // east cross walk
+  // middle cross walk between the southern and northern habitats: brings Elephant Valley and
+  // Gorilla Grove within a few game hours' walk of the gate instead of most of a day
+  line(9, 38, 62, 38);
   // tiles over the natural pond become a timber boardwalk
   const isWet = (t: { x: number; z: number }) => {
     const ter = w.getTerrain(t.x, t.z);
@@ -292,6 +295,10 @@ export function buildDemoZoo(sim: ISimulation, seed = 4242): DemoReport {
     { id: 'restroom', x: 6, z: 30, rot: 1 },
     { id: 'shop_icecream', x: 37, z: 28, rot: 2 },
     { id: 'shop_drinks', x: 7, z: 45, rot: 1 },
+    // a break where the middle cross walk meets the central spine, halfway to the northern exhibits
+    { id: 'restroom', x: 34, z: 36, rot: 1 },
+    { id: 'shop_snack', x: 34, z: 40, rot: 1 },
+    { id: 'shop_drinks', x: 37, z: 37, rot: 3 },
   ];
   for (const g of guestObjects) {
     const res = sim.placeObject(g.id, g.x, g.z, g.rot);

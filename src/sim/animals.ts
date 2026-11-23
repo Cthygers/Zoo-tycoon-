@@ -726,12 +726,13 @@ export class AnimalSystem {
     if (!a.moving) {
       switch (a.goal) {
         case 'eat': {
-          const rt = a.habitatId ? this.sim.habitatRuntime(a.habitatId) : undefined;
+          // the habitat's food, or what a keeper left in the opened enclosure it lingers in
+          const store = a.habitatId ? this.sim.habitatRuntime(a.habitatId) : a.escaped ? undefined : this.sim.enclosures.find(a.home);
           const scale = foodScale(sp);
-          if (rt && rt.food > 0) {
+          if (store && store.food > 0) {
             const bite = Math.min(0.05 * dt, 1 - n.hunger);
             n.hunger += bite;
-            rt.food = Math.max(0, rt.food - bite * scale);
+            store.food = Math.max(0, store.food - bite * scale);
           } else a.goalTime = Math.min(a.goalTime, 0.5);
           if (n.hunger > 0.98) a.goalTime = Math.min(a.goalTime, 0.5);
           break;
@@ -1042,12 +1043,14 @@ export class AnimalSystem {
 
   /**
    * The fence of the animal's enclosure was opened: it potters about the old
-   * footprint, and now and then (more often when hungry or thirsty, since nobody
-   * feeds an open enclosure) finds the gap and wanders out.
+   * footprint, eats and drinks there (keepers still bring food), and now and then
+   * (more often when hungry or thirsty) finds the gap and wanders out.
    */
   private chooseLinger(a: AnimalSim, sp: SpeciesDef, open: OpenEnclosure): boolean {
     const rng = this.sim.rng;
     const n = a.needs;
+    if (n.thirst < 0.5 && this.chooseLingerDrink(a, sp, open)) return true;
+    if (n.hunger < 0.5 && this.chooseLingerEat(a, sp, open)) return true;
     const needy = n.thirst < 0.4 || n.hunger < 0.4;
     if (rng.chance(needy ? 0.3 : 0.08) && this.chooseWanderOut(a, sp, open)) return true;
     if (sp.diet === 'herbivore' && n.hunger < 0.8 && this.onGrazing(a) && rng.chance(0.5)) {
@@ -1069,6 +1072,52 @@ export class AnimalSystem {
       }
     }
     return false;
+  }
+
+  /** Where a keeper left food / water in an opened enclosure (else somewhere in its old footprint). */
+  private lingerSpot(open: OpenEnclosure): { x: number; z: number } | null {
+    if (open.spotX >= 0) return { x: open.spotX, z: open.spotZ };
+    const t = this.randomTile(open.tiles);
+    if (t < 0) return null;
+    this.tileCentre(t, this.tc);
+    return { x: this.tc.x, z: this.tc.z };
+  }
+
+  /** Eat what the keeper left in the opened enclosure (grazers also graze, see chooseLinger). */
+  private chooseLingerEat(a: AnimalSim, sp: SpeciesDef, open: OpenEnclosure): boolean {
+    const rng = this.sim.rng;
+    const at = open.food > 0.2 ? this.lingerSpot(open) : null;
+    if (!at || !this.goNear(a, sp, at.x + rng.range(-1.5, 1.5), at.z + rng.range(-1.5, 1.5), bodyRadius(sp, a.growth) + 0.3)) return false;
+    this.setGoal(a, 'eat', rng.range(15, 26), true);
+    return true;
+  }
+
+  /** Drink at a trough or pond left inside the old footprint, else from the keeper's tub. */
+  private chooseLingerDrink(a: AnimalSim, sp: SpeciesDef, open: OpenEnclosure): boolean {
+    const rng = this.sim.rng;
+    const own = this.sim.enclosures.footprintWater(open);
+    const trough = this.nearestObject(a, own.troughs, () => true);
+    if (trough && this.approachObject(a, sp, trough, false)) {
+      this.setGoal(a, 'drink', rng.range(6, 12), true);
+      return true;
+    }
+    this.setCtx(a, sp);
+    for (let k = 0; k < 3 && own.edge.length; k++) {
+      const t = own.edge[Math.floor(rng.float() * own.edge.length)];
+      if (!this.enterable(t)) continue;
+      this.tileCentre(t, this.tc);
+      if (this.goTo(a, sp, this.tc.x + rng.range(-0.4, 0.4), this.tc.z + rng.range(-0.4, 0.4))) {
+        this.setGoal(a, 'drink', rng.range(6, 12), true);
+        return true;
+      }
+    }
+    if (own.edge.length || own.troughs.length || open.water <= 0.2) return false;
+    const at = this.lingerSpot(open);
+    if (!at || !this.goNear(a, sp, at.x, at.z, bodyRadius(sp, a.growth) + 0.3)) return false;
+    // the tub holds a measured amount: this visit takes what the animal needs
+    open.water = Math.max(0, open.water - (1 - a.needs.thirst) * foodScale(sp));
+    this.setGoal(a, 'drink', rng.range(6, 12), true);
+    return true;
   }
 
   /** Head for the nearest tile outside the opened enclosure (through the gap in its fence). */

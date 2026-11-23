@@ -38,6 +38,12 @@ export interface GameUIHandle extends IGameUI {
 }
 
 const DEG = Math.PI / 180;
+/** The "Applying graphics settings…" line stays up at least this long (ms), so it never just flickers. */
+const APPLYING_MIN_MS = 1200;
+/** …and at most this long (ms), whatever happens to the creature rebuild. */
+const APPLYING_MAX_MS = 30000;
+/** Without a completion signal from the creature factory: rough rebuild time per species on a phone (ms). */
+const REBUILD_MS_PER_SPECIES = 700;
 
 class GameUI implements GameUIHandle {
   readonly camera: CameraController;
@@ -67,6 +73,14 @@ class GameUI implements GameUIHandle {
   private disposed = false;
   private backArmed = false;
   private selectNextFrame: SelectionRef | null = null;
+  /** Which bottom / side panels were up when the toast column was last laid out. */
+  private panelsKey = -1;
+  /** Frames left before asking the creature factory about a quality change (0 = not waiting). */
+  private qualityFrames = 0;
+  /** Bumped per quality change, so only the latest one clears the "Applying…" line. */
+  private qualityRun = 0;
+  private qualityShownAt = 0;
+  private applyingQuality = false;
 
   constructor(
     host: HTMLElement,
@@ -117,7 +131,9 @@ class GameUI implements GameUIHandle {
     // ---- DOM widgets
     this.popups = new MoneyPopups(ctx.camera, (x, z) => sim.world.heightAt(x, z));
     this.costLabel = new CostLabel(ctx.camera);
-    this.hud = new Hud({ sim, openMenu: (tab) => this.openZooPanel(tab), setSpeed: (s) => this.setSpeed(s) });
+    const focusEvent = (x: number, z: number) => this.focusClear(x, z, Math.min(this.camera.distance, 34));
+    this.toasts = new Toasts(focusEvent, () => ({ day: sim.day, minute: sim.minuteOfDay }));
+    this.hud = new Hud({ sim, log: this.toasts.log, openMenu: (tab) => this.openZooPanel(tab), setSpeed: (s) => this.setSpeed(s) });
     this.dock = new Dock({
       sim,
       thumbs: this.thumbs,
@@ -148,8 +164,6 @@ class GameUI implements GameUIHandle {
       startMove: (s) => this.startMove(s),
     });
     this.species = new SpeciesCard(this.thumbs, () => this.species.hide());
-    const focusEvent = (x: number, z: number) => this.focusClear(x, z, Math.min(this.camera.distance, 34));
-    this.toasts = new Toasts(focusEvent, () => ({ day: sim.day, minute: sim.minuteOfDay }));
     this.zoo = new ZooPanel({
       sim,
       ctx,
@@ -159,6 +173,7 @@ class GameUI implements GameUIHandle {
       newGame: () => deps.newGame(),
       toast: (t, k) => this.toasts.show(t, k),
       qualityChanged: (q) => this.qualityChanged(q),
+      qualityApplying: () => this.applyingQuality,
       log: this.toasts.log,
       focus: focusEvent,
     });
@@ -205,7 +220,10 @@ class GameUI implements GameUIHandle {
     const ev = sim.events;
     this.offs.push(
       ev.on('notify', (n) => this.toasts.show(n.text, n.kind, n.focus)),
-      ev.on('objectiveCompleted', (o) => this.cele.show(o.text, o.reward)),
+      ev.on('objectiveCompleted', (o) => {
+        this.cele.show(o.text, o.reward);
+        this.layoutToasts(); // toasts under the new card make way at once
+      }),
       ev.on('moneyPopup', (m) => this.popups.spawn(m.x, m.z, m.amount)),
       ev.on('commandResult', (r) => {
         if (!r.ok && this.dock.confirmVisible) this.dock.shake();
@@ -303,6 +321,26 @@ class GameUI implements GameUIHandle {
       else a.y1 = Math.min(a.y1, s.offsetTop);
     }
     return a;
+  }
+
+  /**
+   * Keep the toast column clear of the next-goal pill (it drops below the pill where the two
+   * would meet) and of the dock, drawer, tool bar and confirm bar under it (Toasts.setRoom:
+   * only what fits is shown, the rest waits).
+   */
+  private layoutToasts(): void {
+    const col = this.toasts.root;
+    const pill = this.coach.pill;
+    let top = '';
+    if (getComputedStyle(pill).visibility !== 'hidden') {
+      const p = pill.getBoundingClientRect();
+      const c = col.getBoundingClientRect();
+      if (c.left < p.right + 8 && c.right > p.left - 8) top = `${Math.round(p.bottom + 8)}px`;
+    }
+    if (col.style.top !== top) col.style.top = top;
+    const room = this.clearArea().y1 - col.offsetTop - 6;
+    this.cele.setRoom(room);
+    this.toasts.setRoom(room);
   }
 
   /** Fly the camera to a ground point, centring it in the part of the view that panels leave clear. */
@@ -468,8 +506,38 @@ class GameUI implements GameUIHandle {
     this.hud.refresh();
   }
 
+  /**
+   * A new graphics quality: every species' creature mesh is rebuilt over the next few seconds
+   * (a hitch each on a phone), so say so until it is done. main.ts hands the tier to the
+   * creature factory after ui.update, hence the wait of two frames before asking it.
+   */
   private qualityChanged(q: QualityLevel): void {
     this.root.classList.toggle('wh-noblur', q === 'low');
+    this.qualityRun++;
+    this.qualityFrames = 2;
+    this.qualityShownAt = performance.now();
+    this.applyingQuality = true;
+    this.toasts.setStatus('Applying graphics settings…');
+  }
+
+  private awaitQualityApplied(): void {
+    const run = this.qualityRun;
+    const { creatures, sim } = this.deps;
+    const applied =
+      creatures.whenQualityApplied?.() ??
+      new Promise<void>((resolve) => {
+        const species = new Set(Array.from(sim.animals.values(), (a) => a.speciesId));
+        window.setTimeout(resolve, species.size * REBUILD_MS_PER_SPECIES);
+      });
+    const giveUp = new Promise<void>((resolve) => window.setTimeout(resolve, APPLYING_MAX_MS));
+    void Promise.race([applied, giveUp]).then(() => {
+      const left = Math.max(0, this.qualityShownAt + APPLYING_MIN_MS - performance.now());
+      window.setTimeout(() => {
+        if (run !== this.qualityRun || this.disposed) return;
+        this.applyingQuality = false;
+        this.toasts.setStatus(null);
+      }, left);
+    });
   }
 
   private onKey(code: string): boolean {
@@ -515,6 +583,7 @@ class GameUI implements GameUIHandle {
   // ------------------------------------------------------------ frame
   update(dt: number): void {
     if (this.disposed) return;
+    if (this.qualityFrames > 0 && --this.qualityFrames === 0) this.awaitQualityApplied();
     if (this.selectNextFrame) {
       const s = this.selectNextFrame;
       this.selectNextFrame = null;
@@ -523,6 +592,13 @@ class GameUI implements GameUIHandle {
     toggleClass(this.root, 'sheet-open', this.info.sheet.open);
     toggleClass(this.root, 'card-open', this.species.visible);
     toggleClass(this.root, 'drawer-open', this.dock.drawerOpen);
+    // a panel opened or closed: re-fit the toast column right away (else a few times a second)
+    const panels =
+      (this.info.sheet.open ? 1 : 0) | (this.species.visible ? 2 : 0) | (this.dock.drawerOpen ? 4 : 0) | (this.tools.active ? 8 : 0) | (this.dock.confirmVisible ? 16 : 0);
+    if (panels !== this.panelsKey) {
+      this.panelsKey = panels;
+      this.layoutToasts();
+    }
     if (!this.backArmed && (this.zoo.isOpen || this.dock.drawerOpen || this.tools.active || this.selection)) {
       try {
         history.pushState({ wildhaven: 1 }, '');
@@ -550,6 +626,7 @@ class GameUI implements GameUIHandle {
       if (m && !(m.kind === 'animal' ? sim.animals.has(m.id) : sim.world.objects.has(m.id))) this.setTool({ kind: 'select' });
       // top edge of the bottom dock (+ confirm bar / tool bar): a cheap 4 Hz layout read
       this.bottomTop = this.dock.root.offsetTop || this.vh;
+      this.layoutToasts();
     }
   }
 

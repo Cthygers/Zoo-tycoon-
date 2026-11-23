@@ -19,7 +19,7 @@ import * as THREE from 'three';
 // mesh (no mane / tusks / ruff yet) and switch when they mature, and after a
 // quality change (setQuality) every live model moves to the new tier's mesh —
 // a few per frame, since building a mesh is a long task — before the previous
-// tier's meshes, LODs and batches are freed.
+// tier's meshes, LODs and batches are freed (whenQualityApplied() resolves then).
 
 import type { CreatureModel, ICreatureFactory, QualitySettings } from '../core/contracts';
 import type { HumanAppearance, StaffRole } from '../core/types';
@@ -143,6 +143,8 @@ export class CreatureFactory implements ICreatureFactory {
 
   /** Live models still drawing another tier's mesh after setQuality. */
   private migrating = false;
+  /** Resolvers of whenQualityApplied() promises, called when the migration ends. */
+  private migrationWaiters: (() => void)[] = [];
 
   /**
    * New tier for LOD distances / shadows right away; models created from now
@@ -158,6 +160,23 @@ export class CreatureFactory implements ICreatureFactory {
   }
 
   /**
+   * Resolves once every live model uses the current tier's meshes (the moves
+   * run in update(), a few per frame); at once when nothing is pending. For a
+   * UI "Applying graphics settings…" indicator.
+   */
+  whenQualityApplied(): Promise<void> {
+    if (!this.migrating) return Promise.resolve();
+    return new Promise((resolve) => this.migrationWaiters.push(resolve));
+  }
+
+  private finishMigration(): void {
+    this.migrating = false;
+    const waiters = this.migrationWaiters;
+    this.migrationWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
+
+  /**
    * Move live models to the current tier's meshes within a small frame budget
    * (at most about one mesh build per frame), then free the meshes, LODs and
    * batches of other tiers.
@@ -170,7 +189,7 @@ export class CreatureFactory implements ICreatureFactory {
       if (now() - t0 > MIGRATE_BUDGET_MS) return;
       m.refreshAsset();
     }
-    this.migrating = false;
+    this.finishMigration();
     for (const [key, a] of this.assets) {
       if (a.detail === detail) continue;
       disposeAsset(a);
@@ -220,6 +239,7 @@ export class CreatureFactory implements ICreatureFactory {
   }
 
   dispose(): void {
+    this.finishMigration();
     this.crowd.dispose();
     for (const a of this.assets.values()) disposeAsset(a);
     this.assets.clear();

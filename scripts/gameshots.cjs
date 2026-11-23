@@ -2,6 +2,11 @@
 // Usage: node scripts/gameshots.cjs "<url>" <outPrefix> '[{"name":"v1","x":72,"z":90,"d":60,"yaw":180,"pitch":45,"wait":4000},{"name":"z","species":"zebra","d":12},{"name":"n","time":"21:30"}]' [--size=WxH] [--mobile]
 // node gameshots.cjs <url> <outprefix> <views-json> [--size=WxH] [--mobile]
 // views: [{name, x, z, d, yaw, pitch, wait}] — degrees for yaw/pitch
+// URL parameters of the game: demo (showcase zoo), q=low|medium|high, time=HH:MM,
+// paused, and seed=<n>: the same seed loads the same zoo (layout, animals,
+// guests), so before/after shots and draw-call numbers are comparable (add paused
+// to keep it still while shooting); without it every load is a different zoo.
+// E.g. "http://localhost:5525/?demo=1&q=low&seed=7&paused".
 const { chromium } = require('playwright');
 (async () => {
   const [url, prefix, viewsJson] = process.argv.slice(2);

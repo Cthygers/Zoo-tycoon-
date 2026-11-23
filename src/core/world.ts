@@ -427,12 +427,28 @@ export class World {
   /** Raw add (no validation). */
   addObject(defId: string, tx: number, tz: number, rot: number, seed?: number): PlacedObject {
     const o: PlacedObject = { id: this.nextObjectId++, defId, tx, tz, rot: ((rot % 4) + 4) % 4, seed: seed ?? Math.floor(Math.random() * 1e9) };
+    this.insertObject(o);
+    return o;
+  }
+  /**
+   * Move and/or turn a placed object; it keeps its id (and seed). No placement checks
+   * (the Simulation's moveObject command makes them). Listeners see it removed and added again.
+   */
+  moveObject(id: number, tx: number, tz: number, rot: number): PlacedObject | undefined {
+    const o = this.removeObject(id);
+    if (!o) return undefined;
+    o.tx = tx;
+    o.tz = tz;
+    o.rot = ((rot % 4) + 4) % 4;
+    this.insertObject(o);
+    return o;
+  }
+  private insertObject(o: PlacedObject): void {
     this.objects.set(o.id, o);
     for (const t of this.footprint(o)) if (this.inBounds(t.x, t.z)) this.objectGrid[this.idx(t.x, t.z)] = o.id;
     this.revision++;
     this.events.emit('objectAdded', { id: o.id });
     this.refreshHabitatStats();
-    return o;
   }
   removeObject(id: number): PlacedObject | undefined {
     const o = this.objects.get(id);

@@ -10,7 +10,7 @@
 // pouncing play.
 
 import { cone, ellipsoid, mirrorX, roundBox, sphere, symmetric, transformPoint, transformPrims, type Prim, type Vec3 } from '../sdf/prims';
-import { quadSkeleton, seat, surfacePoint, withRegion, type QuadJoints } from '../kit/quadruped';
+import { CUB_PAWS, quadSkeleton, seat, surfacePoint, withRegion, type QuadJoints } from '../kit/quadruped';
 import * as THREE from 'three';
 import {
   actCall,
@@ -127,10 +127,11 @@ function headPrims(male: boolean): Prim[] {
         noise: fluff(42, 0.006 * ruff),
       }),
     ]),
-    // rounded ears on the sides of the crown, cupped forward and outward
+    // rounded ears on the sides of the crown, facing forward and outward;
+    // no carved cup: carving the thin plate folds it into back-facing slivers that show as holes;
+    // the coat paints the inside instead
     ...symmetric([
       ellipsoid('ear.L', hp(0.116, 0.128, 0.035), [0.043, 0.042, 0.021], { rot: [-0.15, 0.55, -0.6], blend: 0.035, part: 'ear', region: 'ears' }),
-      ellipsoid('ear.L', hp(0.121, 0.134, 0.049), [0.028, 0.027, 0.011], { rot: [-0.15, 0.55, -0.6], sub: true, blend: 0.008, part: 'ear', region: 'ears' }),
     ]),
   ];
 }
@@ -527,8 +528,8 @@ const swim: Act = (ctx, st, pose) => {
     rig.fkBone(pose, leg.r.upper);
     const Hj = rig.wp[leg.r.upper];
     const ph = (cyc + st.p.trot.offsets[leg.idx]) * TAU;
-    const rad = leg.legLen * 0.2;
-    _A.set(Hj.x, Hj.y - leg.legLen * 0.6 + Math.sin(ph) * rad * 0.5, Hj.z + Math.cos(ph) * rad + (leg.front ? leg.legLen * 0.12 : -leg.legLen * 0.22));
+    const rad = leg.scaledLen * 0.2;
+    _A.set(Hj.x, Hj.y - leg.scaledLen * 0.6 + Math.sin(ph) * rad * 0.5, Hj.z + Math.cos(ph) * rad + (leg.front ? leg.scaledLen * 0.12 : -leg.scaledLen * 0.22));
     placeLegPitch(ctx, st, pose, leg, (leg.front ? 0.7 : -0.6) + Math.sin(ph) * 0.4);
   }
   // head held up and level above the water
@@ -633,6 +634,9 @@ function design(ctx: DesignContext): CreatureDesign {
     anim: driver(tigerDriver(p)),
     babyScale: 0.28,
     babyHead: 1.35,
+    // cubs have short, stubby legs
+    babyLegs: 0.82,
+    babyBones: CUB_PAWS,
     height: 1.1,
     radius: 0.6,
   };

@@ -80,7 +80,8 @@ describe('commands', () => {
     expect(out.reason).toMatch(/habitat/i);
     const lion = sim.buyAnimal('lion', (HAB.x0 + 3.5) * TILE, (HAB.z0 + 3.5) * TILE, true);
     expect(lion.ok).toBe(true);
-    expect(lion.reason).toMatch(/fence/i);
+    expect(lion.reason).toBeUndefined();
+    expect(lion.warning).toMatch(/^The fence is too weak/);
     const before = sim.money;
     const z = sim.buyAnimal('zebra', (HAB.x0 + 3.5) * TILE, (HAB.z0 + 3.5) * TILE);
     expect(z.ok).toBe(true);
@@ -249,7 +250,7 @@ describe('habitat evaluation', () => {
     buyHerd(sim, 'gazelle', 4);
     const r = sim.buyAnimal('lion', (HAB.x0 + 9.5) * TILE, (HAB.z0 + 2.5) * TILE);
     expect(r.ok).toBe(true);
-    expect(r.reason).toMatch(/predators|get along/i);
+    expect(r.warning).toMatch(/predators|get along/i);
     expect(sim.suitability('gazelle', hid).issues.some((i) => /Terrified of the lions/.test(i))).toBe(true);
     sim.setSpeed(3);
     let gazelles = 4;

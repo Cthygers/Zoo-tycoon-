@@ -11,9 +11,18 @@
 //    per pass; batches with nothing to draw are hidden (no program switch).
 //    Each pass has its own draw-id texture, re-uploaded only when its list
 //    changes (a still camera uploads nothing).
+//    A shadow-only MultiBatch holds position-only copies of the opaque casters
+//    of many materials, so the shadow pass draws them in one call instead of
+//    one per material; in the main pass it binds its program but draws nothing.
 //  - InstancedBatch (fallback): one InstancedMesh per geometry + material,
 //    swap-remove packed; distance + LOD culled into the GPU buffer; casts
 //    shadows only while one of its casters is near the camera focus.
+//    It costs ~400 draw calls in the demo zoo at low, which is acceptable
+//    only because it is rare: Chromium exposes WEBGL_multi_draw on Android
+//    since M86 (Android System WebView ships the same Chromium), about 96 %
+//    of Android WebGL sessions. Where it is missing, three also draws every
+//    creature of a BatchedMesh crowd separately, so props are not the
+//    bottleneck there.
 
 import * as THREE from 'three';
 import { setupWindMesh } from '../wind';
@@ -61,6 +70,8 @@ export interface SlotRef {
 /** Common surface of the two batching back-ends. */
 export interface PropBatch {
   readonly mesh: THREE.Mesh;
+  /** Drawn in the shadow pass only (never picked). */
+  readonly shadowOnly: boolean;
   /** Instances changed since the last cull. */
   dirty: boolean;
   add(geometry: THREE.BufferGeometry, matrix: THREE.Matrix4, ref: SlotRef, p: InstParams): number;
@@ -195,6 +206,8 @@ export class MultiBatch implements PropBatch {
     material: THREE.Material,
     shadows: boolean,
     private readonly parent: THREE.Object3D,
+    /** Instances are added with lodOn = false: the main pass draws nothing. */
+    readonly shadowOnly = false,
   ) {
     const m = new PropBatchedMesh(this.maxInst, this.maxV, this.maxI, material);
     m.owner = this;
@@ -202,9 +215,9 @@ export class MultiBatch implements PropBatch {
     m.perObjectFrustumCulled = false; // our own culling (onBeforeRender / onBeforeShadow)
     m.frustumCulled = false;
     m.castShadow = false;
-    m.receiveShadow = shadows;
+    m.receiveShadow = shadows && !shadowOnly;
     m.visible = false;
-    m.name = 'prop-multibatch';
+    m.name = shadowOnly ? 'prop-shadow-casters' : 'prop-multibatch';
     setupWindMesh(m);
     this.shadowsOn = shadows;
     this.mesh = m;
@@ -463,7 +476,7 @@ export class MultiBatch implements PropBatch {
 
   setShadows(on: boolean): void {
     this.shadowsOn = on;
-    this.mesh.receiveShadow = on;
+    this.mesh.receiveShadow = on && !this.shadowOnly;
     if (!on) this.mesh.castShadow = false;
     this.dirty = true;
   }
@@ -480,6 +493,7 @@ export class MultiBatch implements PropBatch {
 /** InstancedMesh back-end: one geometry + material, swap-remove packed storage. */
 export class InstancedBatch implements PropBatch {
   mesh: THREE.InstancedMesh;
+  readonly shadowOnly = false;
   private cap = 0;
   n = 0;
   /** Master matrices (all live instances, packed). */

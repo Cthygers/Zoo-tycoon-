@@ -791,7 +791,8 @@ export function paintAtlasesOffThread(onProgress?: (fraction: number) => void): 
     };
     worker.onmessage = (e: MessageEvent<{ kind: AtlasKind; mips: Mip[] }>) => {
       if (!pendingMips.has(e.data.kind)) pendingMips.set(e.data.kind, e.data.mips);
-      onProgress?.(++done / kinds.length);
+      done++;
+      onProgress?.(done / kinds.length);
       if (done === kinds.length) finish();
     };
     worker.onerror = (e) => {

@@ -3,11 +3,11 @@
 // made of noise-displaced SDF volumes; females are sleeker and maneless.
 
 import { cone, ellipsoid, mirrorX, symmetric, roundBox, sphere, transformPoint, transformPrims, type Prim, type PrimOpts, type Vec3 } from '../sdf/prims';
-import { quadSkeleton, seat, surfacePoint, withRegion, type QuadJoints } from '../kit/quadruped';
+import { CUB_PAWS, quadSkeleton, seat, surfacePoint, withRegion, type QuadJoints } from '../kit/quadruped';
 import { actCall, quadParams, quadrupedDriver, type QuadState } from '../anim/quadruped';
 import { driver } from '../anim/util';
 import { blendHex, clamp01, fbm, smooth } from '../coat/coat';
-import type { AnimCtx, CoatSample, CreatureDesign, DesignContext, SpeciesModel } from '../types';
+import type { AnimCtx, BoneSpec, CoatSample, CreatureDesign, DesignContext, SpeciesModel } from '../types';
 import type { Pose } from '../rig/rig';
 
 const POLL: Vec3 = [0, 1.02, 0.82];
@@ -109,18 +109,33 @@ function manePrims(): Prim[] {
   const o = (blend: number, seed: number, amp: number, freq?: number): PrimOpts => ({ blend, part: 'mane', region: 'mane', noise: hair(seed, amp, freq) });
   return [
     // ruff: a thick disc behind the face, from the brow over the cheeks to the throat
-    ellipsoid('head', [0, 0.93, 0.73], [0.33, 0.29, 0.15], { rot: [-0.12, 0, 0], ...o(0.07, 31, 0.02, 8) }),
+    ellipsoid('mane_head', [0, 0.93, 0.73], [0.33, 0.29, 0.15], { rot: [-0.12, 0, 0], ...o(0.07, 31, 0.02, 8) }),
     // crown cap between and behind the ears
-    ellipsoid('head', [0, 1.11, 0.735], [0.16, 0.105, 0.15], o(0.09, 32, 0.014)),
+    ellipsoid('mane_head', [0, 1.11, 0.735], [0.16, 0.105, 0.15], o(0.09, 32, 0.014)),
     // neck mane, its crest rising above the nape
-    ellipsoid('neck_1', [0, 1.0, 0.565], [0.235, 0.265, 0.255], { rot: [-0.25, 0, 0], ...o(0.1, 33, 0.018) }),
+    ellipsoid('mane_neck', [0, 1.0, 0.565], [0.235, 0.265, 0.255], { rot: [-0.25, 0, 0], ...o(0.1, 33, 0.018) }),
     // shoulder fringe fading into the withers
-    ellipsoid('chest', [0, 0.99, 0.37], [0.22, 0.2, 0.16], o(0.14, 34, 0.014)),
+    ellipsoid('mane_chest', [0, 0.99, 0.37], [0.22, 0.2, 0.16], o(0.14, 34, 0.014)),
     // throat and chest bib hanging between the forelegs
-    ellipsoid('neck_1', [0, 0.76, 0.63], [0.155, 0.2, 0.15], o(0.1, 35, 0.016)),
-    ellipsoid('chest', [0, 0.64, 0.5], [0.12, 0.17, 0.12], o(0.09, 36, 0.016)),
+    ellipsoid('mane_neck', [0, 0.76, 0.63], [0.155, 0.2, 0.15], o(0.1, 35, 0.016)),
+    ellipsoid('mane_chest', [0, 0.64, 0.5], [0.12, 0.17, 0.12], o(0.09, 36, 0.016)),
   ];
 }
+
+/**
+ * Mane bones: the mane volumes hang on them so a young male's mane can grow
+ * in (babyBones). Each sits inside the body part it covers (head, neck axis,
+ * chest), so a shrunken mane draws in around that part rather than off it.
+ */
+const MANE_BONES: BoneSpec[] = [
+  { name: 'mane_head', parent: 'head', pos: [0, 0.93, 0.76] },
+  { name: 'mane_neck', parent: 'neck_1', pos: [0, 0.92, 0.565] },
+  { name: 'mane_chest', parent: 'chest', pos: [0, 0.82, 0.42] },
+];
+/** Young males switch to the maned mesh at this growth, with the mane at ~2/3 size. */
+const MANE_FROM = 0.55;
+/** Newborn mane bone scale: eases (with growth 0.15 … 0.95) to ≈ 0.68 at MANE_FROM and 1 when adult. */
+const MANE_BABY = 0.35;
 
 function bodyPrims(male: boolean): Prim[] {
   const g = male ? 1 : 0.94;
@@ -308,7 +323,7 @@ function design(ctx: DesignContext): CreatureDesign {
   const male = ctx.sex === 'M';
   const headScale = male ? 1.2 : 1.06;
   const J = joints(headScale);
-  const sk = quadSkeleton(J);
+  const sk = quadSkeleton(male ? { ...J, extra: MANE_BONES } : J);
   const headT = { scale: headScale, about: POLL };
   const head = withRegion(transformPrims(headPrims(male), headT), 'head');
   const prims: Prim[] = [
@@ -383,8 +398,10 @@ function design(ctx: DesignContext): CreatureDesign {
     anim: driver({ ...base, actions: { ...base.actions, call: roar } }),
     babyScale: 0.3,
     babyHead: 1.35,
-    // cubs have big, clumsy paws
-    babyBones: { FL_foot: 1.15, FR_foot: 1.15, FL_toe: 1.15, FR_toe: 1.15, HL_toe: 1.25, HR_toe: 1.25 },
+    // cubs have short, stubby legs
+    babyLegs: 0.82,
+    // cubs have big, clumsy paws (on top of the short legs); a young male's mane grows in
+    babyBones: male ? { ...CUB_PAWS, mane_head: MANE_BABY, mane_neck: MANE_BABY, mane_chest: MANE_BABY } : CUB_PAWS,
     height: male ? 1.35 : 1.15,
     radius: 0.55,
   };
@@ -393,6 +410,7 @@ function design(ctx: DesignContext): CreatureDesign {
 const lion: SpeciesModel = {
   id: 'lion',
   dimorphic: true,
+  maturesAt: MANE_FROM,
   design,
   instanceScale: (sex, r) => (sex === 'M' ? 1.04 : 0.9) * (0.97 + r * 0.06),
 };

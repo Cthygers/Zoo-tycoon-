@@ -1,13 +1,13 @@
 // Water surface at WATER_LEVEL over water tiles (plus a one-tile margin so the
 // shoreline intersection with the terrain is covered). MeshPhysicalMaterial
 // (IOR 1.33, PMREM sky reflections, real sun glint and shadows) extended with
-// animated multi-octave normals, depth-based absorption (water depth comes from
-// a per-vertex attribute sampled from world.heightAt with the same
-// tessellation as the terrain), soft shoreline foam and premultiplied-alpha
+// animated multi-octave normals, sun glitter, depth-based absorption (water
+// depth comes from a per-vertex attribute sampled from world.heightAt with the
+// same tessellation as the terrain), soft shoreline foam and premultiplied-alpha
 // compositing so the reflection is not dimmed by transparency. Per-channel
 // absorption of the lake bed itself happens in the ground shader, so the
-// surface only veils what is below lightly in shallows (wading legs stay
-// visible) and strongly over deep pools.
+// surface only veils what is below lightly at the shore (the bed and wading
+// legs stay visible) and strongly over the middle of ponds and deep pools.
 
 import * as THREE from 'three';
 import { MAP_H, MAP_W, TILE, WATER_LEVEL } from '../core/constants';
@@ -46,10 +46,11 @@ export class WaterSurface {
       uWaves: { value: waves },
       uNoise: { value: noise },
       uTime: { value: 0 },
-      // body colour (in-scatter) of shallow / deep water: teal-green, light
-      // enough that deep pools never read as holes from a high camera
-      uDeep: { value: new THREE.Color(0.016, 0.052, 0.064) },
-      uShallow: { value: new THREE.Color(0.07, 0.1, 0.088) },
+      // body colour (in-scatter) of shallow / deep water: blue-teal (a green
+      // body over the olive bed reads as lawn from above), light enough that
+      // deep pools never read as holes from a high camera
+      uDeep: { value: new THREE.Color(0.016, 0.05, 0.068) },
+      uShallow: { value: new THREE.Color(0.05, 0.09, 0.1) },
       uBank: { value: new THREE.Color(0.02, 0.03, 0.015) },
     };
     const m = new THREE.MeshPhysicalMaterial({
@@ -81,20 +82,25 @@ export class WaterSurface {
           uniform vec3 uShallow;
           uniform vec3 uBank;
           varying float vDepth;
-          varying vec3 vWPos;`,
+          varying vec3 vWPos;
+          vec3 wGlintN;`,
         )
         .replace(
           '#include <map_fragment>',
           `float wDepth = vDepth;
           if (wDepth < -0.02) discard;
           vec3 wV = normalize(cameraPosition - vWPos);
+          float wDist = length(cameraPosition - vWPos);
           // seen from afar, sub-pixel ripples tilt many facets toward the
           // brighter sky: rougher, more reflective water (a sky sheen)
-          float wFar = smoothstep(30.0, 120.0, length(cameraPosition - vWPos));
+          float wFar = smoothstep(30.0, 120.0, wDist);
+          // close up, fine ripples and glitter resolve (faded out before they alias)
+          float wNear = 1.0 - smoothstep(25.0, 60.0, wDist);
           float pathLen = max(wDepth, 0.0) / max(wV.y, 0.22);
-          // clear-ish shallows (the bed is tinted per channel by the ground
-          // shader; wading legs stay visible), murky dark deep pools
-          float turbid = mix(0.3, 0.9, smoothstep(0.95, 1.85, wDepth));
+          // the bed shows through near the shore (tinted per channel by the
+          // ground shader); a body of murky pond water takes over within a
+          // metre or so, darker over deep pools
+          float turbid = mix(0.55, 0.95, smoothstep(0.95, 1.85, wDepth));
           float absorb = 1.0 - exp(-pathLen * turbid);
           // shoreline foam: thin, broken, slowly pulsing
           float fn = texture2D(uNoise, vWPos.xz * 0.6 + vec2(uTime * 0.02, -uTime * 0.015)).b;
@@ -112,11 +118,16 @@ export class WaterSurface {
             vec2 s1 = texture2D(uWaves, p / 9.0 + vec2(uTime * 0.011, uTime * 0.007)).rg - 0.5;
             vec2 s2 = texture2D(uWaves, p / 3.7 + vec2(-uTime * 0.017, uTime * 0.012)).rg - 0.5;
             vec2 s3 = texture2D(uWaves, p / 1.3 + vec2(uTime * 0.026, -uTime * 0.02)).rg - 0.5;
-            vec2 sl = (s1 * 0.9 + s2 * 0.6 + s3 * 0.35) * 0.3;
+            vec2 s4 = texture2D(uWaves, p / 0.47 + vec2(-uTime * 0.05, -uTime * 0.034)).rg - 0.5;
+            vec2 sl = (s1 * 0.9 + s2 * 0.6 + s3 * 0.35 + s4 * 0.3 * wNear) * 0.3;
             // calm water near the shore
             sl *= 0.45 + 0.55 * smoothstep(0.0, 0.4, wDepth);
             vec3 nW = normalize(vec3(-sl.x, 1.0, -sl.y));
             normal = normalize((viewMatrix * vec4(nW, 0.0)).xyz);
+            // capillary wavelets, far steeper than the normal map resolves:
+            // they only matter for the sun glitter below
+            vec2 sg = (s3 * 1.4 + s4 * 2.2) * 0.3;
+            wGlintN = normalize((viewMatrix * vec4(normalize(vec3(-sl.x - sg.x, 1.0, -sl.y - sg.y)), 0.0)).xyz);
           }`,
         )
         .replace(
@@ -130,10 +141,21 @@ export class WaterSurface {
             vec3 wDiff = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse;
             float NdV = clamp(dot(normal, geometryViewDir), 0.0, 1.0);
             // Schlick Fresnel (already part of the BRDF's specular), raised to a
-            // reflectance floor for distant water
+            // reflectance floor: ripples always tilt some facets toward the
+            // brighter low sky, so even steep views keep a sky / cloud sheen
             float Fs = 0.02 + 0.98 * pow(1.0 - NdV, 5.0);
-            float F = max(Fs, 0.1 * wFar);
+            float F = max(Fs, mix(0.065, 0.1, wFar));
             vec3 wSpec = reflectedLight.directSpecular + reflectedLight.indirectSpecular * (F / Fs);
+            #if NUM_DIR_LIGHTS > 0
+            {
+              // sun glitter: the last directional light of the lighting loop
+              // is the sun / moon (shadowed); wavelet facets facing the half
+              // vector flash as sparse, twinkling points over a wide cone
+              float nh = max(dot(wGlintN, normalize(directLight.direction + geometryViewDir)), 0.0);
+              float glint = pow(nh, 900.0) * 3.0 * wNear * (1.0 - foam);
+              wSpec += directLight.color * glint;
+            }
+            #endif
             float a = clamp(max(absorb, foam), 0.0, 1.0);
             float alpha = a + (1.0 - a) * F;
             gl_FragColor = vec4(wDiff * a * (1.0 - F) + wSpec * (1.0 - foam * 0.7), alpha);

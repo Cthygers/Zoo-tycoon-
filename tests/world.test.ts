@@ -26,6 +26,21 @@ describe('World', () => {
     w.setFence({ dir: 'v', x: 9, z: 5 }, 1); // partial divider doesn't split
     expect(w.habitatAt(6, 6)?.id).toBe(id);
   });
+  it('moves an object under its own id, and later objects still get fresh ids', () => {
+    const events = new EventBus();
+    const w = new World(events, 1);
+    const seen: string[] = [];
+    events.on('objectRemoved', (e) => seen.push(`-${e.id}`));
+    events.on('objectAdded', (e) => seen.push(`+${e.id}`));
+    const o = w.addObject('bench', 10, 10, 0, 42);
+    w.moveObject(o.id, 20, 12, 5);
+    expect(seen).toEqual([`+${o.id}`, `-${o.id}`, `+${o.id}`]);
+    expect(w.objects.get(o.id)).toMatchObject({ tx: 20, tz: 12, rot: 1, seed: 42 });
+    expect(w.objectAt(10, 10)).toBeUndefined();
+    expect(w.objectAt(20, 12)?.id).toBe(o.id);
+    expect(w.moveObject(9999, 1, 1, 0)).toBeUndefined();
+    expect(w.addObject('bench', 30, 30, 0).id).toBeGreaterThan(o.id);
+  });
   it('carves water below the water level', () => {
     const w = new World(new EventBus(), 1);
     w.setTerrainRect({ x0: 10, z0: 10, x1: 14, z1: 14 }, Terrain.DeepWater);

@@ -85,9 +85,9 @@ function earPrims(): Prim[] {
   const mid: Vec3 = [(base[0] + tip[0]) / 2, (base[1] + tip[1]) / 2, (base[2] + tip[2]) / 2];
   const rot: Vec3 = [-0.25, 0.3, -0.24];
   const left: Prim[] = [
+    // opening facing forward / outward; no carved cup: carving the thin plate folds it into
+    // back-facing slivers that show as holes; the coat paints the inside instead
     ellipsoid('ear.L', mid, [0.05, 0.1, 0.02], { rot, blend: 0.02, part: 'ear', region: 'ears' }),
-    // cupped opening facing forward / outward
-    ellipsoid('ear.L', [mid[0] + 0.008, mid[1] + 0.012, mid[2] + 0.019], [0.037, 0.085, 0.016], { rot, sub: true, blend: 0.008, part: 'ear', region: 'ears' }),
     cone('ear.L', [0.048, 1.71, 0.94], [0.07, 1.79, 0.925], 0.032, 0.036, { blend: 0.03, part: 'ear', region: 'ears' }),
   ];
   return transformPrims([...left, ...mirrorX(left)], HEAD_T);
@@ -304,8 +304,12 @@ function zebraCoat(c: CoatSample): void {
     const k = smooth(0.1, 0.45, tf);
     blendHex(c.color, BLACK, k);
   }
-  // ears: dark tips, pale fringe inside
+  // ears: dark tips; the opening (facing forward / outward) pale, unstriped
+  // inside a dark rim
   if (c.part === 'ear') {
+    const inner = smooth(0.25, 0.7, c.nz * 0.8 + Math.sign(c.x) * c.nx * 0.45) * smooth(1.76, 1.8, y) * smooth(1.9, 1.86, y);
+    blendHex(c.color, 0xe6e0d4, inner * 0.85);
+    c.w *= 1 - inner;
     const tipK = smooth(1.87, 1.93, y);
     blendHex(c.color, BLACK, tipK);
     c.w *= 1 - tipK;
@@ -359,6 +363,8 @@ function design(ctx: DesignContext): CreatureDesign {
     anim: driver(quadrupedDriver(p)),
     babyScale: 0.42,
     babyHead: 1.25,
+    // foals stand on long legs
+    babyLegs: 1.3,
     height: 1.75,
     radius: 0.6,
   };

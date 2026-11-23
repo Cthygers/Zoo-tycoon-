@@ -216,8 +216,6 @@ export class RiggedModel implements CreatureModel {
   private readonly slots: Slot[] = [];
   private readonly spare: Pose[] = [];
   protected out!: Pose;
-  /** Per-bone juvenile scale (head, growing tusks / horns …), from design.babyHead / babyBones. */
-  private boneScale!: Float32Array;
   /** Bone indices and newborn scales of design.babyBones (resolved per asset). */
   private babyBones: { bone: number; scale: number }[] = [];
   protected baseScale = 1;
@@ -289,7 +287,6 @@ export class RiggedModel implements CreatureModel {
     this.rt = new RigRuntime(asset.rig);
     this.out = new Pose(asset.rig.count);
     if (lastPose && lastPose.q.length === asset.rig.count) this.out.copy(lastPose);
-    this.boneScale = new Float32Array(asset.rig.count).fill(1);
     // instance identity and the animation inputs carry over from the previous context
     const c: Partial<AnimCtx> & Pick<AnimCtx, 'time' | 'seed' | 'rand' | 'sex' | 'role'> = this.ctx ?? init!;
     this.ctx = {
@@ -372,15 +369,26 @@ export class RiggedModel implements CreatureModel {
     else this.applyGrowth();
   }
 
+  /**
+   * Per-bone juvenile scale (head, legs, growing tusks / horns …), from
+   * design.babyHead / babyLegs / babyBones. Shared with the rig runtime so the
+   * driver's IK works with the proportions that are drawn.
+   */
+  private get boneScale(): Float32Array {
+    return this.rt.boneScale;
+  }
+
   /** Root scale, juvenile bone scales and the batched look for the current growth. */
   private applyGrowth(): void {
     const d = this.asset.design;
+    const roles = this.asset.roles;
     this.object.scale.setScalar(this.baseScale * lerp(d.babyScale ?? 0.4, 1, this.growth));
     this.ctx.growth = this.growth;
     const bs = this.boneScale;
     bs.fill(1);
-    const head = this.asset.roles.head;
-    if (head >= 0) bs[head] = lerp(d.babyHead ?? 1.3, 1, this.growth);
+    if (roles.head >= 0) bs[roles.head] = lerp(d.babyHead ?? 1.3, 1, this.growth);
+    const legScale = lerp(d.babyLegs ?? 1, 1, this.growth);
+    for (const leg of Object.values(roles.legs)) if (leg) bs[leg.lower] *= legScale;
     const k = smooth(BABY_BONES_FROM, BABY_BONES_TO, this.growth);
     for (const b of this.babyBones) bs[b.bone] *= lerp(b.scale, 1, k);
     if (this.batch) {

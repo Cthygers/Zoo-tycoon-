@@ -7,7 +7,7 @@
 
 import * as THREE from 'three';
 import { cone, ellipsoid, mirrorX, roundBox, sphere, type Prim, type Vec3 } from '../../sdf/prims';
-import { quadSkeleton, type QuadJoints } from '../../kit/quadruped';
+import { CUB_PAWS, quadSkeleton, type QuadJoints } from '../../kit/quadruped';
 import {
   actCall,
   actIdle,
@@ -199,7 +199,7 @@ function bearDriver(p: QuadParams, b: BearAnim): AnimDriver<PRState> {
       if (leg.r.scap >= 0) rig.fkBone(pose, leg.r.scap);
       rig.fkBone(pose, leg.r.upper);
       const Hj = rig.wp[leg.r.upper];
-      const reach = leg.chain.a + leg.chain.b;
+      const reach = leg.reach;
       if (!leg.front) {
         // hind legs stretched out behind, soles turned up ("frog" lying)
         const dy = Math.max(0, Hj.y - 0.1);
@@ -266,7 +266,7 @@ function bearDriver(p: QuadParams, b: BearAnim): AnimDriver<PRState> {
     if (leg.r.scap >= 0) rig.fkBone(pose, leg.r.scap);
     rig.fkBone(pose, leg.r.upper);
     const Hj = rig.wp[leg.r.upper];
-    _A.set(Hj.x * 0.9, Hj.y - leg.legLen * (0.62 - 0.35 * swat), Hj.z + leg.legLen * (0.25 + 0.35 * swat));
+    _A.set(Hj.x * 0.9, Hj.y - leg.scaledLen * (0.62 - 0.35 * swat), Hj.z + leg.scaledLen * (0.25 + 0.35 * swat));
     placeLeg(ctx, st, pose, leg, _A, 0.6 - 0.9 * swat, 0.8 - 0.6 * swat);
     neckHead(ctx, pose, 0.1 * swat, (which ? -0.25 : 0.25) * swat, 0.1, 0, (which ? 0.15 : -0.15) * swat);
     jaw(ctx, pose, 0.15 * swat);
@@ -326,13 +326,13 @@ function bearDriver(p: QuadParams, b: BearAnim): AnimDriver<PRState> {
       if (leg.front) {
         // big paddling strokes, alternating
         const ph = (cyc + (leg.side > 0 ? 0 : 0.5)) * TAU;
-        const rad = leg.legLen * 0.24;
-        _A.set(Hj.x, Hj.y - leg.legLen * 0.55 + Math.sin(ph) * rad * 0.55, Hj.z + leg.legLen * 0.18 + Math.cos(ph) * rad);
+        const rad = leg.scaledLen * 0.24;
+        _A.set(Hj.x, Hj.y - leg.scaledLen * 0.55 + Math.sin(ph) * rad * 0.55, Hj.z + leg.scaledLen * 0.18 + Math.cos(ph) * rad);
         placeLeg(ctx, st, pose, leg, _A, 0.5 + Math.sin(ph) * 0.5, 0.3);
       } else {
         // hind legs stretched back as rudders, gently kicking
         const ph = (cyc * 0.5 + (leg.side > 0 ? 0.25 : 0.75)) * TAU;
-        _A.set(Hj.x, Hj.y - leg.legLen * 0.45 + Math.sin(ph) * 0.03, Hj.z - leg.legLen * 0.45);
+        _A.set(Hj.x, Hj.y - leg.scaledLen * 0.45 + Math.sin(ph) * 0.03, Hj.z - leg.scaledLen * 0.45);
         placeLeg(ctx, st, pose, leg, _A, -1.1, -0.6);
       }
     }
@@ -397,6 +397,9 @@ export function bearDesign(ctx: DesignContext, s: BearDesignSpec): CreatureDesig
     anim: driver(bearDriver(p, s.anim)),
     babyScale: s.babyScale ?? 0.25,
     babyHead: 1.4,
+    // cubs have short, stubby legs
+    babyLegs: 0.85,
+    babyBones: CUB_PAWS,
     height: s.height,
     radius: s.radius,
   };

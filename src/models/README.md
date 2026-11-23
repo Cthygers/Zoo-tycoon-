@@ -78,7 +78,8 @@ export default okapi;
 | `eyes` | `[{ bone, pos (left eye), radius, color? }]` — glossy spheres rigidly bound to the bone (mirrored). Use `surfacePoint()` + `seat()` to sit them on the head. |
 | `anim` | `driver(myDriver)` — see Animation. |
 | `babyScale`, `babyHead` | growth 0 → root scale / extra head scale. |
-| `babyBones` | per-bone newborn scale easing to 1 over growth 0.15 … 0.95: tusks / horns that grow in (put them on their own bone at the base, ≈ 0.05–0.1), oversized cub paws (> 1). |
+| `babyLegs` | newborn scale of the legs' `lower` bones (forearm / gaskin and below), easing linearly to 1: foals and calves stand on long legs (≈ 1.1–1.3), cubs on short ones (≈ 0.8–0.85). The quadruped driver lifts / lowers the standing trunk so the feet stay planted; lying and swimming heights stay the adult ones. |
+| `babyBones` | per-bone newborn scale easing to 1 over growth 0.15 … 0.95: tusks / horns that grow in (put them on their own bone at the base, ≈ 0.05–0.1), oversized cub paws (> 1, `CUB_PAWS` in kit/quadruped.ts), a young male's mane (lion: mane volumes on `mane_*` bones inside the parts they cover). |
 | `height`, `radius` | optional overrides (selection ring / picking). |
 
 ### Primitives (`sdf/prims.ts`)
@@ -111,7 +112,9 @@ transformPrims(prims, { scale, about, offset }) · transformPoint(p, t)   // mov
 * Budget at medium: big animals ≈ 6–10k triangles, small ≈ 4–6k. Check the
   numbers printed in the harness overlay; lower `regions.*.scale`/`aniso` or
   `resolution` if needed. Thin plates (ears) need ≥ 3 cells across their
-  thickness or they break up.
+  thickness or they break up. Don't carve cups into them (`sub`): the
+  remaining wall folds into back-facing slivers that show as holes — paint
+  the inside of the ear in the coat (by normal / facing) instead.
   Seams: the coarse mesh sinks under the fine one from just before the fine
   mesh ends to the junction itself (`SEAM` in build/geometry.ts; harness
   `?legacy=1` / `?seamSink=` for A/B), never past the middle of a thin part.
@@ -182,6 +185,15 @@ giraffe browsing high: target y = 4.5), `neckHead`, `lookAround`, `tail`,
 `ears`, `jaw`, `lie`, `act*` defaults. `post` is ideal for extra chains
 (trunk sway, ear flaps) because it runs on top of every action.
 
+Juvenile proportions (`babyHead`, `babyLegs`, `babyBones`) are per-instance
+bone scales on the rig runtime (`RigRuntime.boneScale`), so FK, `reachMuzzle`
+and the two-bone IK see the proportions that are drawn. A custom action that
+stands on its feet without `body()` calls `standingLift(st, pose, root)`
+first (as `crouch` and `rearUp` do); one that sets an absolute trunk height
+(lying, sitting on the rump, swimming) does not. For planting and reach use
+`leg.kFoot` / `leg.kToe` (or `plantLeg` / `ankleFor`), `leg.reach` and
+`leg.scaledLen` instead of the rest `chain.a + chain.b` / `legLen`.
+
 ## Adding a rig kind (bird, penguin, primate …)
 
 No framework edits are needed: a rig kind is just bones + roles + a driver.
@@ -231,6 +243,7 @@ http://localhost:5302/harness/creatures.html?species=okapi&action=walk&speed=1.4
   params: species, sex=M|F, action, speed, t (freeze time), yaw, pitch, dist, ty/tz (look-at),
           detail=0|1|2, growth, seed, wire=1 (wireframe), live=1, noshadow=1
 ?grid=1     all species side by side (+ 1.8 m human)       ?humans=1  crowd with actions / items
+?grid=1&species=zebra,lion&ages=1,0.5,0.2&action=sleep     chosen species at several growths
 ?person=1&action=sit&hold=icecream&sex=F&hair=1&role=vet   single human   (?humans=1&hseed=5 varies outfits)
 ?legacy=1 | ?seamSink=0.35&seamFull=1.2 …   region seam A/B (see SEAM in build/geometry.ts)
 node scripts/shot.cjs "<url>" out.png --wait=8000 --size=1280x720

@@ -4,8 +4,11 @@
 //    encoded height slope (xy) + roughness + cavity AO;
 //  - a tileable 4-channel noise texture (macro variation, clouds, caustics);
 //  - a tileable water wave normal map.
-// Everything is rendered with full-screen passes into render targets, so it
-// costs a few milliseconds on the GPU and no CPU time. Render targets are lost
+// Everything is rendered with full-screen passes into render targets: no CPU
+// time, but the ground shaders are heavy, so on slow GPUs the passes take long
+// enough to stall the main thread at its next GPU sync. While loading,
+// `generateAsync()` compiles the programs in parallel and submits the work in
+// small passes, waiting for the GPU between batches. Render targets are lost
 // with the GL context, so `generate()` must be called again after a restore.
 
 import * as THREE from 'three';
@@ -631,6 +634,32 @@ void main() {
 }
 `;
 
+/** Texels one generation pass renders at most (bounds the GPU work in flight while loading). */
+const PASS_TEXELS = 256 * 256;
+/** GPU time a batch of loading passes should take; fast GPUs batch many passes per round trip. */
+const BATCH_MS = 60;
+
+/**
+ * Resolves once the GPU has executed every command submitted so far. Polls a
+ * fence between tasks instead of blocking the main thread; gives up after a
+ * while (e.g. context loss) rather than hanging the caller.
+ */
+function gpuDone(gl: WebGL2RenderingContext, timeoutMs = 8000): Promise<void> {
+  const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+  if (!sync) return Promise.resolve();
+  gl.flush();
+  const t0 = performance.now();
+  return new Promise((resolve) => {
+    const poll = () => {
+      if (gl.getSyncParameter(sync, gl.SYNC_STATUS) === gl.SIGNALED || performance.now() - t0 > timeoutMs) {
+        gl.deleteSync(sync);
+        resolve();
+      } else setTimeout(poll, 4);
+    };
+    setTimeout(poll, 0);
+  });
+}
+
 export interface GroundTextureSet {
   /** sqrt(albedo).rgb + height, one layer per GroundLayer. */
   readonly albedo: THREE.DataArrayTexture;
@@ -771,42 +800,96 @@ export class GroundTextures implements GroundTextureSet {
     return this.foliageRT.texture;
   }
 
-  /** Render every texture. Call once at start-up and after a context restore. */
+  /** Render every texture at once (after a context restore or a tier change). */
   generate(): void {
+    for (const pass of this.passes()) this.run(pass);
+  }
+
+  /**
+   * Render every texture without long main-thread stalls (loading): compile the
+   * programs in parallel, then submit the passes in batches, waiting for the GPU
+   * to finish each batch so that little work is ever queued (any GPU sync then
+   * stalls briefly). Batches start at one pass and are sized from the measured
+   * time per pass: slow GPUs keep one pass per round trip, fast ones finish in a
+   * few.
+   */
+  async generateAsync(): Promise<void> {
+    const programs = new THREE.Scene();
+    for (const m of [this.noiseMat, this.wavesMat, this.foliageMat, this.groundMat, this.detailMat]) {
+      const mesh = new THREE.Mesh(this.quad.geometry, m);
+      mesh.frustumCulled = false;
+      programs.add(mesh);
+    }
+    await this.renderer.compileAsync(programs, this.quadCam);
+    const gl = this.renderer.getContext() as WebGL2RenderingContext;
+    const passes = this.passes();
+    let msPerPass = BATCH_MS;
+    for (let i = 0; i < passes.length; ) {
+      const n = Math.min(Math.max(1, Math.floor(BATCH_MS / msPerPass)), passes.length - i);
+      const t0 = performance.now();
+      for (const end = i + n; i < end; i++) this.run(passes[i]);
+      await gpuDone(gl);
+      // layers differ in cost: shrink at once, grow at most 2× per batch
+      msPerPass = Math.max((performance.now() - t0) / n, msPerPass / 2);
+    }
+  }
+
+  /**
+   * All generation work as ordered passes of at most PASS_TEXELS texels: every
+   * ground layer (in row bands at high resolution) of the albedo / height array
+   * and of the detail array that derives from it, then the flat textures. (The
+   * heavy grass layer comes first, so batch sizing starts from a pessimistic
+   * measurement.)
+   */
+  private passes(): (() => void)[] {
+    const out: (() => void)[] = [];
+    const res = this.resolution;
+    const bandRows = Math.max(1, Math.floor(PASS_TEXELS / res));
+    for (let pass = 0; pass < 2; pass++) {
+      const rt = pass === 0 ? this.heightRT : this.detailRT;
+      const mat = pass === 0 ? this.groundMat : this.detailMat;
+      const u = mat.uniforms;
+      for (let layer = 0; layer < GROUND_LAYERS; layer++)
+        for (let y = 0; y < res; y += bandRows) {
+          const rows = Math.min(bandRows, res - y);
+          out.push(() => {
+            // mipmaps once, after the last band of the last layer
+            rt.texture.mipmapsAutoUpdate = layer === GROUND_LAYERS - 1 && y + rows >= res;
+            u.uLayer.value = layer;
+            if (u.uSlopeScale) u.uSlopeScale.value = LAYER_RELIEF_M[layer] / (LAYER_SIZE_M[layer] / res);
+            rt.scissor.set(0, y, res, rows);
+            rt.scissorTest = rows < res;
+            this.draw(mat, rt, layer);
+            rt.scissorTest = false;
+          });
+        }
+    }
+    out.push(
+      () => this.draw(this.noiseMat, this.noiseRT),
+      () => this.draw(this.wavesMat, this.wavesRT),
+      () => this.draw(this.foliageMat, this.foliageRT),
+    );
+    return out;
+  }
+
+  /** Run one pass with the renderer state it needs, restoring the caller's. */
+  private run(pass: () => void): void {
     const r = this.renderer;
     const prevTarget = r.getRenderTarget();
     const prevAutoClear = r.autoClear;
     const prevXr = r.xr.enabled;
     r.xr.enabled = false;
     r.autoClear = false;
-
-    this.quad.material = this.noiseMat;
-    r.setRenderTarget(this.noiseRT);
-    r.render(this.quadScene, this.quadCam);
-    this.quad.material = this.wavesMat;
-    r.setRenderTarget(this.wavesRT);
-    r.render(this.quadScene, this.quadCam);
-    this.quad.material = this.foliageMat;
-    r.setRenderTarget(this.foliageRT);
-    r.render(this.quadScene, this.quadCam);
-
-    for (let pass = 0; pass < 2; pass++) {
-      const rt = pass === 0 ? this.heightRT : this.detailRT;
-      const mat = pass === 0 ? this.groundMat : this.detailMat;
-      const u = mat.uniforms;
-      this.quad.material = mat;
-      for (let layer = 0; layer < GROUND_LAYERS; layer++) {
-        rt.texture.mipmapsAutoUpdate = layer === GROUND_LAYERS - 1;
-        u.uLayer.value = layer;
-        if (u.uSlopeScale) u.uSlopeScale.value = LAYER_RELIEF_M[layer] / (LAYER_SIZE_M[layer] / this.resolution);
-        r.setRenderTarget(rt, layer);
-        r.render(this.quadScene, this.quadCam);
-      }
-      rt.texture.mipmapsAutoUpdate = true;
-    }
+    pass();
     r.setRenderTarget(prevTarget);
     r.autoClear = prevAutoClear;
     r.xr.enabled = prevXr;
+  }
+
+  private draw(mat: THREE.RawShaderMaterial, rt: THREE.WebGLRenderTarget | THREE.WebGLArrayRenderTarget, layer = 0): void {
+    this.quad.material = mat;
+    this.renderer.setRenderTarget(rt, layer);
+    this.renderer.render(this.quadScene, this.quadCam);
   }
 
   dispose(): void {

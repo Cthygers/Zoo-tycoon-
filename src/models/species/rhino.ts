@@ -164,16 +164,17 @@ function hornPrims(male: boolean): Prim[] {
 
 function earPrims(): Prim[] {
   const left: Prim[] = [
-    // tubular ear: rolled cone, open to the front / side
+    // tubular ear: a rolled cone. Its opening (front / side) is painted by the
+    // coat, not carved: carving the thin wall folds it into back-facing
+    // slivers that show as holes and shards, worst on the low tier
     cone('ear.L', [0.14, 1.5, 1.28], [0.2, 1.7, 1.24], 0.045, 0.06, { blend: 0.03, part: 'ear', region: 'ears' }),
     ellipsoid('ear.L', [0.205, 1.73, 1.24], [0.055, 0.045, 0.06], { blend: 0.02, part: 'ear', region: 'ears' }),
-    cone('ear.L', [0.17, 1.58, 1.28], [0.215, 1.76, 1.27], 0.025, 0.04, { sub: true, blend: 0.01, part: 'ear', region: 'ears' }),
-    // fringe of hair on the rim
+    // fringe of hair on the rim (gentle noise: fine ridged noise breaks up on a coarse grid)
     ellipsoid('ear.L', [0.21, 1.775, 1.24], [0.05, 0.02, 0.055], {
       blend: 0.015,
       part: 'fringe',
       region: 'ears',
-      noise: { amp: 0.006, freq: 60, stretch: [1, 0.2, 1], ridged: true, seed: 81 },
+      noise: { amp: 0.004, freq: 30, stretch: [1, 0.3, 1], seed: 81 },
     }),
   ];
   return [...left, ...mirrorX(left)];
@@ -309,6 +310,11 @@ function rhinoCoat(eye: Vec3, male: boolean) {
       c.w = 0;
     }
     if (y < 0.025) blendHex(c.color, 0x36312c, 0.6);
+    // ear opening: dark inside the rolled cone, facing forward / outward near the top
+    if (c.part === 'ear') {
+      const facing = smooth(0.1, 0.7, c.nz * 0.75 + Math.sign(x) * c.nx * 0.45);
+      blendHex(c.color, 0x2a2420, facing * smooth(1.56, 1.7, y) * 0.75);
+    }
     if (c.part === 'fringe' || c.part === 'tuft') {
       blendHex(c.color, 0x2a2420, 0.8);
       c.fur = 3;
@@ -536,6 +542,8 @@ function design(ctx: DesignContext): CreatureDesign {
     anim: driver(makeDriver(ctx.def.height, ctx.def.walkSpeed, ctx.def.runSpeed)),
     babyScale: 0.3,
     babyHead: 1.2,
+    // calves are leggier than adults
+    babyLegs: 1.15,
     // calves are born hornless; the horns grow from the nasal bosses
     babyBones: { horn_1: 0.08, horn_2: 0.08 },
     height: 1.95,

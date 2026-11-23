@@ -96,10 +96,10 @@ function headPrims(): Prim[] {
     ellipsoid('jaw', hp(0, -0.112, 0.22), [0.062, 0.038, 0.12], { rot: [0.12, 0, 0], blend: 0.035, part: 'chin' }),
     // small brow ridges
     ...symmetric([ellipsoid('head', hp(0.052, 0.04, 0.2), [0.035, 0.025, 0.035], { blend: 0.03, part: 'head' })]),
-    // rounded, furry ears
+    // rounded, furry ears; no carved cup: carving the thin plate folds it into back-facing slivers
+    // that show as holes; the coat paints the inside instead
     ...symmetric([
       ellipsoid('ear.L', hp(0.103, 0.125, 0.02), [0.046, 0.046, 0.026], { rot: [-0.2, 0.4, -0.5], blend: 0.03, part: 'ear', region: 'ears' }),
-      ellipsoid('ear.L', hp(0.108, 0.13, 0.035), [0.028, 0.028, 0.012], { rot: [-0.2, 0.4, -0.5], sub: true, blend: 0.008, part: 'ear', region: 'ears' }),
     ]),
   ];
   return withRegion(head, 'head');
@@ -157,8 +157,8 @@ function grizzlyCoat(eye: Vec3) {
       c.gloss = 0.45 * k;
     }
     if (c.pw('chin') > 0.3 && z > POLL[2] + 0.25 && c.ny > -0.2) blendHex(c.color, 0x2a1f18, smooth(0.3, 0.6, c.pw('chin')) * 0.5);
-    // ears: dark brown, paler rim inside
-    if (c.part === 'ear') blendHex(c.color, 0x34261a, 0.75);
+    // ears: dark brown, darkest in the opening (facing forward / outward)
+    if (c.part === 'ear') blendHex(c.color, 0x34261a, 0.55 + 0.3 * smooth(0.2, 0.7, c.nz * 0.8 + Math.sign(x) * c.nx * 0.4));
     // claws: pale horn with darker bases
     const cw = c.pw('claw');
     if (cw > 0.2) {

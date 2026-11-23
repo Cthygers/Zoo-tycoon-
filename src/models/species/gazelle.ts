@@ -30,6 +30,7 @@ import {
   quadParams,
   reachMuzzle,
   standingBase,
+  standingLift,
   tail,
   type QuadParams,
 } from '../anim/quadruped';
@@ -377,7 +378,8 @@ const walk: Act = (ctx, st, pose) => {
   const k = stottWeight(st);
   if (k < 0.98) actWalk(ctx, st, pose);
   if (k > 0.02) {
-    if (k >= 0.98) pose.reset();
+    // stotting alone stands on the (juvenile) legs without the walk's body
+    if (k >= 0.98) standingLift(st, pose, ctx.roles.root);
     stotting(ctx, st, pose, k, st.speed * STOTT.period, st.b);
   }
 };
@@ -391,6 +393,7 @@ const play: Act = (ctx, st, pose) => {
   const on = u < 0.45 ? 1 : 0;
   const ph = on ? (t % STOTT.period) / STOTT.period : 0;
   if (on) {
+    standingLift(st, pose, ctx.roles.root);
     stotting(ctx, st, pose, 1, 0, ph);
   } else {
     actIdle(ctx, st, pose);
@@ -521,7 +524,7 @@ function standingSwim(ctx: AnimCtx, st: PRState, pose: Pose): void {
     rig.fkBone(pose, leg.r.upper);
     const Hj = rig.wp[leg.r.upper];
     const ph = (cyc + st.p.trot.offsets[leg.idx]) * TAU;
-    _A.set(Hj.x, Hj.y - leg.legLen * 0.6 + Math.sin(ph) * 0.04, Hj.z + Math.cos(ph) * 0.06);
+    _A.set(Hj.x, Hj.y - leg.scaledLen * 0.6 + Math.sin(ph) * 0.04, Hj.z + Math.cos(ph) * 0.06);
     placeLeg(ctx, st, pose, leg, _A, (leg.front ? 0.8 : -0.5) + Math.sin(ph) * 0.4, 0.5);
   }
 }
@@ -597,6 +600,8 @@ function design(ctx: DesignContext): CreatureDesign {
     anim: driver(gazelleDriver(p)),
     babyScale: 0.45,
     babyHead: 1.3,
+    // fawns stand on long legs
+    babyLegs: 1.3,
     // fawns are hornless: the horns grow in about their bases
     babyBones: { 'horn.L': 0.04, 'horn.R': 0.04 },
     height: male ? 0.95 : 0.85,

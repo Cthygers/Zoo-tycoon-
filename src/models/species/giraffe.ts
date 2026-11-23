@@ -189,8 +189,9 @@ function earPrims(): Prim[] {
   const mid = lerpV(base, tip, 0.5);
   const rot: Vec3 = [0.2, 0.36, -0.05];
   const left: Prim[] = [
+    // opening facing forward; no carved cup: carving the thin plate folds it into back-facing
+    // slivers that show as holes; the coat paints the inside instead
     ellipsoid('ear.L', mid, [0.125, 0.05, 0.024], { rot, blend: 0.02, part: 'ear', region: 'ears' }),
-    ellipsoid('ear.L', [mid[0] + 0.008, mid[1] + 0.006, mid[2] + 0.02], [0.095, 0.034, 0.014], { rot, sub: true, blend: 0.006, part: 'ear', region: 'ears' }),
     cone('ear.L', [0.075, 4.97, 1.85], [0.13, 4.975, 1.83], 0.028, 0.03, { blend: 0.02, part: 'ear', region: 'ears' }),
   ];
   return [...left, ...mirrorX(left)];
@@ -311,7 +312,7 @@ function giraffeCoat(male: boolean, eye: Vec3) {
     }
     // ears: pale inside, tan outside with dark tip
     if (c.part === 'ear') {
-      blendHex(c.color, 0xd9c7a2, 0.6);
+      blendHex(c.color, 0xd9c7a2, 0.25 + 0.5 * smooth(-0.1, 0.5, c.nz * 0.85 + c.ny * 0.3));
       blendHex(c.color, 0x5a3a22, smooth(0.25, 0.29, ax) * 0.7);
       c.w = 0;
     }
@@ -379,7 +380,7 @@ const _q = new THREE.Quaternion();
  * (unit, pointing up from the hoof) — splayed forelegs when drinking.
  */
 function plantAlong(ctx: AnimCtx, st: QuadState, pose: Pose, leg: LegRT, C: THREE.Vector3, dir: THREE.Vector3): void {
-  const len = leg.footVec.length() + leg.toeVec.length();
+  const len = leg.footVec.length() * leg.kFoot + leg.toeVec.length() * leg.kToe;
   _A.copy(C).addScaledVector(dir, len);
   placeLeg(ctx, st, pose, leg, _A, 0, 0);
   _U.copy(leg.footVec).add(leg.toeVec).normalize();
@@ -725,6 +726,8 @@ function design(ctx: DesignContext): CreatureDesign {
     anim: driver(makeDriver(3.25, ctx.def.walkSpeed, ctx.def.runSpeed)),
     babyScale: 0.36,
     babyHead: 1.25,
+    // calves stand on long legs
+    babyLegs: 1.3,
     height: male ? 5.2 : 5.1,
     radius: 0.9,
   };

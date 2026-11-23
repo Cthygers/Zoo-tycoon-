@@ -110,6 +110,26 @@ describe('guests spread over the whole zoo (GAME-2)', () => {
   }, 30_000);
 });
 
+describe('far exhibits get their share', () => {
+  it('sends parties to the showcase zoo’s far northern exhibits, not just the ones by the gate', () => {
+    const sim = demoSim();
+    const views = trackViews(sim);
+    const start = sim.day;
+    while (sim.day < start + 2) runUntil(sim, 24 * 60, views.sample);
+    const byName = new Map([...sim.world.habitats.values()].map((h) => [h.name, h.id]));
+    const visitors = (name: string) => [...views.viewed.values()].filter((v) => v.includes(byName.get(name)!)).length;
+    const far = visitors('Elephant Valley') + visitors('Tiger Forest') + visitors('Gorilla Grove');
+    // Before: 1 / 3 / 1 parties over three days at Elephant Valley, Tiger Forest and Gorilla Grove
+    // (59–64 path tiles from the gate) against ~170 at Lion Kopje by the promenade. The middle
+    // cross walk brings Elephant Valley and Gorilla Grove closer, and parties now pick their first
+    // exhibit by what they'd see and keep time for the one they set out for.
+    expect(visitors('Elephant Valley')).toBeGreaterThan(12);
+    expect(visitors('Tiger Forest')).toBeGreaterThan(0);
+    expect(visitors('Gorilla Grove')).toBeGreaterThan(0);
+    expect(far).toBeGreaterThan(visitors('Lion Kopje') * 0.2);
+  }, 30_000);
+});
+
 describe('ticket price and running costs (GAME-3)', () => {
   it('overpricing turns visitors away even when the ticket booths are the limit, and sours the visit', () => {
     const sim = demoSim();

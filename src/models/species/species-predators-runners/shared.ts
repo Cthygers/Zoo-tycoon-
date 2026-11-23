@@ -6,7 +6,7 @@
 
 import * as THREE from 'three';
 import { Pose, rotLocal, rotParent } from '../../rig/rig';
-import { LegRT, QuadState, advanceGait, initQuad, plantLeg, placeLeg, type QuadParams } from '../../anim/quadruped';
+import { LegRT, QuadState, advanceGait, initQuad, plantLeg, placeLeg, standingLift, type QuadParams } from '../../anim/quadruped';
 import { TAU, clamp, clamp01, hash1, lerp, smooth } from '../../anim/util';
 import type { AnimCtx, Vec3 } from '../../types';
 
@@ -101,8 +101,8 @@ export function placeLegPole(ctx: AnimCtx, pose: Pose, leg: LegRT, A: THREE.Vect
 /** Ankle position that puts the contact at C with the given foot / toe pitch (as plantLeg). */
 export function ankleFor(leg: LegRT, C: THREE.Vector3, footPitch: number, toePitch: number, out: THREE.Vector3): THREE.Vector3 {
   out.copy(C);
-  if (leg.r.toe >= 0) out.add(_V.copy(leg.toeVec).applyAxisAngle(_X, toePitch));
-  return out.add(_V.copy(leg.footVec).applyAxisAngle(_X, footPitch));
+  if (leg.r.toe >= 0) out.add(_V.copy(leg.toeVec).multiplyScalar(leg.kToe).applyAxisAngle(_X, toePitch));
+  return out.add(_V.copy(leg.footVec).multiplyScalar(leg.kFoot).applyAxisAngle(_X, footPitch));
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +117,7 @@ export function crouch(ctx: AnimCtx, st: QuadState, pose: Pose, front: number, h
   const R = ctx.roles;
   const rig = ctx.rig;
   const root = R.root;
+  standingLift(st, pose, root);
   pose.p[root].y -= hind;
   const dz = Math.max(0.1, st.chestZ - st.hipsZ);
   rotParent(pose, root, 'x', Math.atan2(front - hind, dz));
@@ -178,7 +179,7 @@ export function lieSide(ctx: AnimCtx, st: QuadState, pose: Pose, side: number, k
     if (leg.r.scap >= 0) rig.fkBone(pose, leg.r.scap);
     rig.fkBone(pose, leg.r.upper);
     const H = rig.wp[leg.r.upper];
-    const reach = (leg.chain.a + leg.chain.b) * k.reach;
+    const reach = leg.reach * k.reach;
     const upper = leg.side === side; // the legs on the upper flank
     // stretch outward along the ground, upper legs a little forward / back of the lower ones
     _A.set(H.x + side * reach, 0, H.z + (leg.front ? 0.18 : -0.12) * reach + (upper ? (leg.front ? 0.12 : -0.1) * reach : 0));
@@ -211,6 +212,8 @@ export function rearUp(ctx: AnimCtx, st: QuadState, pose: Pose, k: number, o: Re
   const R = ctx.roles;
   const rig = ctx.rig;
   const root = R.root;
+  // standing on the hind feet throughout: the juvenile leg lift applies
+  standingLift(st, pose, root);
   pose.p[root].y += (o.hipsY - st.hipsY) * k;
   pose.p[root].z += o.hipsDZ * k;
   rotParent(pose, root, 'x', -o.pitch * k);
@@ -233,7 +236,7 @@ export function rearUp(ctx: AnimCtx, st: QuadState, pose: Pose, k: number, o: Re
     }
     // planted ankle (on all fours) → dangling ankle (hanging in front of the chest)
     ankleFor(leg, leg.r.contact, 0, 0, _A);
-    const L = leg.legLen;
+    const L = leg.scaledLen;
     const sw = armSwing * (leg.side > 0 ? 1 : -1);
     _B.set(H.x * 0.92, H.y - L * 0.5 + sw * 0.04, H.z + L * 0.34 + sw * 0.05);
     _A.lerp(_B, kf);
@@ -279,7 +282,7 @@ export function rumpSit(ctx: AnimCtx, st: QuadState, pose: Pose, k: number, o: R
       _C.z = lerp(_C.z, H.z + 0.04, k);
       plantLeg(ctx, st, pose, leg, _C, 0, 0);
     } else {
-      const reach = (leg.chain.a + leg.chain.b) * o.legFwd;
+      const reach = leg.reach * o.legFwd;
       _A.set(H.x + leg.side * 0.06, Math.max(0.06, leg.footVec.length() * 0.3), H.z + reach);
       ankleFor(leg, leg.r.contact, 0, 0, _B);
       _A.lerp(_B, 1 - k);

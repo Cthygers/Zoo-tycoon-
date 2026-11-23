@@ -14,11 +14,14 @@
 //                   vertex-colour tint / AO.
 //
 // Shader patches live in prototype methods so Material.clone() (used for
-// ghost previews) keeps them. Every material / texture created here is cached
-// and released by disposeNatureResources().
+// ghost previews) keeps them; the constructors also make three honour
+// envMapIntensity under scene.environment (useEnvMapIntensity), which clones
+// get by running the constructor. Every material / texture created here is
+// cached and released by disposeNatureResources().
 
 import * as THREE from 'three';
 import type { QualityLevel, QualitySettings } from '../../core/contracts';
+import { useEnvMapIntensity } from '../../render/envIntensity';
 import { clearNoiseCache } from './tex';
 
 // ---------------------------------------------------------------------------
@@ -113,13 +116,21 @@ export function natureResourceStats(): { textures: number; materials: number } {
 // ---------------------------------------------------------------------------
 // Foliage
 
+// Light seen through the leaves is filtered by them (deeper green-yellow than
+// the leaf's reflected colour), and a low sun crosses a lot of crown before it
+// reaches a leaf, so back-lighting fades at grazing sun instead of turning a
+// sunrise canopy pale.
 const LEAF_LIGHT = /* glsl */ `
 uniform float uLeafTrans;
 void RE_Direct_Leaf( const in IncidentLight directLight, const in vec3 geometryPosition, const in vec3 geometryNormal, const in vec3 geometryViewDir, const in vec3 geometryClearcoatNormal, const in PhysicalMaterial material, inout ReflectedLight reflectedLight ) {
   RE_Direct_Physical( directLight, geometryPosition, geometryNormal, geometryViewDir, geometryClearcoatNormal, material, reflectedLight );
   float lfBack = pow( saturate( dot( -geometryViewDir, directLight.direction ) ), 4.0 );
   float lfWrap = saturate( 0.45 - 0.55 * dot( geometryNormal, directLight.direction ) );
-  reflectedLight.directDiffuse += directLight.color * BRDF_Lambert( material.diffuseContribution ) * ( lfBack * 1.6 + lfWrap * 0.5 ) * uLeafTrans;
+  float lfElev = dot( directLight.direction, normalize( ( viewMatrix * vec4( 0.0, 1.0, 0.0, 0.0 ) ).xyz ) );
+  lfBack *= mix( 0.3, 1.0, smoothstep( 0.05, 0.45, lfElev ) );
+  vec3 lfAlb = material.diffuseContribution;
+  vec3 lfThrough = lfAlb * clamp( lfAlb / max( dot( lfAlb, vec3( 0.2126, 0.7152, 0.0722 ) ), 1e-3 ), 0.0, 2.0 );
+  reflectedLight.directDiffuse += directLight.color * RECIPROCAL_PI * ( lfThrough * lfBack * 1.6 + lfAlb * lfWrap * 0.5 ) * uLeafTrans;
 }
 #undef RE_Direct
 #define RE_Direct RE_Direct_Leaf
@@ -153,10 +164,12 @@ export class FoliageMaterial extends THREE.MeshStandardMaterial {
       vertexColors: true,
       roughness: 0.8,
       metalness: 0,
+      // a crown sees little open sky: most of its ambient is leaf-filtered
       envMapIntensity: 0.6,
       ...rest,
     });
     if (translucency !== undefined) this.leafTrans.value = translucency;
+    useEnvMapIntensity(this);
   }
 
   override onBeforeCompile(shader: THREE.WebGLProgramParametersWithUniforms): void {
@@ -318,6 +331,7 @@ export class RockMaterial extends THREE.MeshStandardMaterial {
       this.triUniforms.uSurfRough.value = params.surfRoughness ?? 0.9;
       this.triUniforms.uSurfTint.value.set(params.surfTint ?? 0xffffff);
     }
+    useEnvMapIntensity(this);
   }
 
   private static base(params?: RockParams): THREE.MeshStandardMaterialParameters | undefined {

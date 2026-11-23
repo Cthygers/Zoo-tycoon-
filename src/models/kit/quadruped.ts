@@ -195,3 +195,12 @@ export function seat(p: Vec3, dir: Vec3, inset: number): Vec3 {
 export function withRegion(prims: readonly Prim[], region: string): Prim[] {
   return prims.map((p) => (p.region ? p : { ...p, region }));
 }
+
+/**
+ * `babyBones` for cubs (big cats, bears): big, clumsy paws on their short
+ * legs (the foot and toe scales multiply the design's `babyLegs`).
+ */
+export const CUB_PAWS: Readonly<Record<string, number>> = {
+  FL_foot: 1.2, FR_foot: 1.2, FL_toe: 1.2, FR_toe: 1.2,
+  HL_foot: 1.12, HR_foot: 1.12, HL_toe: 1.25, HR_toe: 1.25,
+};

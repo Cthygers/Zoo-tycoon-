@@ -267,6 +267,12 @@ export interface ICreatureFactory {
   update(camera: THREE.Camera): void;
   /** Apply a new quality tier to models created from now on (and LOD distances). */
   setQuality(quality: QualitySettings): void;
+  /**
+   * Optional: resolves once every live model uses the meshes of the tier last given to
+   * setQuality (they are rebuilt over several frames). The UI shows "Applying graphics
+   * settings…" until then.
+   */
+  whenQualityApplied?(): Promise<void>;
   /** Build (and cache) the meshes for these species up front. */
   preload(speciesIds: string[], onProgress?: (fraction: number) => void): Promise<void>;
   /**

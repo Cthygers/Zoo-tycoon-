@@ -163,12 +163,23 @@ export class RigRuntime {
   /** Model-space joint position of each bone after fk(). */
   readonly wp: THREE.Vector3[];
   private readonly ws: Float32Array;
+  /**
+   * Per-instance bone scale on top of the pose scale (juvenile head, legs,
+   * growing horns), so FK and IK see the proportions the mesh is drawn with.
+   */
+  readonly boneScale: Float32Array;
 
   constructor(def: RigDef) {
     this.def = def;
     this.wq = Array.from({ length: def.count }, () => new THREE.Quaternion());
     this.wp = Array.from({ length: def.count }, () => new THREE.Vector3());
     this.ws = new Float32Array(def.count).fill(1);
+    this.boneScale = new Float32Array(def.count).fill(1);
+  }
+
+  /** Model-space scale of a bone after fk() (pose × instance scales down the chain). */
+  scaleOf(bone: number): number {
+    return this.ws[bone];
   }
 
   /** Full forward kinematics (model space). */
@@ -182,15 +193,16 @@ export class RigRuntime {
     const d = this.def;
     const pi = d.parent[i];
     _v.set(d.offset[i * 3], d.offset[i * 3 + 1], d.offset[i * 3 + 2]).add(pose.p[i]);
+    const s = pose.s[i] * this.boneScale[i];
     if (pi < 0) {
       this.wp[i].copy(_v);
       this.wq[i].copy(pose.q[i]);
-      this.ws[i] = pose.s[i];
+      this.ws[i] = s;
     } else {
       _v.multiplyScalar(this.ws[pi]).applyQuaternion(this.wq[pi]);
       this.wp[i].copy(this.wp[pi]).add(_v);
       this.wq[i].copy(this.wq[pi]).multiply(pose.q[i]);
-      this.ws[i] = this.ws[pi] * pose.s[i];
+      this.ws[i] = this.ws[pi] * s;
     }
   }
 
@@ -239,6 +251,7 @@ export class TwoBoneChain {
   readonly upper: number;
   readonly lower: number;
   readonly end: number;
+  /** Rest lengths upper → lower and lower → end (solve() applies the bone scales). */
   readonly a: number;
   readonly b: number;
   /** Rest bend direction (unit, model space, perpendicular to the upper→end line). */
@@ -275,8 +288,10 @@ export class TwoBoneChain {
    */
   solve(rig: RigRuntime, pose: Pose, target: THREE.Vector3, pole: THREE.Vector3): number {
     rig.fkBone(pose, this.upper);
+    rig.fkBone(pose, this.lower);
     _H.copy(rig.wp[this.upper]);
-    const a = this.a, b = this.b;
+    // segment lengths as drawn (scaled juvenile legs)
+    const a = this.a * rig.scaleOf(this.upper), b = this.b * rig.scaleOf(this.lower);
     _D.copy(target).sub(_H);
     const len = _D.length();
     const ratio = len / (a + b);
