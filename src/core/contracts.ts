@@ -124,7 +124,18 @@ export interface ISimulation {
   renameHabitat(habitatId: number, name: string): CommandResult;
   /** Adopt an animal at a world position; must be inside a habitat. */
   buyAnimal(speciesId: string, wx: number, wz: number, dryRun?: boolean): CommandResult;
-  sellAnimal(animalId: number): CommandResult;
+  /** Rehome an animal to another zoo for part of its price (dryRun: what it would fetch). */
+  sellAnimal(animalId: number, dryRun?: boolean): CommandResult;
+  /**
+   * Carry an animal to a spot inside a habitat (its own or another one), free of charge.
+   * Same spot rules and warnings as buyAnimal; escaped animals have to be caught first.
+   */
+  moveAnimal(animalId: number, wx: number, wz: number, dryRun?: boolean): CommandResult;
+  /**
+   * Move and/or turn a placed object, free of charge, with the same rules as placeObject
+   * (its current spot does not block the new one). The object keeps its id.
+   */
+  moveObject(objectId: number, tx: number, tz: number, rot: number, dryRun?: boolean): CommandResult;
   hireStaff(role: StaffRole, wx: number, wz: number, dryRun?: boolean): CommandResult;
   fireStaff(staffId: number): CommandResult;
   setAdmission(price: number): void;

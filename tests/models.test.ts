@@ -224,7 +224,9 @@ describe('skin matrices', () => {
     }
     const head = asset.roles.head;
     const out = new Float32Array(rig.count * 12);
-    skinMatrices(rig, pose, head, 1.2, out, 0);
+    const boneScale = new Float32Array(rig.count).fill(1);
+    boneScale[head] = 1.2;
+    skinMatrices(rig, pose, boneScale, out, 0);
     // reference: three.js bone hierarchy
     const bones = rig.names.map(() => new THREE.Bone());
     const root = new THREE.Group();

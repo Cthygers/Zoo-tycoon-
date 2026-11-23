@@ -601,8 +601,6 @@ export function buildHedge(variant: number): THREE.Group {
     const m = new THREE.MeshStandardMaterial({ map: ht.map, normalMap: ht.normal, vertexColors: true, roughness: 0.82, metalness: 0 });
     m.normalScale.set(1.4, 1.4);
     m.userData.sway = 0.004;
-    // waist-high clipped hedge: never hides the view, keep it solid near the camera
-    m.userData.fadeNear = false;
     return m;
   });
   const g = new THREE.Group();

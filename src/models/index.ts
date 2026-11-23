@@ -13,12 +13,19 @@ import * as THREE from 'three';
 // the crowd renderer (crowd/): one multi-draw call per animal mesh variant and
 // one for all people, texture skinning, per-instance LOD + shadow culling.
 // Models used elsewhere (UI thumbnails) render standalone. See README.md.
+//
+// Meshes are cached per species × sex × quality detail. Every model picks its
+// mesh through the factory: young males of dimorphic species use the female
+// mesh (no mane / tusks / ruff yet) and switch when they mature, and after a
+// quality change (setQuality) every live model moves to the new tier's mesh —
+// a few per frame, since building a mesh is a long task — before the previous
+// tier's meshes, LODs and batches are freed.
 
 import type { CreatureModel, ICreatureFactory, QualitySettings } from '../core/contracts';
 import type { HumanAppearance, StaffRole } from '../core/types';
 import { SPECIES_BY_ID } from '../data/species';
-import { assetFromDesign } from './assets';
-import { RiggedModel, type CrowdHost, type RigAsset } from './model';
+import { assetFromDesign, disposeAsset } from './assets';
+import { RiggedModel, type AssetPicker, type CrowdHost, type RigAsset } from './model';
 import { SPECIES_MODELS, placeholderFor } from './species';
 import { HumanFactory } from './humans/human';
 import { itemMaterial } from './humans/items';
@@ -30,6 +37,12 @@ import type { SpeciesModel } from './types';
 export type { CreatureDesign, SpeciesModel, CoatSample, AnimCtx, AnimDriver } from './types';
 
 const yieldToBrowser = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+const now = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+/** Default growth from which males of dimorphic species use the male mesh. */
+const MATURES_AT = 0.7;
+/** Frame time (ms) spent moving models to the new tier's meshes after a quality change. */
+const MIGRATE_BUDGET_MS = 6;
 
 /** An animal: RiggedModel rendered in the batch of its mesh variant. */
 export class AnimalModel extends RiggedModel implements BatchedModel {
@@ -102,12 +115,18 @@ export class CreatureFactory implements ICreatureFactory {
     }
   }
 
+  /** Sex whose mesh an animal shows at a growth: juveniles look like females (no mane, tusks …). */
+  meshSex(speciesId: string, sex: 'M' | 'F', growth: number): 'M' | 'F' {
+    const m = this.model(speciesId);
+    return m.dimorphic && sex === 'M' && growth < (m.maturesAt ?? MATURES_AT) ? 'F' : sex;
+  }
+
   createAnimal(speciesId: string, opts: { seed: number; sex: 'M' | 'F'; growth: number }): CreatureModel {
     const m = this.model(speciesId);
-    const asset = this.getAsset(speciesId, opts.sex);
+    const pick: AssetPicker = (growth) => this.getAsset(speciesId, this.meshSex(speciesId, opts.sex, growth));
     const r = ((opts.seed * 2246822519) >>> 0) / 4294967296;
     const scale = m.instanceScale ? m.instanceScale(opts.sex, r) : (opts.sex === 'M' ? 1 : 0.94) * (0.97 + r * 0.06);
-    const model = new AnimalModel(asset, opts.seed, opts.sex, scale, '', this.crowd as CrowdHost);
+    const model = new AnimalModel(pick(opts.growth), opts.seed, opts.sex, scale, '', this.crowd as CrowdHost, pick);
     model.setGrowth(opts.growth);
     return model;
   }
@@ -118,13 +137,47 @@ export class CreatureFactory implements ICreatureFactory {
 
   /** Once per frame after the models were updated: LOD, shadows, instance upload. */
   update(camera: THREE.Camera): void {
+    if (this.migrating) this.migrate();
     this.crowd.update(camera);
   }
 
+  /** Live models still drawing another tier's mesh after setQuality. */
+  private migrating = false;
+
+  /**
+   * New tier for LOD distances / shadows right away; models created from now
+   * on use the new detail, and existing ones move to it over the next frames
+   * (see migrate).
+   */
   setQuality(quality: QualitySettings): void {
+    const detailChanged = quality.creatureDetail !== this.quality.creatureDetail;
     this.quality = quality;
     this.humans.quality = quality;
     this.crowd.setQuality(quality);
+    if (detailChanged) this.migrating = true;
+  }
+
+  /**
+   * Move live models to the current tier's meshes within a small frame budget
+   * (at most about one mesh build per frame), then free the meshes, LODs and
+   * batches of other tiers.
+   */
+  private migrate(): void {
+    const detail = this.quality.creatureDetail;
+    const t0 = now();
+    for (const m of this.crowd.liveModels()) {
+      if (m.asset.detail === detail) continue;
+      if (now() - t0 > MIGRATE_BUDGET_MS) return;
+      m.refreshAsset();
+    }
+    this.migrating = false;
+    for (const [key, a] of this.assets) {
+      if (a.detail === detail) continue;
+      disposeAsset(a);
+      this.assets.delete(key);
+    }
+    this.humans.disposeOtherDetails(detail);
+    this.crowd.pruneEmptyBatches();
   }
 
   /** Stats for debugging / the harness. */
@@ -168,7 +221,9 @@ export class CreatureFactory implements ICreatureFactory {
 
   dispose(): void {
     this.crowd.dispose();
-    for (const a of this.assets.values()) a.lod?.dispose();
+    for (const a of this.assets.values()) disposeAsset(a);
+    this.assets.clear();
+    this.humans.disposeOtherDetails(-1);
   }
 }
 

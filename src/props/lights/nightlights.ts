@@ -2,10 +2,13 @@
 // lamps on a phone:
 //  - light pools: every emitter gets a terrain-conforming ground patch (1 m
 //    grid, merged into ONE mesh) shaded with an inverse-square / cosine
-//    falloff from the light's real position. In the HDR pipeline (post-FX
-//    tiers) the pool multiplies the moonlit ground by a warm gain, so it
-//    respects albedo and shadows (dst × (1 + E·warm)); the LDR pipeline (low
-//    tier, no float target) adds warm light instead.
+//    falloff from the light's real position, softly saturated near the bulb.
+//    The pool multiplies the moonlit ground by a warm gain, so it respects
+//    albedo, texture and shadows (dst × (1 + E·warm)): in linear light in the
+//    HDR pipeline (post-FX tier), and in display space in the LDR pipeline,
+//    where the same physical gain is a smaller multiplier (≈ gain^(1/2.2)).
+//    LDR tiers add a faint warm fill on top (a second draw of the same mesh):
+//    a multiply cannot warm the moon-graded blue-green of a dark lawn.
 //  - halos: one camera-facing soft sprite per lamp head (ONE instanced draw)
 //    so lamps read as glowing even without bloom, sized to stay under the
 //    bloom threshold.
@@ -25,7 +28,12 @@ const WARM = new THREE.Color(0xffc68a);
  * ground's blue cast.
  */
 const WARM_HDR = new THREE.Color(1.0, 0.42, 0.11);
-const POINT_INTENSITY = 2.6;
+/**
+ * Pool tint in the LDR pipeline: saturated for the same reason (the moonlit
+ * grade is in the framebuffer), but less so, as the multiply is in display space.
+ */
+const WARM_LDR = new THREE.Color(1.0, 0.5, 0.18);
+const POINT_INTENSITY = 1.6;
 const POINT_RANGE = 14;
 /** Reference lamp height for the falloff normalisation (m). */
 const H0 = 3.2;
@@ -142,8 +150,10 @@ void main() {
   vec2 d = vW.xz - vLamp.xz;
   float r2 = dot( d, d );
   float h = max( vLamp.y - vW.y, 0.35 );
-  // point light on a horizontal surface: E = I cos(theta) / dist^2, normalised to 1 under a ${H0} m lamp
-  float E = min( ${(H0 * H0).toFixed(3)} * h / pow( h * h + r2, 1.5 ), 2.5 );
+  // point light on a horizontal surface: E = I cos(theta) / dist^2, normalised to 1 under a ${H0} m lamp,
+  // with a soft knee so low lamps / raised ground never get a hot spot
+  float E = ${(H0 * H0).toFixed(3)} * h / pow( h * h + r2, 1.5 );
+  E /= 1.0 + 0.4 * E;
   float rc = length( vW.xz - vPool.xy );
   float edge = 1.0 - smoothstep( vPool.z * 0.5, vPool.z, rc );
   float k = E * edge * vPool.w * uGain;
@@ -193,8 +203,12 @@ export interface NightTier {
 export class NightLights {
   readonly group = new THREE.Group();
   private readonly poolMat: THREE.ShaderMaterial;
+  private readonly fillMat: THREE.ShaderMaterial;
   private readonly haloMat: THREE.ShaderMaterial;
   private pools: THREE.Mesh;
+  /** Additive warm fill over the pools (LDR tiers only). */
+  private fill: THREE.Mesh;
+  private warmFill = false;
   private halos: THREE.InstancedMesh;
   private haloCap = 0;
   private entries = new Map<number, WorldEmitter[]>();
@@ -222,6 +236,7 @@ export class NightLights {
       polygonOffset: true,
       polygonOffsetFactor: -2,
       polygonOffsetUnits: -4,
+      // dst × (1 + pool colour)
       blending: THREE.CustomBlending,
       blendEquation: THREE.AddEquation,
       blendSrc: THREE.DstColorFactor,
@@ -251,6 +266,18 @@ export class NightLights {
     this.pools.renderOrder = -1; // before other transparents (glass, water) that sit above the ground
     this.pools.visible = false;
     this.pools.onBeforeRender = (renderer) => this.configureBlend(renderer);
+    this.fillMat = this.poolMat.clone();
+    this.fillMat.name = 'props/lightPoolFill';
+    this.fillMat.blendSrc = THREE.OneFactor;
+    this.fillMat.uniforms.uColor.value.copy(WARM);
+    this.fill = new THREE.Mesh(this.pools.geometry, this.fillMat);
+    this.fill.name = 'lamp-light-fill';
+    this.fill.renderOrder = -1;
+    this.fill.visible = false;
+    this.fill.onBeforeRender = () => {
+      this.fillMat.uniforms.uGain.value = this.night * 0.16;
+    };
+    this.group.add(this.fill);
     this.halos = this.makeHalos(16);
     this.group.add(this.pools);
   }
@@ -275,20 +302,13 @@ export class NightLights {
 
   private configureBlend(renderer: THREE.WebGLRenderer): void {
     const hdr = renderer.getRenderTarget() !== null;
-    const m = this.poolMat;
-    if (hdr) {
-      // dst × (1 + E·warm·gain): albedo-respecting light in the float target
-      m.blendSrc = THREE.DstColorFactor;
-      m.blendDst = THREE.OneFactor;
-      m.uniforms.uGain.value = this.night * 5.0;
-      m.uniforms.uColor.value.copy(WARM_HDR);
-    } else {
-      // display-referred: additive warm light
-      m.blendSrc = THREE.OneFactor;
-      m.blendDst = THREE.OneFactor;
-      m.uniforms.uGain.value = this.night * 0.3;
-      m.uniforms.uColor.value.copy(WARM);
-    }
+    const u = this.poolMat.uniforms;
+    // peak gain under a standard lamp: HDR ×(1 + 2.5) on red in linear light
+    // (bright pavement stays clear of white after the night exposure); LDR
+    // ×(1 + 1.6) in display space plus the warm fill, about the same light
+    // after tone mapping
+    u.uGain.value = this.night * (hdr ? 3.5 : 2.2);
+    u.uColor.value.copy(hdr ? WARM_HDR : WARM_LDR);
   }
 
   /** Set (or clear with null / []) the emitters of one placed object. */
@@ -338,6 +358,11 @@ export class NightLights {
   /** Terrain changed: re-drape the pools. */
   markDirty(): void {
     this.dirty = true;
+  }
+
+  /** Draw the additive warm fill (tiers rendering straight to the display, without the HDR target). */
+  setWarmFill(on: boolean): void {
+    this.warmFill = on;
   }
 
   /** Number of real point lights (recreated on change; changing it recompiles lit materials once). */
@@ -402,6 +427,7 @@ export class NightLights {
       g.computeBoundingSphere();
     }
     this.pools.geometry = g;
+    this.fill.geometry = g;
     old.dispose();
 
     // halos: one per lamp head
@@ -432,6 +458,7 @@ export class NightLights {
     const on = night > 0.02;
     if (on && this.dirty) this.rebuild();
     this.pools.visible = on && this.pools.geometry.index !== null;
+    this.fill.visible = this.pools.visible && this.warmFill;
     this.halos.visible = on && this.halos.count > 0;
     this.updatePoints(dt, night, focus);
   }
@@ -493,6 +520,7 @@ export class NightLights {
     this.halos.geometry.dispose();
     this.halos.dispose();
     this.poolMat.dispose();
+    this.fillMat.dispose();
     this.haloMat.dispose();
     for (const p of this.points) p.light.removeFromParent();
     this.points = [];

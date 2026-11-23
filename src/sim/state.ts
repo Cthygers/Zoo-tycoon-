@@ -25,6 +25,11 @@ export type AnimalGoal =
 export interface AnimalSim extends AnimalState {
   /** Habitat the animal belongs to (where it is returned after an escape). 0 = none. */
   home: number;
+  /**
+   * A tile of the habitat it last stood in (-1 = none). If that habitat is gone, the
+   * one now covering this tile (e.g. after its fence was rebuilt or moved) is home.
+   */
+  homeTile: number;
   goal: AnimalGoal;
   /** Seconds left of the stationary part of the current goal. */
   goalTime: number;
@@ -39,8 +44,10 @@ export interface AnimalSim extends AnimalState {
   ref: number;
   /** Seconds until needs are re-evaluated while busy. */
   think: number;
-  /** Seconds spent blocked while trying to move. */
+  /** Seconds without progress towards the current waypoint while moving. */
   stuck: number;
+  /** Closest distance (m) to the current waypoint so far (-1 = not measured yet). */
+  bestDist: number;
   /** Mother id while young (0 = none). */
   mother: number;
   /** Game days until this animal may breed again. */
@@ -123,6 +130,16 @@ export interface GuestSim extends GuestState, Walker {
   donated: boolean;
   /** Habitat ids already viewed this visit. */
   viewed: number[];
+  /**
+   * Habitat the party set out to see (0 = none). Kept through a snack, a restroom
+   * break or a look at another exhibit on the way, so the walk resumes there.
+   */
+  plan: number;
+  /**
+   * Happiness offset from the ticket price, compared with what the zoo seemed
+   * worth at the gate: slightly positive for a bargain, negative when overpriced.
+   */
+  ticketValue: number;
   /** 0..1 scenery around the guest (smoothed). */
   scenic: number;
   /** Shop / restroom object the guest is walking to or queueing at (0 = none). */

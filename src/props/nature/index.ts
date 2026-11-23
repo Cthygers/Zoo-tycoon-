@@ -3,11 +3,12 @@
 // Every builder is procedural (no binary assets): species skeletons meshed into
 // textured bark tubes, alpha-tested leaf-cluster cards painted into atlases,
 // noise-displaced rocks with triplanar detail. Textures / materials are
-// generated once on first use and shared; call disposeNatureResources() when
-// tearing the props layer down. Every PropSpec.build / buildLod runs at the
-// tier of the QualitySettings it receives (card counts, radial segments,
-// texture resolution); setNatureQuality() sets the default tier for callers
-// that pass none. Trees, bamboo, palms, large bushes and big rocks have a
+// generated once on first use and shared (atlasSteps() paints the shared
+// foliage sheets one atlas per call, for loading screens); call
+// disposeNatureResources() when tearing the props layer down. Every
+// PropSpec.build / buildLod runs at the tier of the QualitySettings it
+// receives (card counts, radial segments, texture resolution; 'medium' when
+// none is given). Trees, bamboo, palms, large bushes and big rocks have a
 // hand-made distant LOD (buildLod, ≈ 15–25 % of the triangles).
 
 import type * as THREE from 'three';
@@ -33,47 +34,8 @@ import {
   buildPineLod,
 } from './trees';
 
-import { atlasSteps, hedgeTextures, soilTextures } from './atlases';
-import { barkTextures, type BarkKind } from './barks';
-import { prewarmRockMaterials } from './rocks';
-
-export { disposeNatureResources, natureResourceStats, setNatureQuality, withQuality } from './mats';
-
-const BARKS: BarkKind[] = ['oak', 'acacia', 'baobab', 'pine', 'birch', 'palm', 'bamboo', 'cactus', 'endgrain'];
-
-/** Every texture-generation step (each ≈ 20–200 ms on desktop, several × that on phones). */
-function prewarmSteps(): (() => void)[] {
-  return [
-    // foliage: each atlas painted in its own step, then the two shared sheets
-    ...atlasSteps(),
-    ...BARKS.map((k) => () => void barkTextures(k)),
-    () => void hedgeTextures(),
-    () => void soilTextures(),
-    prewarmRockMaterials,
-  ];
-}
-
-/**
- * Generate all nature textures now instead of on the first placement of each
- * species (avoids a hitch mid-game). Synchronous.
- */
-export function prewarmNature(onProgress?: (fraction: number) => void): void {
-  const steps = prewarmSteps();
-  steps.forEach((s, i) => {
-    s();
-    onProgress?.((i + 1) / steps.length);
-  });
-}
-
-/** As prewarmNature, yielding to the event loop between steps (loading screens). */
-export async function prewarmNatureAsync(onProgress?: (fraction: number) => void): Promise<void> {
-  const steps = prewarmSteps();
-  for (let i = 0; i < steps.length; i++) {
-    steps[i]();
-    onProgress?.((i + 1) / steps.length);
-    await new Promise<void>((r) => setTimeout(r, 0));
-  }
-}
+export { atlasSteps, paintAtlasesOffThread } from './atlases';
+export { disposeNatureResources, natureResourceStats, withQuality } from './mats';
 
 type Builder = (v: number) => THREE.Object3D;
 /** Wrap a builder so it runs at the tier of the QualitySettings it is given. */

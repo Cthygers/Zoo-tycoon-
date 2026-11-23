@@ -12,12 +12,16 @@
 //     scene without the factory root) a classic THREE.SkinnedMesh with a bone
 //     hierarchy is built lazily under `object`.
 // The model switches automatically when its object is (re)parented.
+//
+// A model can change its mesh at runtime (setAsset): the factory re-picks the
+// asset after a quality-tier change and when a young male of a dimorphic
+// species grows into its adult (male) mesh.
 
 import * as THREE from 'three';
 import type { CreatureAnim, CreatureModel } from '../core/contracts';
 import { Pose, RigDef, RigRuntime, blendPoses } from './rig/rig';
 import type { AnimCtx, AnimDriver, CreatureDesign, ResolvedRoles } from './types';
-import { clamp01, damp, lerp } from './anim/util';
+import { clamp01, damp, lerp, smooth } from './anim/util';
 import type { LodChain } from './lod/lod';
 import type { SkinnedBatch } from './crowd/batch';
 
@@ -49,11 +53,18 @@ export interface RigAsset {
  * without one (tests, standalone use).
  */
 export interface CrowdHost {
-  /** The model's object was added to / removed from a parent. */
+  /** A model was created with this host (it stays registered until release). */
+  register(model: RiggedModel): void;
+  /** The model's object was added to / removed from a parent, or its asset changed. */
   parentChanged(model: RiggedModel): void;
+  /** The model is about to change its asset: take it out of its batch (parentChanged follows). */
+  unbatch(model: RiggedModel): void;
   /** The model is being disposed. */
   release(model: RiggedModel): void;
 }
+
+/** Picks a model's mesh for its growth under the current quality tier (owned by the factory). */
+export type AssetPicker = (growth: number) => RigAsset;
 
 interface Slot {
   action: string;
@@ -102,10 +113,11 @@ function ensureFK(n: number): void {
  * matrix (3 rows × vec4) per bone at `out[off + bone * 12]`, mapping rest-pose
  * model-space vertices to posed model space — exactly what THREE.SkinnedMesh
  * computes from a Bone hierarchy (bone.matrixWorld × inverse(rest translation)).
- * `headIdx` / `headScale` apply the juvenile head scale. Leaves the joint
+ * `boneScale` (optional, per bone) multiplies the pose scale — the juvenile
+ * head and growing features (see RiggedModel.growthScales). Leaves the joint
  * transforms in FK.wq / wp / ws.
  */
-export function skinMatrices(rig: RigDef, pose: Pose, headIdx: number, headScale: number, out: Float32Array, off: number): void {
+export function skinMatrices(rig: RigDef, pose: Pose, boneScale: ArrayLike<number> | null, out: Float32Array, off: number): void {
   const n = rig.count;
   ensureFK(n);
   const wq = FK.wq, wp = FK.wp, ws = FK.ws;
@@ -113,7 +125,7 @@ export function skinMatrices(rig: RigDef, pose: Pose, headIdx: number, headScale
   for (let i = 0; i < n; i++) {
     const q = pose.q[i];
     const pp = pose.p[i];
-    const s = pose.s[i] * (i === headIdx ? headScale : 1);
+    const s = boneScale ? pose.s[i] * boneScale[i] : pose.s[i];
     const lx = offset[i * 3] + pp.x, ly = offset[i * 3 + 1] + pp.y, lz = offset[i * 3 + 2] + pp.z;
     const pi = parent[i];
     let qx: number, qy: number, qz: number, qw: number, px: number, py: number, pz: number, sc: number;
@@ -181,20 +193,39 @@ interface Standalone {
   skeleton: THREE.Skeleton;
 }
 
+/** Same skeleton layout (bone count and rest offsets): poses and driver state carry over. */
+function sameRig(a: RigDef, b: RigDef): boolean {
+  if (a === b) return true;
+  if (a.count !== b.count) return false;
+  for (let i = 0; i < a.offset.length; i++) if (Math.abs(a.offset[i] - b.offset[i]) > 1e-6) return false;
+  return true;
+}
+
+/** Growth (0..1) over which babyBones ease from their newborn scale to 1. */
+const BABY_BONES_FROM = 0.15;
+const BABY_BONES_TO = 0.95;
+
+type MutableCtx = { -readonly [K in keyof AnimCtx]: AnimCtx[K] };
+
 export class RiggedModel implements CreatureModel {
   readonly object = new THREE.Group();
-  readonly asset: RigAsset;
-  protected readonly rt: RigRuntime;
-  protected readonly ctx: AnimCtx;
-  private readonly state: unknown;
+  private _asset!: RigAsset;
+  protected rt!: RigRuntime;
+  protected ctx!: MutableCtx;
+  private state: unknown;
   private readonly slots: Slot[] = [];
   private readonly spare: Pose[] = [];
-  protected readonly out: Pose;
+  protected out!: Pose;
+  /** Per-bone juvenile scale (head, growing tusks / horns …), from design.babyHead / babyBones. */
+  private boneScale!: Float32Array;
+  /** Bone indices and newborn scales of design.babyBones (resolved per asset). */
+  private babyBones: { bone: number; scale: number }[] = [];
   protected baseScale = 1;
   protected growth = 1;
   private lastYaw = NaN;
   protected highlighted = false;
   protected readonly host: CrowdHost | null;
+  private readonly picker: AssetPicker | null;
   private disposed = false;
 
   // ---- batched state (managed by the crowd renderer)
@@ -210,42 +241,101 @@ export class RiggedModel implements CreatureModel {
   // ---- standalone state
   private sa: Standalone | null = null;
 
-  constructor(asset: RigAsset, seed: number, sex: 'M' | 'F', baseScale: number, role = '', host: CrowdHost | null = null) {
-    this.asset = asset;
+  /**
+   * `picker` (optional) chooses the mesh for a growth under the current
+   * quality tier; the model re-picks when its growth changes and on
+   * refreshAsset(). Without one the model keeps `asset`.
+   */
+  constructor(asset: RigAsset, seed: number, sex: 'M' | 'F', baseScale: number, role = '', host: CrowdHost | null = null, picker: AssetPicker | null = null) {
     this.host = host;
-    this.object.name = asset.key;
-    this.rt = new RigRuntime(asset.rig);
-    this.out = new Pose(asset.rig.count);
+    this.picker = picker;
     const rand = ((seed * 2654435761) >>> 0) / 4294967296;
-    this.ctx = {
-      rig: this.rt,
-      def: asset.rig,
-      roles: asset.roles,
-      design: asset.design,
-      time: rand * 100,
-      dt: 0,
-      speed: 0,
-      actionTime: 0,
-      swimming: false,
-      holding: 'none',
-      turnRate: 0,
-      seed: seed | 0,
-      rand,
-      sex,
-      growth: 1,
-      role,
-      action: 'idle',
-    };
-    this.state = asset.driver.init(this.ctx);
+    this.bind(asset, { time: rand * 100, seed: seed | 0, rand, sex, role });
     this.baseScale = baseScale;
-    this.setGrowth(1);
+    this.applyGrowth();
     if (host) {
+      host.register(this);
       const onParent = () => {
         if (!this.disposed) host.parentChanged(this);
       };
       this.object.addEventListener('added', onParent);
       this.object.addEventListener('removed', onParent);
     }
+  }
+
+  /** The cached mesh variant this model currently draws (changes with setAsset). */
+  get asset(): RigAsset {
+    return this._asset;
+  }
+
+  /**
+   * Point the model at an asset: rig runtime, animation context and driver
+   * state. Between rigs of the same layout (another quality tier of the same
+   * mesh) everything carries over; otherwise the driver restarts from its
+   * current action, keeping the last pose when the bone count matches.
+   */
+  private bind(asset: RigAsset, init?: Pick<AnimCtx, 'time' | 'seed' | 'rand' | 'sex' | 'role'>): void {
+    const prev = this._asset as RigAsset | undefined;
+    this._asset = asset;
+    this.object.name = asset.key;
+    this.babyBones = Object.entries(asset.design.babyBones ?? {})
+      .map(([name, scale]) => ({ bone: asset.rig.find(name), scale }))
+      .filter((b) => b.bone >= 0);
+    if (prev && sameRig(prev.rig, asset.rig)) {
+      this.ctx.design = asset.design;
+      return;
+    }
+    const lastPose = this.out;
+    this.rt = new RigRuntime(asset.rig);
+    this.out = new Pose(asset.rig.count);
+    if (lastPose && lastPose.q.length === asset.rig.count) this.out.copy(lastPose);
+    this.boneScale = new Float32Array(asset.rig.count).fill(1);
+    // instance identity and the animation inputs carry over from the previous context
+    const c: Partial<AnimCtx> & Pick<AnimCtx, 'time' | 'seed' | 'rand' | 'sex' | 'role'> = this.ctx ?? init!;
+    this.ctx = {
+      rig: this.rt,
+      def: asset.rig,
+      roles: asset.roles,
+      design: asset.design,
+      time: c.time,
+      dt: 0,
+      speed: c.speed ?? 0,
+      actionTime: c.actionTime ?? 0,
+      swimming: c.swimming ?? false,
+      holding: c.holding ?? 'none',
+      turnRate: c.turnRate ?? 0,
+      seed: c.seed,
+      rand: c.rand,
+      sex: c.sex,
+      growth: this.growth,
+      role: c.role,
+      action: c.action ?? 'idle',
+    };
+    // crossfade slots hold poses of the old bone layout
+    this.slots.length = 0;
+    this.spare.length = 0;
+    this.state = asset.driver.init(this.ctx);
+  }
+
+  /**
+   * Draw another mesh variant from now on (quality tier change, a young male
+   * growing into the adult mesh). Leaves its batch and re-enters the batch of
+   * the new mesh (or rebuilds the standalone mesh).
+   */
+  setAsset(asset: RigAsset): void {
+    if (asset === this._asset || this.disposed) return;
+    this.host?.unbatch(this);
+    const hadStandalone = this.sa !== null;
+    this.disposeStandalone();
+    this.bind(asset);
+    this.applyGrowth();
+    if (this.host) this.host.parentChanged(this);
+    else if (hadStandalone) this.applyStandalone();
+  }
+
+  /** Re-pick the mesh for the current quality tier and growth (after a tier change). */
+  refreshAsset(): void {
+    if (this.picker) this.setAsset(this.picker(this.growth));
   }
 
   get height(): number {
@@ -271,12 +361,28 @@ export class RiggedModel implements CreatureModel {
     return this.batch !== null;
   }
 
+  get isDisposed(): boolean {
+    return this.disposed;
+  }
+
   setGrowth(growth: number): void {
     this.growth = clamp01(growth);
+    const want = this.picker?.(this.growth);
+    if (want && want !== this._asset) this.setAsset(want);
+    else this.applyGrowth();
+  }
+
+  /** Root scale, juvenile bone scales and the batched look for the current growth. */
+  private applyGrowth(): void {
     const d = this.asset.design;
-    const s = this.baseScale * lerp(d.babyScale ?? 0.4, 1, this.growth);
-    this.object.scale.setScalar(s);
+    this.object.scale.setScalar(this.baseScale * lerp(d.babyScale ?? 0.4, 1, this.growth));
     this.ctx.growth = this.growth;
+    const bs = this.boneScale;
+    bs.fill(1);
+    const head = this.asset.roles.head;
+    if (head >= 0) bs[head] = lerp(d.babyHead ?? 1.3, 1, this.growth);
+    const k = smooth(BABY_BONES_FROM, BABY_BONES_TO, this.growth);
+    for (const b of this.babyBones) bs[b.bone] *= lerp(b.scale, 1, k);
     if (this.batch) {
       this.writeLook();
       this.writeSkin();
@@ -373,7 +479,7 @@ export class RiggedModel implements CreatureModel {
     if (this.batch) this.writeSkin();
     else {
       this.applyStandalone();
-      if (this.needsJoints) skinMatrices(this.asset.rig, this.out, this.asset.roles.head, this.headScale, _scratch(this.asset.rig.count), 0);
+      if (this.needsJoints) skinMatrices(this.asset.rig, this.out, this.boneScale, _scratch(this.asset.rig.count), 0);
     }
     this.afterPose(dt);
   }
@@ -384,15 +490,11 @@ export class RiggedModel implements CreatureModel {
   /** Hook after the pose is final and FK.* holds the joints when `needsJoints` (humans: items). */
   protected afterPose(_dt: number): void {}
 
-  protected get headScale(): number {
-    return lerp(this.asset.design.babyHead ?? 1.3, 1, this.growth);
-  }
-
   /** Write the current pose into the batch (FK + inverse bind per bone). */
   protected writeSkin(): void {
     const b = this.batch;
     if (!b) return;
-    skinMatrices(this.asset.rig, this.out, this.asset.roles.head, this.headScale, b.data, b.boneOffset(this.slot));
+    skinMatrices(this.asset.rig, this.out, this.boneScale, b.data, b.boneOffset(this.slot));
     this.afterSkin();
   }
 
@@ -482,13 +584,12 @@ export class RiggedModel implements CreatureModel {
     const sa = this.ensureStandalone();
     const rig = this.asset.rig;
     const out = this.out;
-    const headIdx = this.asset.roles.head;
-    const babyHead = this.headScale;
+    const bs = this.boneScale;
     for (let i = 0; i < rig.count; i++) {
       const b = sa.bones[i];
       b.position.set(rig.offset[i * 3] + out.p[i].x, rig.offset[i * 3 + 1] + out.p[i].y, rig.offset[i * 3 + 2] + out.p[i].z);
       b.quaternion.copy(out.q[i]);
-      const s = out.s[i] * (i === headIdx ? babyHead : 1);
+      const s = out.s[i] * bs[i];
       b.scale.set(s, s, s);
     }
     if (this.highlighted) {

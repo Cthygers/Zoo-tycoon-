@@ -15,6 +15,33 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 
+// Bloom works on the HDR target before exposure, and the night exposure is
+// ≈15× the noon one: fixed HDR thresholds made whole lamp-lit walls bloom into
+// a screen-sized blob. Threshold and ceiling are therefore set in displayed
+// (post-exposure) units each frame, the bloom source is clipped to the
+// ceiling, and the blur favours the small mips, so lamp heads and windows get
+// a tight halo and no bright surface can flood the frame.
+/** Displayed brightness where bloom starts (≈ white; no diffusely lit surface reaches it). */
+const BLOOM_THRESHOLD = 1.6;
+/** Displayed brightness above which a pixel adds no more bloom. */
+const BLOOM_CEILING = 3.2;
+/** Weights of the five blur mips (fine → coarse); the stock ramp is 1 … 0.2. */
+const BLOOM_MIPS = [1.0, 0.55, 0.25, 0.1, 0.04];
+
+const HIGH_PASS_FRAG = /* glsl */ `
+uniform sampler2D tDiffuse;
+uniform float luminosityThreshold;
+uniform float smoothWidth;
+uniform float uCeiling;
+varying vec2 vUv;
+void main() {
+  vec4 texel = texture2D(tDiffuse, vUv);
+  float v = luminance(texel.rgb);
+  float k = smoothstep(luminosityThreshold, luminosityThreshold + smoothWidth, v) * min(1.0, uCeiling / max(v, 1e-6));
+  gl_FragColor = vec4(texel.rgb * k, texel.a);
+}
+`;
+
 export class PostFX {
   readonly composer: EffectComposer;
   private target: THREE.WebGLRenderTarget;
@@ -33,9 +60,13 @@ export class PostFX {
     this.composer.setSize(width, height);
     this.renderPass = new RenderPass(scene, camera);
     this.composer.addPass(this.renderPass);
-    // half-resolution bloom chain
-    this.bloom = new UnrealBloomPass(new THREE.Vector2(width / 2, height / 2), 0.35, 0.5, 1.6);
+    // half-resolution bloom chain (thresholds set per frame in render())
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(width / 2, height / 2), 0.3, 0, BLOOM_THRESHOLD);
     this.bloom.enabled = false;
+    this.bloom.compositeMaterial.uniforms.bloomFactors.value = BLOOM_MIPS;
+    const hp = this.bloom.materialHighPassFilter;
+    hp.uniforms.uCeiling = { value: BLOOM_CEILING };
+    hp.fragmentShader = HIGH_PASS_FRAG;
     this.composer.addPass(this.bloom);
     this.output = new OutputPass();
     this.composer.addPass(this.output);
@@ -43,8 +74,7 @@ export class PostFX {
 
   setNight(night: number): void {
     this.bloom.enabled = night > 0.15;
-    this.bloom.strength = 0.25 + 0.35 * night;
-    this.bloom.threshold = 1.3 - 0.5 * night;
+    this.bloom.strength = 0.15 + 0.2 * night;
   }
 
   setSize(width: number, height: number, pixelRatio: number): void {
@@ -53,6 +83,11 @@ export class PostFX {
   }
 
   render(dt: number): void {
+    if (this.bloom.enabled) {
+      const exposure = Math.max(this.composer.renderer.toneMappingExposure, 1e-3);
+      this.bloom.threshold = BLOOM_THRESHOLD / exposure;
+      this.bloom.materialHighPassFilter.uniforms.uCeiling.value = BLOOM_CEILING / exposure;
+    }
     this.composer.render(dt);
   }
 

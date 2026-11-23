@@ -9,8 +9,11 @@
 //    as casters that lie within their own shadow distance of the camera focus
 //    (and inside the shadow camera's frustum). One multi-draw call per batch
 //    per pass; batches with nothing to draw are hidden (no program switch).
+//    Each pass has its own draw-id texture, re-uploaded only when its list
+//    changes (a still camera uploads nothing).
 //  - InstancedBatch (fallback): one InstancedMesh per geometry + material,
-//    swap-remove packed; distance + LOD culled into the GPU buffer.
+//    swap-remove packed; distance + LOD culled into the GPU buffer; casts
+//    shadows only while one of its casters is near the camera focus.
 
 import * as THREE from 'three';
 import { setupWindMesh } from '../wind';
@@ -127,6 +130,14 @@ const F_SHADOWON = 4;
 /** Distance band applies to shadows too. */
 const F_BAND = 8;
 
+/** A draw-id texture shaped like BatchedMesh's own (one uint per instance), uploaded on first use. */
+function idTextureLike(t: THREE.DataTexture): THREE.DataTexture {
+  const { width, height } = t.image;
+  const c = new THREE.DataTexture(new Uint32Array(width * height), width, height, THREE.RedIntegerFormat, THREE.UnsignedIntType);
+  c.needsUpdate = true;
+  return c;
+}
+
 const _frustum = new THREE.Frustum();
 const _m = new THREE.Matrix4();
 const _planes = new Float32Array(24);
@@ -176,6 +187,9 @@ export class MultiBatch implements PropBatch {
   private shadowsOn: boolean;
   private culledFor: THREE.Camera | null = null;
   private view: CullView | null = null;
+  /** Draw-id textures of the two passes (main = three's own). */
+  private mainIdsTex: THREE.DataTexture;
+  private shadowIdsTex: THREE.DataTexture;
 
   constructor(
     material: THREE.Material,
@@ -194,6 +208,9 @@ export class MultiBatch implements PropBatch {
     setupWindMesh(m);
     this.shadowsOn = shadows;
     this.mesh = m;
+    this.mainIdsTex = (m as unknown as BatchedInternals)._indirectTexture;
+    this.mainIdsTex.needsUpdate = true;
+    this.shadowIdsTex = idTextureLike(this.mainIdsTex);
     parent.add(m);
   }
 
@@ -245,7 +262,14 @@ export class MultiBatch implements PropBatch {
     }
     if (this.live >= this.maxInst) {
       this.maxInst *= 2;
+      // three re-creates (and copies) the texture it currently holds: hand it its own
+      const internal = mesh as unknown as BatchedInternals;
+      internal._indirectTexture = this.mainIdsTex;
       mesh.setInstanceCount(this.maxInst);
+      this.mainIdsTex = internal._indirectTexture;
+      this.mainIdsTex.needsUpdate = true;
+      this.shadowIdsTex.dispose();
+      this.shadowIdsTex = idTextureLike(this.mainIdsTex);
       this.grow(this.maxInst);
     }
     const id = mesh.addInstance(gid);
@@ -374,7 +398,7 @@ export class MultiBatch implements PropBatch {
       this.view.planes = saved;
       this.view.camera = savedCam;
     }
-    this.write(this.mainIds, this.mainN, geometry);
+    this.write(this.mainIds, this.mainN, geometry, this.mainIdsTex);
   }
 
   /** Called from onBeforeShadow: casters near the focus inside the shadow frustum. */
@@ -391,15 +415,16 @@ export class MultiBatch implements PropBatch {
       const o = id * 4;
       if (!sphereOutside(p, sph[o], sph[o + 1], sph[o + 2], sph[o + 3])) out[n++] = id;
     }
-    this.write(out, n, geometry);
+    this.write(out, n, geometry, this.shadowIdsTex);
   }
 
-  private write(ids: Int32Array, n: number, geometry: THREE.BufferGeometry): void {
+  /** Hand a pass's draw list to three (draw ranges + its draw-id texture). */
+  private write(ids: Int32Array, n: number, geometry: THREE.BufferGeometry, tex: THREE.DataTexture): void {
     const internal = this.mesh as unknown as BatchedInternals;
     const starts = internal._multiDrawStarts;
     const counts = internal._multiDrawCounts;
-    const tex = internal._indirectTexture;
     const indirect = tex.image.data as Uint32Array;
+    let changed = false;
     const bpe = geometry.index ? geometry.index.array.BYTES_PER_ELEMENT : 1;
     const gs = this.gStart;
     const gc = this.gCount;
@@ -409,10 +434,16 @@ export class MultiBatch implements PropBatch {
       const g = geo[id];
       starts[i] = gs[g] * bpe;
       counts[i] = gc[g];
-      indirect[i] = id;
+      if (indirect[i] !== id) {
+        indirect[i] = id;
+        changed = true;
+      }
     }
     internal._multiDrawCount = n;
-    tex.needsUpdate = true;
+    internal._indirectTexture = tex;
+    // the GPU copy always matches `indirect` (every change is uploaded), and
+    // entries past n are never read
+    if (changed) tex.needsUpdate = true;
   }
 
   size(): number {
@@ -440,7 +471,9 @@ export class MultiBatch implements PropBatch {
   dispose(): void {
     this.mesh.owner = null;
     this.parent.remove(this.mesh);
+    (this.mesh as unknown as BatchedInternals)._indirectTexture = this.mainIdsTex;
     this.mesh.dispose();
+    this.shadowIdsTex.dispose();
   }
 }
 
@@ -452,6 +485,8 @@ export class InstancedBatch implements PropBatch {
   /** Master matrices (all live instances, packed). */
   private mats = new Float32Array(0);
   private cull2 = new Float32Array(0);
+  /** Squared shadow distance from the focus per instance (0 = never casts). */
+  private shadow2 = new Float32Array(0);
   private on = new Uint8Array(0);
   private refs: SlotRef[] = [];
   /** Object id per drawn instance (after culling). */
@@ -487,6 +522,7 @@ export class InstancedBatch implements PropBatch {
     };
     this.mats = grow(this.mats, cap * 16);
     this.cull2 = grow(this.cull2, cap);
+    this.shadow2 = grow(this.shadow2, cap);
     this.on = grow(this.on, cap);
     this.visOwners = grow(this.visOwners, cap);
     this.cap = cap;
@@ -504,6 +540,7 @@ export class InstancedBatch implements PropBatch {
     const i = this.n++;
     matrix.toArray(this.mats, i * 16);
     this.cull2[i] = p.cull === Infinity ? Infinity : p.cull * p.cull;
+    this.shadow2[i] = p.shadow * p.shadow;
     this.on[i] = p.lodOn ? 1 : 0;
     this.refs[i] = ref;
     this.dirty = true;
@@ -528,6 +565,7 @@ export class InstancedBatch implements PropBatch {
     if (i !== last) {
       this.mats.copyWithin(i * 16, last * 16, last * 16 + 16);
       this.cull2[i] = this.cull2[last];
+      this.shadow2[i] = this.shadow2[last];
       this.on[i] = this.on[last];
       const moved = this.refs[last];
       this.refs[i] = moved;
@@ -550,6 +588,11 @@ export class InstancedBatch implements PropBatch {
     const dst = mesh.instanceMatrix.array as Float32Array;
     const src = this.mats;
     const cam = view.cam;
+    const f = view.focus;
+    // the shadow pass draws every drawn instance, so cast only while one of them
+    // is a caster within its shadow distance of the focus
+    const canCast = this.cast && this.shadowsOn && view.shadows;
+    let nearCaster = false;
     let count = 0;
     for (let i = 0; i < this.n; i++) {
       if (!this.on[i]) continue;
@@ -561,6 +604,11 @@ export class InstancedBatch implements PropBatch {
         const dz = src[o + 14] - cam.z;
         if (dx * dx + dy * dy + dz * dz > c2) continue;
       }
+      if (canCast && !nearCaster) {
+        const dx = src[o + 12] - f.x;
+        const dz = src[o + 14] - f.z;
+        nearCaster = dx * dx + dz * dz <= this.shadow2[i];
+      }
       dst.set(src.subarray(o, o + 16), count * 16);
       this.visOwners[count] = this.refs[i].id;
       count++;
@@ -568,6 +616,7 @@ export class InstancedBatch implements PropBatch {
     this.lastCam.copy(cam);
     mesh.count = count;
     mesh.visible = count > 0;
+    mesh.castShadow = canCast && nearCaster;
     mesh.instanceMatrix.clearUpdateRanges();
     mesh.instanceMatrix.addUpdateRange(0, Math.max(count, 1) * 16);
     mesh.instanceMatrix.needsUpdate = true;

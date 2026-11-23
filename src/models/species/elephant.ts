@@ -176,9 +176,12 @@ function tuskPts(male: boolean): { pts: Vec3[]; r: number[] } {
       };
 }
 
+/** Tusk bone (left) at the tusk root inside the sheath: tusks grow in with age about it. */
+const TUSK_ROOT: Vec3 = [0.18, 2.02, 2.58];
+
 function tuskPrims(male: boolean): Prim[] {
   const t = tuskPts(male);
-  return symmetric(tube('head', t.pts, t.r, { blend: 0.012, part: 'tusk', region: 'tusks' }));
+  return symmetric(tube('tusk.L', t.pts, t.r, { blend: 0.012, part: 'tusk', region: 'tusks', skinWeight: 4 }));
 }
 
 function earPrims(male: boolean): Prim[] {
@@ -330,6 +333,8 @@ function elephantCoat(male: boolean, eye: Vec3, tusk: Vec3[]) {
       c.gloss = 0.32;
       return;
     }
+    // dark line where the tusks leave their sheaths
+    blendHex(c.color, 0x2c2723, smooth(0.04, 0.004, c.pd('tusk')) * 0.6);
     if (c.part === 'nail') {
       c.color.setHex(NAIL);
       blendHex(c.color, MUD, 0.25);
@@ -345,6 +350,11 @@ function elephantCoat(male: boolean, eye: Vec3, tusk: Vec3[]) {
       c.w *= 1 - tf;
       c.fur = 1 + 3 * tf;
     }
+    // baked occlusion: ear roots, throat and trunk base, between legs and belly
+    // (the heavy relief stays readable on every tier, also without micro detail)
+    const occ = c.ao(0.22);
+    c.color.multiplyScalar(1 - 0.45 * occ);
+    c.color2.multiplyScalar(1 - 0.45 * occ);
   };
 }
 
@@ -807,6 +817,7 @@ function design(ctx: DesignContext): CreatureDesign {
     ...bilateralBones([
       { name: 'ear.L', parent: 'head', pos: EAR_A },
       { name: 'ear2.L', parent: 'ear.L', pos: EAR2 },
+      { name: 'tusk.L', parent: 'head', pos: TUSK_ROOT },
     ]),
   ];
   const sk = quadSkeleton({ ...J, extra, chains: { trunk: ['trunk_1', 'trunk_2', 'trunk_3', 'trunk_4', 'trunk_5', 'trunk_6'], earL: ['ear.L', 'ear2.L'], earR: ['ear.R', 'ear2.R'] } });
@@ -861,6 +872,8 @@ function design(ctx: DesignContext): CreatureDesign {
     anim: driver(d),
     babyScale: 0.3,
     babyHead: 1.3,
+    // calves have no visible tusks yet (milk tushes): they grow in with age
+    babyBones: { 'tusk.L': 0.06, 'tusk.R': 0.06 },
     height: male ? 3.25 : 3.15,
     radius: 1.4,
   };

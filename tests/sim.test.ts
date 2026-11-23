@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { ENTRANCE_TILE, GAME_MINUTES_PER_SECOND, MAP_W, START_MONEY, TILE, WATER_LEVEL } from '../src/core/constants';
-import { EventBus, type GameEvents } from '../src/core/events';
+import { GAME_MINUTES_PER_SECOND, MAP_W, START_MONEY, TILE, WATER_LEVEL } from '../src/core/constants';
+import { EventBus } from '../src/core/events';
 import { PathType, Terrain } from '../src/core/types';
 import { buildDemoZoo } from '../src/demo';
 import { OBJECTS_BY_ID } from '../src/data/objects';
@@ -8,75 +8,7 @@ import { SPECIES_BY_ID } from '../src/data/species';
 import { createSimulation } from '../src/sim';
 import { QP_INSIDE, QP_SERVE } from '../src/sim/queues';
 import type { Simulation } from '../src/sim/simulation';
-
-const EX = ENTRANCE_TILE.x;
-const EZ = ENTRANCE_TILE.z;
-const AVENUE = EZ - 14; // starter T-junction row
-/** Habitat rect north of the starter avenue; a viewing path runs along its south fence. */
-const HAB = { x0: 30, z0: 44, x1: 42, z1: 54 };
-
-function newSim(seed = 7): { sim: Simulation; events: EventBus; log: { type: keyof GameEvents; payload: unknown }[] } {
-  const events = new EventBus();
-  const log: { type: keyof GameEvents; payload: unknown }[] = [];
-  for (const t of ['notify', 'guestAdded', 'guestRemoved', 'objectiveCompleted', 'dayChanged', 'animalAdded', 'animalRemoved'] as const)
-    events.on(t, (p) => log.push({ type: t, payload: p }));
-  const sim = createSimulation(events, seed) as Simulation;
-  sim.newGame();
-  return { sim, events, log };
-}
-
-/** Build a small savanna habitat with a viewing path and guest facilities using only commands. */
-function buildZoo(sim: Simulation, fenceId = 2) {
-  const w = sim.world;
-  sim.bulldoze({ x0: HAB.x0 - 1, z0: HAB.z0 - 1, x1: HAB.x1 + 1, z1: HAB.z1 + 2 }); // clear wild trees
-  const path: { x: number; z: number }[] = [];
-  for (let x = HAB.x0 - 2; x <= HAB.x1 + 2; x++) path.push({ x, z: HAB.z1 + 2 });
-  for (let z = HAB.z1 + 2; z <= AVENUE; z++) path.push({ x: EX, z });
-  const rp = sim.placePaths(path, PathType.Paved);
-  expect(rp.ok).toBe(true);
-  expect(sim.paintTerrain(HAB, Terrain.DryGrass).ok).toBe(true);
-  expect(sim.paintTerrain({ x0: 33, z0: 47, x1: 35, z1: 48 }, Terrain.Water).ok).toBe(true);
-  expect(sim.paintTerrain({ x0: 38, z0: 46, x1: 41, z1: 49 }, Terrain.Dirt).ok).toBe(true);
-  const fence = sim.placeFences(w.edgesAroundRect(HAB), fenceId);
-  expect(fence.ok).toBe(true);
-  const hab = w.habitatAt(HAB.x0 + 1, HAB.z0 + 1)!;
-  expect(hab).toBeTruthy();
-  expect(hab.viewTiles.length).toBeGreaterThan(5);
-  for (const [id, x, z] of [
-    ['feeder_hay', 37, 46],
-    ['tree_acacia', 31, 45],
-    ['tree_acacia', 41, 52],
-    ['bush_savanna', 32, 52],
-    ['bush_savanna', 40, 45],
-    ['grass_tall', 35, 51],
-    ['water_trough', 31, 50],
-  ] as const)
-    expect(sim.placeObject(id, x, z, 0).ok).toBe(true);
-  // guest facilities along the avenue
-  expect(sim.placeObject('shop_snack', EX + 1, AVENUE + 2, 0).ok).toBe(true);
-  expect(sim.placeObject('shop_drinks', EX - 1, AVENUE + 2, 0).ok).toBe(true);
-  expect(sim.placeObject('restroom', EX + 1, AVENUE + 5, 0).ok).toBe(true);
-  expect(sim.placeObject('bench', EX - 1, AVENUE + 4, 1).ok).toBe(true);
-  expect(sim.placeObject('bin', EX - 1, AVENUE + 1, 0).ok).toBe(true);
-  return hab.id;
-}
-
-function buyHerd(sim: Simulation, species: string, n: number) {
-  const ids: number[] = [];
-  for (let i = 0; i < n; i++) {
-    const x = (HAB.x0 + 2 + (i % 4) * 2 + 0.5) * TILE;
-    const z = (HAB.z0 + 6 + Math.floor(i / 4) + 0.5) * TILE;
-    const r = sim.buyAnimal(species, x, z);
-    expect(r.ok).toBe(true);
-    ids.push(Math.max(...sim.animals.keys()));
-  }
-  return ids;
-}
-
-function hire(sim: Simulation) {
-  expect(sim.hireStaff('keeper', (EX + 0.5) * TILE, (AVENUE + 0.5) * TILE).ok).toBe(true);
-  expect(sim.hireStaff('groundskeeper', (EX + 0.5) * TILE, (AVENUE - 3 + 0.5) * TILE).ok).toBe(true);
-}
+import { AVENUE, EX, EZ, HAB, buildZoo, buyHerd, hire, newSim } from './sim-helpers';
 
 describe('commands', () => {
   it('dry runs report cost without changing anything', () => {
@@ -263,9 +195,9 @@ describe('object, habitat and pricing commands', () => {
 
   it('prices staff and terrain', () => {
     const { sim } = newSim();
-    expect(sim.staffWage('keeper')).toBe(40);
-    expect(sim.staffWage('groundskeeper')).toBe(30);
-    expect(sim.staffWage('vet')).toBe(60);
+    expect(sim.staffWage('keeper')).toBe(120);
+    expect(sim.staffWage('groundskeeper')).toBe(90);
+    expect(sim.staffWage('vet')).toBe(160);
     const before = sim.money;
     expect(sim.hireStaff('vet', (EX + 0.5) * TILE, (AVENUE + 0.5) * TILE).ok).toBe(true);
     expect(before - sim.money).toBe(sim.staffWage('vet'));
@@ -299,7 +231,7 @@ describe('habitat evaluation', () => {
     expect(zebra.terrain).toBeGreaterThan(0.5);
     const bear = sim.suitability('polarbear', hid);
     expect(bear.fenceOk).toBe(false);
-    expect(bear.issues.some((i) => /Needs more snow \(have 0%, wants 45%\)/.test(i))).toBe(true);
+    expect(bear.issues.some((i) => /Needs more Snow & Ice \(have 0%, wants 45%\)/.test(i))).toBe(true);
     expect(bear.issues.some((i) => /Fence too weak/.test(i))).toBe(true);
     expect(bear.score).toBeLessThan(zebra.score);
     buyHerd(sim, 'zebra', 1);
@@ -507,7 +439,7 @@ describe('guests: queues and families', () => {
   });
 
   it('children arrive with a parent, follow them and leave together', () => {
-    const { sim } = newSim(32);
+    const { sim } = newSim(34); // every system shares one RNG stream: a seed with a typical number of families
     buildZoo(sim);
     buyHerd(sim, 'zebra', 5);
     hire(sim);

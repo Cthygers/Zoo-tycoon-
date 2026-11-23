@@ -70,12 +70,64 @@ export class SampleImpl implements CoatSample {
   partD: Float32Array;
   private readonly partIndex: Map<string, number>;
   private readonly parts: string[];
+  /** The composed field (for ao()); null when sampling without one. */
+  private readonly field: SdfField | null;
+  private readonly bounds: THREE.Box3 | null;
+  /** Lazily built primitive lists per cell for ao(), per radius they were culled for. */
+  private readonly aoCells = new Map<number, Int32Array[]>();
 
-  constructor(parts: string[]) {
+  constructor(parts: string[], field: SdfField | null = null, bounds: THREE.Box3 | null = null) {
     this.parts = parts;
     this.partW = new Float32Array(parts.length);
     this.partD = new Float32Array(parts.length);
     this.partIndex = new Map(parts.map((p, i) => [p, i]));
+    this.field = field;
+    this.bounds = bounds;
+  }
+
+  /**
+   * Ambient occlusion of the sample, 0 (open) … 1 (deep crease): how much the
+   * surface closes in within `radius` metres along the normal (the classic
+   * SDF estimate, three steps). For baking cavities — skin folds, the base of
+   * horns, between the legs — into the coat, where there is no micro detail.
+   */
+  ao(radius: number): number {
+    if (!this.field) return 0;
+    // most of a body is open: one look at the far end of the ray settles it
+    const far = this.aoStep(radius, radius);
+    if (far <= 0) return 0;
+    return (this.aoStep(radius, radius / 3) + this.aoStep(radius, (radius * 2) / 3) * 0.5 + far / 3) / (1 + 0.5 + 1 / 3);
+  }
+
+  /** Occlusion 0..1 of one step `h` along the normal: how far the field there falls short of h. */
+  private aoStep(radius: number, h: number): number {
+    const px = this.x + this.nx * h, py = this.y + this.ny * h, pz = this.z + this.nz * h;
+    const list = this.aoList(radius, px, py, pz);
+    const d = this.field!.evalList(px, py, pz, list, list.length);
+    return Math.min(1, Math.max(0, (h - d) / h));
+  }
+
+  /** Primitives that can affect the field around a point within `radius` of the surface (8³ cells over the mesh bounds). */
+  private aoList(radius: number, x: number, y: number, z: number): Int32Array {
+    const b = this.bounds!;
+    const N = 8;
+    const sx = (b.max.x - b.min.x) / N || 1, sy = (b.max.y - b.min.y) / N || 1, sz = (b.max.z - b.min.z) / N || 1;
+    let lists = this.aoCells.get(radius);
+    if (!lists) {
+      lists = [];
+      const m = radius + 0.02;
+      for (let k = 0; k < N; k++)
+        for (let j = 0; j < N; j++)
+          for (let i = 0; i < N; i++) {
+            const x0 = b.min.x + i * sx, y0 = b.min.y + j * sy, z0 = b.min.z + k * sz;
+            lists.push(this.field!.cull(x0 - m, y0 - m, z0 - m, x0 + sx + m, y0 + sy + m, z0 + sz + m));
+          }
+      this.aoCells.set(radius, lists);
+    }
+    const i = Math.min(N - 1, Math.max(0, Math.floor((x - b.min.x) / sx)));
+    const j = Math.min(N - 1, Math.max(0, Math.floor((y - b.min.y) / sy)));
+    const k = Math.min(N - 1, Math.max(0, Math.floor((z - b.min.z) / sz)));
+    return lists[i + N * (j + N * k)];
   }
 
   pw(part: string): number {
@@ -425,7 +477,7 @@ export function buildGeometry(input: MeshInput, detail: 0 | 1 | 2, baker: Vertex
   const prims = field.prims;
   const nb = rig.count;
   const boneW = new Float32Array(nb);
-  const sample = new SampleImpl(parts);
+  const sample = new SampleImpl(parts, field, meshed.bounds);
   const np = parts.length;
   const top = [0, 0, 0, 0];
   const topW = [0, 0, 0, 0];

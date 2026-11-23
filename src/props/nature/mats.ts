@@ -24,15 +24,8 @@ import { clearNoiseCache } from './tex';
 // ---------------------------------------------------------------------------
 // Quality
 
+/** Detail tier of the build in progress ('medium' outside withQuality). */
 let quality: QualityLevel = 'medium';
-
-/**
- * Default detail tier for builds that do not pass QualitySettings (legacy
- * callers / harnesses). Default 'medium'.
- */
-export function setNatureQuality(level: QualityLevel): void {
-  quality = level;
-}
 
 /** Current detail tier. */
 export function natureQuality(): QualityLevel {
@@ -40,8 +33,8 @@ export function natureQuality(): QualityLevel {
 }
 
 /**
- * Run a builder at the tier of `q` (falls back to the default tier when q is
- * undefined). Builders read the tier through detail() / texLow().
+ * Run a builder at the tier of `q` ('medium' when q is undefined). Builders
+ * read the tier through detail() / texLow().
  */
 export function withQuality<T>(q: QualitySettings | QualityLevel | undefined, fn: () => T): T {
   const level = typeof q === 'string' ? q : q?.level;
@@ -235,8 +228,8 @@ export function barkMaterial(
     const ns = opts.normalScale ?? 1;
     m.normalScale.set(ns, ns);
     if (opts.sway) m.userData.sway = opts.sway;
-    // trunks / stems dissolve near the camera with their foliage; ground-level
-    // surfaces (soil, log ends) opt out
+    // trunks dissolve (whole) while the camera stands inside the plant;
+    // ground-level surfaces (soil, log ends) opt out
     m.userData.fadeNear = opts.fade ?? true;
     return m;
   });

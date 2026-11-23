@@ -10,69 +10,184 @@ import { cue } from './sound';
 
 const KIND_ICON: Record<NotifyKind, IconName> = { info: 'info', good: 'good', warn: 'warn', bad: 'bad' };
 
-interface ToastRec {
-  root: HTMLElement;
+/** How long a toast stays up (ms). */
+const LIFE: Record<NotifyKind, number> = { info: 4200, good: 4200, warn: 5200, bad: 5200 };
+/** Even with messages waiting, a toast stays up at least this long (ms) so it can be read. */
+const MIN_LIFE = 2400;
+/** Waiting toasts beyond this are dropped (oldest routine ones first); the message log keeps them. */
+const MAX_QUEUED = 6;
+const LOG_SIZE = 40;
+
+const urgent = (k: NotifyKind) => k === 'warn' || k === 'bad';
+
+export interface LogEntry {
   text: string;
+  kind: NotifyKind;
+  focus?: { x: number; z: number };
+  day: number;
+  /** Game minute of the day of the latest occurrence. */
+  minute: number;
   count: number;
-  countEl: HTMLElement;
-  timer: number;
 }
 
-export class Toasts {
-  readonly root = el('div', 'wh-toasts');
-  private list: ToastRec[] = [];
-  private max = 3;
+/** The last few dozen notifications, newest first (the zoo menu's Messages tab). */
+export class MessageLog {
+  readonly entries: LogEntry[] = [];
+  /** Bumped on every change, so a list can cheaply tell whether to re-render. */
+  version = 0;
 
-  constructor(private onFocus: (x: number, z: number) => void) {}
-
-  show(text: string, kind: NotifyKind, focus?: { x: number; z: number }): void {
-    // merge repeats of the same message instead of stacking them
-    const dup = this.list.find((t) => t.text === text);
-    if (dup) {
-      dup.count++;
-      setText(dup.countEl, `×${dup.count}`);
-      dup.countEl.style.display = '';
-      window.clearTimeout(dup.timer);
-      dup.timer = window.setTimeout(() => this.remove(dup), 4200);
+  add(text: string, kind: NotifyKind, focus: { x: number; z: number } | undefined, day: number, minute: number): void {
+    this.version++;
+    const last = this.entries[0];
+    if (last && last.text === text && last.kind === kind) {
+      last.count++;
+      last.day = day;
+      last.minute = minute;
       return;
     }
+    this.entries.unshift({ text, kind, focus, day, minute, count: 1 });
+    if (this.entries.length > LOG_SIZE) this.entries.length = LOG_SIZE;
+  }
+}
+
+interface ToastRec {
+  text: string;
+  kind: NotifyKind;
+  focus?: { x: number; z: number };
+  count: number;
+  root: HTMLElement | null;
+  countEl: HTMLElement | null;
+  timer: number;
+  shownAt: number;
+  expiresAt: number;
+}
+
+/**
+ * Toast stack. On a short screen only two fit, so extra messages wait in a queue
+ * (warnings first) instead of pushing the visible ones off at once; while
+ * something waits, visible toasts leave after MIN_LIFE. Every message is also
+ * written to the log.
+ */
+export class Toasts {
+  readonly root = el('div', 'wh-toasts');
+  readonly log = new MessageLog();
+  private list: ToastRec[] = [];
+  private queue: ToastRec[] = [];
+
+  constructor(
+    private onFocus: (x: number, z: number) => void,
+    private clock: () => { day: number; minute: number },
+  ) {}
+
+  private get capacity(): number {
+    return window.innerHeight < 520 ? 2 : 3;
+  }
+
+  show(text: string, kind: NotifyKind, focus?: { x: number; z: number }): void {
+    const now = this.clock();
+    this.log.add(text, kind, focus, now.day, now.minute);
+    // merge repeats of the same message instead of stacking them
+    const dup = this.list.find((t) => t.text === text) ?? this.queue.find((t) => t.text === text);
+    if (dup) {
+      dup.count++;
+      if (dup.root) {
+        setText(dup.countEl!, `×${dup.count}`);
+        dup.countEl!.style.display = '';
+        this.schedule(dup, performance.now() + (this.queue.length ? MIN_LIFE : LIFE[dup.kind]));
+      }
+      return;
+    }
+    const rec: ToastRec = { text, kind, focus, count: 1, root: null, countEl: null, timer: 0, shownAt: 0, expiresAt: 0 };
+    if (this.list.length >= this.capacity) {
+      // a warning takes the place of the oldest routine toast rather than waiting behind it
+      const routine = urgent(kind) ? this.list.find((t) => !urgent(t.kind)) : undefined;
+      if (!routine) {
+        this.enqueue(rec);
+        return;
+      }
+      this.remove(routine, false);
+      // barely seen: let it come back once there is room
+      if (performance.now() - routine.shownAt < MIN_LIFE) this.enqueue(this.requeued(routine));
+    }
+    this.display(rec);
+  }
+
+  /** A fresh record (no DOM yet) for a toast that was evicted early. */
+  private requeued(t: ToastRec): ToastRec {
+    return { ...t, root: null, countEl: null, timer: 0, shownAt: 0, expiresAt: 0 };
+  }
+
+  private enqueue(rec: ToastRec): void {
+    // urgent ones go ahead of routine ones, otherwise first come first served
+    const at = urgent(rec.kind) ? this.queue.findIndex((t) => !urgent(t.kind)) : -1;
+    if (at < 0) this.queue.push(rec);
+    else this.queue.splice(at, 0, rec);
+    if (this.queue.length > MAX_QUEUED) {
+      const drop = this.queue.findIndex((t) => !urgent(t.kind));
+      this.queue.splice(drop < 0 ? 0 : drop, 1);
+    }
+    this.hurry();
+  }
+
+  /** Shorten what is on screen so the queue drains, but never below MIN_LIFE. */
+  private hurry(): void {
+    for (const t of this.list) {
+      const soonest = Math.max(performance.now(), t.shownAt + MIN_LIFE);
+      if (soonest < t.expiresAt) this.schedule(t, soonest);
+    }
+  }
+
+  private schedule(t: ToastRec, at: number): void {
+    window.clearTimeout(t.timer);
+    t.expiresAt = at;
+    t.timer = window.setTimeout(() => this.remove(t), Math.max(0, at - performance.now()));
+  }
+
+  private display(rec: ToastRec): void {
     const countEl = el('span', 'wh-toast-count');
-    countEl.style.display = 'none';
-    const root = el('div', `wh-toast wh-glass-2 ${kind}`);
-    root.innerHTML = `${icon(KIND_ICON[kind])}<span>${escapeHtml(text)}</span>`;
+    if (rec.count > 1) countEl.textContent = `×${rec.count}`;
+    else countEl.style.display = 'none';
+    const root = el('div', `wh-toast wh-glass-2 ${rec.kind}`);
+    root.innerHTML = `${icon(KIND_ICON[rec.kind])}<span>${escapeHtml(rec.text)}</span>`;
     root.append(countEl);
-    if (focus) {
+    if (rec.focus) {
       const go = el('span', 'wh-toast-go');
       go.innerHTML = icon('target');
       root.append(go);
     }
     swallowPointer(root);
-    const rec: ToastRec = { root, text, count: 1, countEl, timer: 0 };
     root.addEventListener('click', (ev) => {
       ev.stopPropagation();
       cue('tap');
-      if (focus) this.onFocus(focus.x, focus.z);
+      if (rec.focus) this.onFocus(rec.focus.x, rec.focus.z);
       this.remove(rec);
     });
-    rec.timer = window.setTimeout(() => this.remove(rec), kind === 'bad' || kind === 'warn' ? 5200 : 4200);
+    rec.root = root;
+    rec.countEl = countEl;
+    rec.shownAt = performance.now();
     this.list.push(rec);
     this.root.append(root);
-    const max = window.innerHeight < 520 ? this.max - 1 : this.max;
-    while (this.list.length > max) this.remove(this.list[0]);
+    this.schedule(rec, rec.shownAt + (this.queue.length ? MIN_LIFE : LIFE[rec.kind]));
   }
 
-  private remove(rec: ToastRec): void {
+  /** Take a toast off screen; `refill` shows the next waiting one in its place. */
+  private remove(rec: ToastRec, refill = true): void {
     const i = this.list.indexOf(rec);
     if (i < 0) return;
     this.list.splice(i, 1);
     window.clearTimeout(rec.timer);
-    rec.root.classList.add('out');
-    window.setTimeout(() => rec.root.remove(), 300);
+    const root = rec.root!;
+    root.classList.add('out');
+    window.setTimeout(() => root.remove(), 300);
+    if (!refill) return;
+    const next = this.queue.shift();
+    if (next) this.display(next);
   }
 
   dispose(): void {
     for (const t of this.list) window.clearTimeout(t.timer);
     this.list = [];
+    this.queue = [];
     this.root.remove();
   }
 }

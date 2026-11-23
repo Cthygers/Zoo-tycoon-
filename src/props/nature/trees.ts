@@ -353,9 +353,12 @@ export const buildBaobabLod = BAOBAB.buildLod;
 function pineParts(variant: number): TreeParts {
   const seed = 4400 + variant * 7919;
   const rng = new Rng(seed);
-  const H = [17, 15.5, 19, 16.5][variant % 4];
+  // variant 3 grew in the open (parkland / lawn): shorter, crown reaching
+  // much lower, few dead stubs; the others are forest-grown with a long bare bole
+  const open = variant % 4 === 3;
+  const H = [17, 15.5, 19, 13][variant % 4];
   const r0 = 0.19 + H * 0.0055;
-  const crownBase = rng.range(0.5, 0.58);
+  const crownBase = open ? rng.range(0.3, 0.38) : rng.range(0.5, 0.58);
   const whorls = Math.round((H * (0.97 - crownBase)) / 0.62);
   const spec: TreeSpec = {
     levels: [
@@ -392,7 +395,7 @@ function pineParts(variant: number): TreeParts {
   const sk = growTree(spec, rng, v3(0, -TRUNK_SINK, 0), leanDir(rng, 0.03), H * 0.97 + TRUNK_SINK, r0);
   // dead branch stubs on the bare lower bole
   const trunk = sk.branches[0];
-  const stubs = 5 + rng.int(0, 4);
+  const stubs = open ? 1 + rng.int(0, 2) : 5 + rng.int(0, 4);
   for (let k = 0; k < stubs; k++) {
     const t = rng.range(0.2, crownBase - 0.03);
     const i = Math.floor(t * (trunk.pts.length - 1));

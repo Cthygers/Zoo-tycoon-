@@ -2,7 +2,10 @@
 // rendered offscreen with the game's own renderer and models into a small
 // multisampled render target, read back, and cached as data URLs. Terrain and
 // path swatches are painted procedurally on a 2D canvas. Work is queued and
-// processed a little per frame so opening a drawer never stalls the game.
+// processed one item at a time, a few frames apart, so opening a drawer never
+// stalls the game: framing is computed on the CPU, the pixels come back through
+// an asynchronous readback (no GPU pipeline stall) and images are encoded with
+// toBlob, which browsers do off the main thread.
 // Finished thumbnails are also persisted in IndexedDB (versioned keys), so on
 // the next launch the drawers fill instantly; any storage failure (private
 // mode, quota, no IndexedDB) silently falls back to rendering.
@@ -22,7 +25,7 @@ import { disposeOwned } from './preview';
  * enough that cached images from an older build would look wrong. Keys also
  * hash the item's catalogue entry, so data edits invalidate single entries.
  */
-export const THUMB_CACHE_VERSION = 5;
+export const THUMB_CACHE_VERSION = 6;
 const DB_NAME = 'wildhaven-thumbs';
 const DB_STORE = 'thumbs';
 
@@ -30,6 +33,11 @@ export const THUMB_W = 228;
 export const THUMB_H = 192;
 
 type Listener = (url: string) => void;
+
+/** Frames between two thumbnail jobs (one job is in flight at a time). */
+const JOB_GAP_FRAMES = 3;
+/** Vertices projected per model to frame it (sampled evenly from the visible meshes). */
+const FRAME_SAMPLES = 6000;
 
 export function thumbKey(s: ThumbSpec): string {
   switch (s.kind) {
@@ -220,6 +228,7 @@ export class ThumbnailService {
   private listeners = new Map<string, Listener[]>();
   private busy = false;
   private frame = 0;
+  private nextJobFrame = 0;
   private rt: THREE.WebGLRenderTarget | null = null;
   private scene = new THREE.Scene();
   private cam = new THREE.PerspectiveCamera(26, THUMB_W / THUMB_H, 0.05, 400);
@@ -317,67 +326,76 @@ export class ThumbnailService {
     if (ls) for (const fn of ls) fn(url);
   }
 
-  /** Process queued work (call once per frame, before the main render). */
+  /** Start the next queued job when the previous one is done (call once per frame, before the main render). */
   update(): void {
-    if (this.disposed || this.busy || !this.queue.length) return;
+    this.frame++;
+    if (this.disposed || this.busy || !this.queue.length || this.frame < this.nextJobFrame) return;
     // give the persistent cache a moment to open before rendering anything it may hold
     if (!this.persisted) {
       if (++this.waitFrames < 150) return;
       this.persisted = new Map(); // storage is too slow: render now, merge when it arrives
     }
-    this.frame++;
-    if (this.frame % 2) return; // at most one thumbnail every other frame
     const job = this.queue.shift()!;
-    const s = job.spec;
-    if (s.kind === 'terrain') this.resolve(job.key, terrainSwatch(s.terrain), s);
-    else if (s.kind === 'path') this.resolve(job.key, pathSwatch(s.pathType), s);
-    else if (s.kind === 'animal') {
-      this.busy = true;
-      this.creatures
-        .preload([s.speciesId])
-        .catch(() => undefined)
-        .then(() => {
-          this.busy = false;
-          if (this.disposed) return;
-          this.resolve(job.key, this.renderCreature(() => this.creatures.createAnimal(s.speciesId, { seed: 11, sex: 'M', growth: 1 }), 'animal'), s);
-        });
-    } else if (s.kind === 'staff') {
-      this.resolve(job.key, this.renderCreature(() => this.creatures.createHuman(STAFF_LOOK[s.role], s.role, 5), 'human'), s);
-    } else if (s.kind === 'object') {
-      this.resolve(job.key, this.renderModel(() => this.props.createObjectModel(s.defId, 3), 0.62), s);
-    } else if (s.kind === 'fence') {
-      this.resolve(job.key, this.renderModel(() => this.props.createFenceSegmentModel(s.fenceId), 0.5), s);
+    this.busy = true;
+    this.make(job.spec)
+      .catch((err) => {
+        console.warn('[ui] thumbnail failed', err);
+        return null;
+      })
+      .then((url) => {
+        this.busy = false;
+        this.nextJobFrame = this.frame + JOB_GAP_FRAMES;
+        if (!this.disposed) this.resolve(job.key, url, job.spec);
+      });
+  }
+
+  private async make(s: ThumbSpec): Promise<string | null> {
+    switch (s.kind) {
+      case 'terrain':
+        return encodeCanvas(terrainSwatch(s.terrain));
+      case 'path':
+        return encodeCanvas(pathSwatch(s.pathType));
+      case 'animal':
+        await this.creatures.preload([s.speciesId]).catch(() => undefined);
+        if (this.disposed) return null;
+        return this.renderCreature(() => this.creatures.createAnimal(s.speciesId, { seed: 11, sex: 'M', growth: 1 }), 'animal');
+      case 'staff':
+        return this.renderCreature(() => this.creatures.createHuman(STAFF_LOOK[s.role], s.role, 5), 'human');
+      case 'object':
+        return this.renderModel(() => this.props.createObjectModel(s.defId, 3), 0.62);
+      case 'fence':
+        return this.renderModel(() => this.props.createFenceSegmentModel(s.fenceId), 0.5);
+      default:
+        return null;
     }
   }
 
   // ------------------------------------------------------------ 3D rendering
-  private renderModel(make: () => THREE.Object3D, yaw: number): string | null {
-    let obj: THREE.Object3D | null = null;
+  // The model is drawn and freed synchronously (WebGL keeps resources alive until queued
+  // draws finish); only the readback and the encode are awaited.
+  private renderModel(make: () => THREE.Object3D, yaw: number): Promise<string | null> {
+    const obj = make();
     try {
-      obj = make();
       const box = new THREE.Box3().setFromObject(obj);
-      if (box.isEmpty()) return null;
+      if (box.isEmpty()) return Promise.resolve(null);
       const sphere = box.getBoundingSphere(new THREE.Sphere());
-      const url = this.shoot(obj, sphere.center, sphere.radius, yaw, 0.38, box.min.y);
-      return url;
-    } catch (err) {
-      console.warn('[ui] thumbnail failed', err);
-      return null;
+      return this.shoot(obj, samplePoints(obj), sphere.center, sphere.radius, yaw, 0.38, box.min.y);
     } finally {
-      if (obj) disposeOwned(obj);
+      disposeOwned(obj);
     }
   }
 
-  private renderCreature(make: () => CreatureModel, kind: 'animal' | 'human'): string | null {
-    let model: CreatureModel | null = null;
+  private renderCreature(make: () => CreatureModel, kind: 'animal' | 'human'): Promise<string | null> {
+    const model = make();
     try {
-      model = make();
       model.update(0.016, { action: 'idle', speed: 0 });
       model.object.updateMatrixWorld(true);
       const h = Math.max(0.3, model.height);
+      // posed (skinned) vertices: the bind pose box can be far off for a sitting / grazing pose
+      const points = samplePoints(model.object);
+      const box = new THREE.Box3().setFromArray(points);
       let center: THREE.Vector3;
       let radius: number;
-      const box = new THREE.Box3().setFromObject(model.object, true);
       if (!box.isEmpty() && box.max.y > 0.05) {
         const sp = box.getBoundingSphere(new THREE.Sphere());
         center = sp.center;
@@ -386,16 +404,17 @@ export class ThumbnailService {
         center = new THREE.Vector3(0, h * 0.5, 0);
         radius = Math.max(h * 0.6, model.radius * 1.2);
       }
-      return this.shoot(model.object, center, radius, kind === 'human' ? 0.35 : 0.95, kind === 'human' ? 0.12 : 0.22, 0);
-    } catch (err) {
-      console.warn('[ui] creature thumbnail failed', err);
-      return null;
+      return this.shoot(model.object, points, center, radius, kind === 'human' ? 0.35 : 0.95, kind === 'human' ? 0.12 : 0.22, 0);
     } finally {
-      model?.dispose();
+      model.dispose();
     }
   }
 
-  private shoot(obj: THREE.Object3D, center: THREE.Vector3, radius: number, yaw: number, pitch: number, groundY: number): string | null {
+  /**
+   * Draw `obj` into the render target, framed around the sphere and then tightened to the
+   * projected `points`; resolves with the encoded image once the pixels have been read back.
+   */
+  private shoot(obj: THREE.Object3D, points: Float32Array, center: THREE.Vector3, radius: number, yaw: number, pitch: number, groundY: number): Promise<string | null> {
     const r = this.renderer;
     if (!this.rt) {
       this.rt = new THREE.WebGLRenderTarget(THUMB_W, THUMB_H, {
@@ -405,9 +424,6 @@ export class ThumbnailService {
         depthBuffer: true,
       });
     }
-    this.scene.add(obj);
-    this.scene.environment = this.envScene.environment;
-    this.scene.environmentIntensity = 0.55;
     const fov = (this.cam.fov * Math.PI) / 180;
     const fit = Math.min(fov, 2 * Math.atan(Math.tan(fov / 2) * this.cam.aspect));
     const dist = (radius / Math.sin(fit / 2)) * 1.02;
@@ -416,26 +432,31 @@ export class ThumbnailService {
     this.cam.near = Math.max(0.02, dist - radius * 3);
     this.cam.far = dist + radius * 3;
     this.cam.lookAt(center);
+    this.cam.updateMatrixWorld();
     this.cam.updateProjectionMatrix();
+    // re-frame tightly around the model's silhouette
+    const region = this.tightRegion(points);
+    if (region) this.cam.setViewOffset(THUMB_W, THUMB_H, region.x, region.y, region.w, region.h);
+    // where the ground under the object lands (for a soft contact shadow)
+    const g = new THREE.Vector3(center.x, groundY, center.z).project(this.cam);
+    const gs = new THREE.Vector3(center.x + radius * 0.8, groundY, center.z).project(this.cam);
+    const gx = (g.x * 0.5 + 0.5) * THUMB_W,
+      gy = (1 - (g.y * 0.5 + 0.5)) * THUMB_H,
+      gr = Math.abs(gs.x - g.x) * 0.5 * THUMB_W;
 
+    this.scene.add(obj);
+    this.scene.environment = this.envScene.environment;
+    this.scene.environmentIntensity = 0.55;
     const prevTarget = r.getRenderTarget();
     const prevClear = r.getClearColor(new THREE.Color());
     const prevAlpha = r.getClearAlpha();
     const prevAutoClear = r.autoClear;
-    let url: string | null = null;
     try {
       r.autoClear = false;
-      this.pass();
-      // second pass: re-frame tightly around what was actually drawn
-      const region = this.tightRegion();
-      if (region) {
-        this.cam.setViewOffset(THUMB_W, THUMB_H, region.x, region.y, region.w, region.h);
-        this.pass();
-      }
-      // where does the ground under the object project to? (for a soft contact shadow)
-      const g = new THREE.Vector3(center.x, groundY, center.z).project(this.cam);
-      const gs = new THREE.Vector3(center.x + radius * 0.8, groundY, center.z).project(this.cam);
-      url = this.toDataUrl((g.x * 0.5 + 0.5) * THUMB_W, (1 - (g.y * 0.5 + 0.5)) * THUMB_H, Math.abs(gs.x - g.x) * 0.5 * THUMB_W);
+      r.setRenderTarget(this.rt);
+      r.setClearColor(0x000000, 0);
+      r.clear(true, true, true);
+      r.render(this.scene, this.cam);
     } finally {
       this.cam.clearViewOffset();
       r.setRenderTarget(prevTarget);
@@ -444,41 +465,34 @@ export class ThumbnailService {
       this.scene.remove(obj);
       this.scene.environment = null;
     }
-    return url;
+    // asynchronous readback: the CPU is not blocked waiting for the GPU to finish the frame
+    return r.readRenderTargetPixelsAsync(this.rt, 0, 0, THUMB_W, THUMB_H, this.pixels).then(() => (this.disposed ? null : encodeCanvas(this.compose(gx, gy, gr))));
   }
 
-  private pass(): void {
-    const r = this.renderer;
-    r.setRenderTarget(this.rt);
-    r.setClearColor(0x000000, 0);
-    r.clear(true, true, true);
-    r.render(this.scene, this.cam);
-    r.readRenderTargetPixels(this.rt!, 0, 0, THUMB_W, THUMB_H, this.pixels);
-  }
-
-  /** Sub-window (top-down pixel coords) that frames the drawn pixels with padding, or null if already tight. */
-  private tightRegion(): { x: number; y: number; w: number; h: number } | null {
-    const px = this.pixels;
-    let x0 = THUMB_W,
-      x1 = -1,
-      y0 = THUMB_H,
-      y1 = -1;
-    for (let y = 0; y < THUMB_H; y++) {
-      const row = y * THUMB_W * 4;
-      for (let x = 0; x < THUMB_W; x++) {
-        if (px[row + x * 4 + 3] < 12) continue;
-        if (x < x0) x0 = x;
-        if (x > x1) x1 = x;
-        if (y < y0) y0 = y;
-        if (y > y1) y1 = y;
-      }
+  /** Sub-window (top-down pixel coords) that frames the projected points with padding, or null if already tight. */
+  private tightRegion(points: Float32Array): { x: number; y: number; w: number; h: number } | null {
+    const m = _m.multiplyMatrices(this.cam.projectionMatrix, this.cam.matrixWorldInverse);
+    let x0 = Infinity,
+      x1 = -Infinity,
+      y0 = Infinity,
+      y1 = -Infinity;
+    for (let i = 0; i < points.length; i += 3) {
+      _v.fromArray(points, i).applyMatrix4(m);
+      if (_v.z > 1) continue; // behind the camera
+      const x = (_v.x * 0.5 + 0.5) * THUMB_W,
+        y = (0.5 - _v.y * 0.5) * THUMB_H;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
     }
-    if (x1 < 0) return null;
-    // GL rows are bottom-up → convert to top-down
-    const top = THUMB_H - 1 - y1,
-      bottom = THUMB_H - 1 - y0;
-    let w = (x1 - x0 + 1) * 1.16,
-      h = (bottom - top + 1) * 1.2;
+    if (x1 < x0) return null;
+    x0 = Math.max(0, x0);
+    x1 = Math.min(THUMB_W, x1);
+    y0 = Math.max(0, y0);
+    y1 = Math.min(THUMB_H, y1);
+    let w = (x1 - x0) * 1.16,
+      h = (y1 - y0) * 1.2;
     const aspect = THUMB_W / THUMB_H;
     if (w / h > aspect) h = w / aspect;
     else w = h * aspect;
@@ -488,12 +502,13 @@ export class ThumbnailService {
       w = minW;
       h = w / aspect;
     }
-    const cx = (x0 + x1 + 1) / 2;
-    const cy = (top + bottom + 1) / 2 + h * 0.03; // a little room for the ground shadow
+    const cx = (x0 + x1) / 2;
+    const cy = (y0 + y1) / 2 + h * 0.03; // a little room for the ground shadow
     return { x: cx - w / 2, y: cy - h / 2, w, h };
   }
 
-  private toDataUrl(gx: number, gy: number, gr: number): string | null {
+  /** The read-back pixels on a 2D canvas over a soft contact shadow (null if nearly nothing was drawn). */
+  private compose(gx: number, gy: number, gr: number): HTMLCanvasElement | null {
     const cv = document.createElement('canvas');
     cv.width = THUMB_W;
     cv.height = THUMB_H;
@@ -541,7 +556,7 @@ export class ThumbnailService {
     layer.height = THUMB_H;
     layer.getContext('2d')!.putImageData(img, 0, 0);
     c.drawImage(layer, 0, 0);
-    return encodeCanvas(cv);
+    return cv;
   }
 
   dispose(): void {
@@ -554,22 +569,68 @@ export class ThumbnailService {
   }
 }
 
+const _v = new THREE.Vector3();
+const _m = new THREE.Matrix4();
+const _im = new THREE.Matrix4();
+
+/**
+ * World positions (xyz triples) of about FRAME_SAMPLES vertices spread evenly over the
+ * visible meshes, posed (skinning applied) and with instancing applied.
+ */
+function samplePoints(root: THREE.Object3D): Float32Array {
+  const meshes: THREE.Mesh[] = [];
+  let total = 0;
+  root.updateMatrixWorld(true);
+  root.traverseVisible((o) => {
+    const mesh = o as THREE.Mesh;
+    const pos = mesh.isMesh ? mesh.geometry.getAttribute('position') : undefined;
+    if (!pos) return;
+    meshes.push(mesh);
+    total += pos.count * ((mesh as THREE.InstancedMesh).isInstancedMesh ? (mesh as THREE.InstancedMesh).count : 1);
+  });
+  const step = Math.max(1, Math.ceil(total / FRAME_SAMPLES));
+  const out: number[] = [];
+  for (const mesh of meshes) {
+    const n = mesh.geometry.getAttribute('position').count;
+    const inst = (mesh as THREE.InstancedMesh).isInstancedMesh ? (mesh as THREE.InstancedMesh) : null;
+    const add = (i: number) => {
+      mesh.getVertexPosition(i, _v);
+      if (inst) _v.applyMatrix4(_im);
+      _v.applyMatrix4(mesh.matrixWorld);
+      out.push(_v.x, _v.y, _v.z);
+    };
+    for (let k = 0; k < (inst ? inst.count : 1); k++) {
+      if (inst) inst.getMatrixAt(k, _im);
+      for (let i = 0; i < n; i += step) add(i);
+      if ((n - 1) % step) add(n - 1); // small parts always give at least their first and last vertex
+    }
+  }
+  return new Float32Array(out);
+}
+
+/**
+ * Encode as a data URL (the IndexedDB cache stores strings). toBlob encodes off the main thread;
+ * WebP keeps alpha at about a third of PNG's size, and browsers without a WebP encoder return PNG.
+ */
+function encodeCanvas(cv: HTMLCanvasElement | null): Promise<string | null> {
+  if (!cv) return Promise.resolve(null);
+  return new Promise<Blob | null>((res) => cv.toBlob(res, 'image/webp', 0.9)).then(
+    (blob) =>
+      blob &&
+      new Promise<string | null>((res) => {
+        const fr = new FileReader();
+        fr.onload = () => res(typeof fr.result === 'string' ? fr.result : null);
+        fr.onerror = () => res(null);
+        fr.readAsDataURL(blob);
+      }),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Procedural 2D swatches
 
 const SW = 128;
 const noise = new Noise(9071);
-
-let webpOk: boolean | null = null;
-/** WebP (with alpha) is ~3× smaller than PNG for these images; fall back to PNG where unsupported. */
-function encodeCanvas(cv: HTMLCanvasElement): string {
-  if (webpOk !== false) {
-    const u = cv.toDataURL('image/webp', 0.9);
-    webpOk = u.startsWith('data:image/webp');
-    if (webpOk) return u;
-  }
-  return cv.toDataURL('image/png');
-}
 
 function swatchCanvas(): { cv: HTMLCanvasElement; c: CanvasRenderingContext2D; img: ImageData } | null {
   const cv = document.createElement('canvas');
@@ -596,7 +657,7 @@ const TERRAIN_PAL: [RGB, RGB, number, number][] = [
   [[22, 62, 84], [52, 104, 124], 0.04, 0.2],
 ];
 
-export function terrainSwatch(t: Terrain): string | null {
+function terrainSwatch(t: Terrain): HTMLCanvasElement | null {
   const s = swatchCanvas();
   if (!s) return null;
   const [dark, light, sc, grain] = TERRAIN_PAL[t] ?? TERRAIN_PAL[0];
@@ -645,10 +706,10 @@ export function terrainSwatch(t: Terrain): string | null {
     s.c.fillStyle = g;
     s.c.fillRect(0, 0, SW, SW);
   }
-  return encodeCanvas(s.cv);
+  return s.cv;
 }
 
-export function pathSwatch(p: PathType): string | null {
+function pathSwatch(p: PathType): HTMLCanvasElement | null {
   const s = swatchCanvas();
   if (!s) return null;
   const c = s.c;
@@ -720,5 +781,5 @@ export function pathSwatch(p: PathType): string | null {
     }
     c.putImageData(d, 0, 0);
   }
-  return encodeCanvas(s.cv);
+  return s.cv;
 }

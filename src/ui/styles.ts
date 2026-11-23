@@ -41,7 +41,8 @@ const CSS = /* css */ `
   -webkit-font-smoothing: antialiased;
   font-variant-numeric: tabular-nums;
 }
-.wh-ui { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+/* overflow: clip (not hidden) so no scrollIntoView / focus() / keyboard resize can scroll the whole HUD layer sideways */
+.wh-ui { position: absolute; inset: 0; pointer-events: none; overflow: hidden; overflow: clip; }
 .wh-ui * , .wh-screen * { box-sizing: border-box; }
 .wh-ico { width: 22px; height: 22px; display: block; flex: none; }
 .wh-icon-wrap { display: inline-flex; align-items: center; justify-content: center; }
@@ -226,7 +227,7 @@ const CSS = /* css */ `
 .wh-cat.sel.on { background: rgba(255, 255, 255, .10); color: var(--wh-text); box-shadow: inset 0 0 0 1px var(--wh-line-2); }
 
 .wh-drawer {
-  pointer-events: auto; width: min(100%, 1000px); border-radius: 20px; overflow: hidden;
+  pointer-events: auto; width: min(100%, 1000px); border-radius: 20px; overflow: hidden; overflow: clip;
   transform-origin: 50% 100%; animation: wh-drawer-in .26s cubic-bezier(.2, .9, .3, 1) both;
 }
 .wh-drawer.hidden { display: none; }
@@ -237,14 +238,16 @@ const CSS = /* css */ `
 .wh-drawer-head .wh-btn { min-height: 44px; height: 44px; width: 44px; min-width: 44px; border-radius: 22px; margin: -2px -2px -2px 0; }
 .wh-drawer-head .wh-btn .wh-ico { width: 18px; height: 18px; }
 .wh-row {
+  position: relative; /* offsetParent of the cards, so card.offsetLeft is row-relative */
   display: flex; gap: 8px; overflow-x: auto; overflow-y: hidden; padding: 6px 12px 12px; scrollbar-width: none;
   overscroll-behavior: contain; touch-action: pan-x; scroll-snap-type: x proximity;
+  scroll-padding-inline: 12px; /* = side padding: snapped items keep the gap, and the start snaps to 0 */
 }
 .wh-row::-webkit-scrollbar { display: none; }
 .wh-sec {
   flex: none; writing-mode: vertical-rl; transform: rotate(180deg); text-transform: uppercase; letter-spacing: .14em;
   font-size: 10px; font-weight: 700; color: var(--wh-faint); text-align: center; padding: 0 2px; border-left: 1px solid var(--wh-line);
-  margin-left: 2px;
+  margin-left: 2px; scroll-margin-left: 2px; scroll-snap-align: start; /* else the row snaps past the first section label */
 }
 .wh-card {
   flex: none; width: 92px; padding: 6px 5px 7px; border-radius: 14px; display: flex; flex-direction: column; align-items: center; gap: 3px;
@@ -304,21 +307,73 @@ const CSS = /* css */ `
 .wh-cf-sub { font-size: 12px; color: var(--wh-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wh-cf-sub.bad { color: #ffab90; }
 .wh-cf-sub.warn { color: var(--wh-amber); }
+/* warnings are whole sentences: two lines rather than an ellipsis */
+.wh-cf-sub.bad, .wh-cf-sub.warn { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.25; }
 .wh-cf-ok { height: 46px; padding: 0 18px 0 14px; border-radius: 18px; font-size: 15px; flex: none; }
 .wh-cf-ok.remove { background: linear-gradient(180deg, #f0a587, #d27352); color: #2b130b; box-shadow: 0 4px 14px rgba(210, 115, 82, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.3); }
+/* allowed but not advised (e.g. a fence that won't form a habitat): amber, so it never reads as the usual go-ahead */
+.wh-cf-ok.risky { background: linear-gradient(180deg, #f0cf86, #d6a646); color: #2e2108; box-shadow: 0 4px 14px rgba(214, 166, 70, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.3); }
 .wh-cf-no { height: 46px; width: 46px; border-radius: 18px; padding: 0; flex: none; }
 .wh-cf-text { flex: 1 1 auto; }
 .wh-tb-thumb, .wh-tb-opts, .wh-tb-done { flex: none; }
 .wh-tb-text { flex: 1 1 auto; }
 @keyframes wh-shake { 0%,100% { transform: none; } 20% { transform: translateX(-8px); } 40% { transform: translateX(7px); } 60% { transform: translateX(-5px); } 80% { transform: translateX(3px); } }
+/* first few times in build mode: how the camera moves now that one finger builds */
+.wh-tb-tip { display: flex; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 600; color: var(--wh-leaf-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wh-tb-tip.hidden { display: none; }
+/* with a build drawer open the tool bar sits above it: keep it one line shorter so it clears the top bar on short screens */
+.wh-ui.drawer-open .wh-tb-tip { display: none; }
+.wh-tb-tip .wh-ico { width: 14px; height: 14px; flex: none; }
+
+/* ------------------------------------------------------------ next-goal pill + first-run tour */
+.wh-goal {
+  position: absolute; top: calc(var(--wh-gt) + var(--wh-top-h) + 6px); left: var(--wh-gl); z-index: 8;
+  pointer-events: auto; display: flex; align-items: center; gap: 7px; height: 32px; padding: 0 11px 0 9px; border-radius: 16px;
+  max-width: min(380px, 42vw); font-size: 12.5px; cursor: pointer; transition: opacity .25s ease, transform .12s ease;
+}
+.wh-goal::after { content: ""; position: absolute; inset: -6px 0; } /* 44 px tall touch target */
+.wh-goal:active { transform: scale(.97); }
+/* hidden, and under the species card that opens in the same corner */
+/* also while a build drawer is open: the tool bar then sits where the pill is */
+.wh-goal.hidden, .wh-ui.card-open .wh-goal, .wh-ui.drawer-open .wh-goal { opacity: 0; visibility: hidden; pointer-events: none; }
+.wh-goal-k { display: inline-flex; align-items: center; gap: 4px; flex: none; color: var(--wh-sand); font-size: 10.5px; font-weight: 750; text-transform: uppercase; letter-spacing: .08em; }
+.wh-goal-k .wh-ico { width: 15px; height: 15px; }
+.wh-goal-t { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wh-goal-r { flex: none; color: var(--wh-leaf-2); font-weight: 700; }
+.wh-goal-r:empty { display: none; }
+.wh-goal.fresh { animation: wh-goal-glow 1.6s ease; }
+@keyframes wh-goal-glow { 25% { box-shadow: 0 0 0 3px rgba(151, 196, 108, .6), 0 10px 28px rgba(0, 0, 0, .28); } }
+.wh-coach {
+  position: absolute; left: 0; top: 0; z-index: 20; width: max-content; max-width: min(300px, calc(100vw - 16px));
+  padding: 7px 7px 8px 10px; border-radius: 14px; pointer-events: none;
+  background: linear-gradient(180deg, rgba(50, 68, 40, .97), rgba(31, 45, 27, .97)); border: 1px solid rgba(151, 196, 108, .55);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, .4); transition: transform .22s cubic-bezier(.2, .9, .3, 1);
+  animation: wh-fade .3s ease both;
+}
+.wh-coach.hidden { display: none; }
+.wh-coach-head { display: flex; align-items: center; gap: 7px; }
+.wh-coach-n { flex: none; padding: 1px 6px; border-radius: 8px; background: var(--wh-leaf); color: #16230f; font-size: 10.5px; font-weight: 800; }
+.wh-coach-title { flex: 1; font-size: 13px; font-weight: 700; white-space: nowrap; }
+.wh-coach-text { margin-top: 2px; padding-right: 4px; font-size: 12.5px; line-height: 1.3; color: rgba(243, 238, 226, .88); }
+.wh-coach-arrow {
+  position: absolute; bottom: -7px; width: 12px; height: 12px; margin-left: -6px; transform: rotate(45deg);
+  background: rgb(31, 45, 27); border-right: 1px solid rgba(151, 196, 108, .55); border-bottom: 1px solid rgba(151, 196, 108, .55);
+}
+.wh-coach-skip { position: relative; flex: none; width: 28px; min-width: 28px; height: 28px; min-height: 28px; padding: 0; margin: -3px -2px -3px 0; border-radius: 14px; }
+.wh-coach-skip::after { content: ""; position: absolute; inset: -8px; } /* 44 px touch target */
+.wh-coach-skip .wh-ico { width: 15px; height: 15px; }
 
 /* ------------------------------------------------------------ side sheets (info panels) */
 .wh-sheet {
   position: absolute; pointer-events: auto; display: flex; flex-direction: column; border-radius: 20px; overflow: hidden; z-index: 12;
   right: var(--wh-gr); top: calc(var(--wh-gt) + var(--wh-top-h) + 6px); bottom: calc(var(--wh-gb) + var(--wh-cats-h) + 16px);
-  width: min(340px, 40vw); transition: transform .3s cubic-bezier(.2,.9,.3,1), opacity .22s ease;
+  width: min(340px, 40vw); transition: transform .3s cubic-bezier(.2,.9,.3,1), opacity .22s ease, visibility 0s;
 }
-.wh-sheet.hidden { transform: translateX(calc(100% + 24px)); opacity: 0; pointer-events: none; }
+/* visibility (after the slide-out) also hides the buttons, which set pointer-events: auto themselves */
+.wh-sheet.hidden {
+  transform: translateX(calc(100% + 24px)); opacity: 0; pointer-events: none; visibility: hidden;
+  transition: transform .3s cubic-bezier(.2,.9,.3,1), opacity .22s ease, visibility 0s linear .3s;
+}
 .wh-sheet.left { right: auto; left: var(--wh-gl); width: min(310px, 36vw); }
 .wh-sheet.left.hidden { transform: translateX(calc(-100% - 24px)); }
 @media (orientation: landscape) {
@@ -372,6 +427,12 @@ const CSS = /* css */ `
 .wh-li-t { font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wh-li-s { font-size: 12px; color: var(--wh-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wh-li-r { font-weight: 700; font-size: 13px; }
+.wh-msg .wh-msg-t { font-weight: 600; font-size: 13.5px; line-height: 1.3; }
+.wh-msg.info > .wh-ico { color: var(--wh-sky); }
+.wh-msg.good > .wh-ico { color: var(--wh-leaf-2); }
+.wh-msg.warn > .wh-ico { color: var(--wh-amber); }
+.wh-msg.bad > .wh-ico { color: var(--wh-clay); }
+.wh-li.wh-msg > .wh-msg-go { width: 16px; height: 16px; color: var(--wh-faint); }
 .wh-thought { font-size: 13px; padding: 7px 10px; border-radius: 12px 12px 12px 4px; background: rgba(255,255,255,.06); color: rgba(243,238,226,.86); }
 .wh-thought:first-child { background: rgba(151,196,108,.14); color: var(--wh-text); }
 .wh-note { font-size: 12.5px; color: var(--wh-muted); line-height: 1.45; }
@@ -409,9 +470,11 @@ const CSS = /* css */ `
 /* ------------------------------------------------------------ modal (zoo panel) */
 .wh-modal-back {
   position: absolute; inset: 0; background: rgba(6, 10, 8, 0.42); pointer-events: auto; display: flex; align-items: center; justify-content: center;
-  z-index: 40; transition: opacity .22s ease; padding: var(--wh-gt) var(--wh-gr) var(--wh-gb) var(--wh-gl);
+  z-index: 40; transition: opacity .22s ease, visibility 0s; padding: var(--wh-gt) var(--wh-gr) var(--wh-gb) var(--wh-gl);
 }
-.wh-modal-back.hidden { opacity: 0; pointer-events: none; }
+/* pointer-events alone is not enough: .wh-btn / .wh-slider / .wh-segtext re-enable them, so a closed
+   menu would keep catching taps on the map. visibility (switched after the fade) removes every control. */
+.wh-modal-back.hidden { opacity: 0; pointer-events: none; visibility: hidden; transition: opacity .22s ease, visibility 0s linear .22s; }
 .wh-modal {
   width: min(900px, 100%); height: min(560px, 100%); border-radius: 22px; display: grid; grid-template-columns: 172px 1fr; overflow: hidden;
   transition: transform .28s cubic-bezier(.2,.9,.3,1.1);
@@ -525,6 +588,7 @@ const CSS = /* css */ `
 /* ------------------------------------------------------------ full-screen loading / menu */
 .wh-screen { position: fixed; inset: 0; z-index: 100; pointer-events: auto; overflow: hidden; display: flex; align-items: center; justify-content: center; touch-action: none; transition: opacity .6s ease; }
 .wh-screen.fade { opacity: 0; pointer-events: none; }
+.wh-screen.fade * { pointer-events: none; } /* buttons re-enable pointer events; a fading screen must not take taps */
 .wh-load { background: radial-gradient(120% 90% at 50% 20%, #1f3324 0%, #0f1b13 55%, #08100b 100%); }
 .wh-load-bg { position: absolute; inset: -10%; opacity: .55; }
 .wh-load-col { position: relative; display: flex; flex-direction: column; align-items: center; gap: 0; width: min(460px, 84vw); padding: var(--wh-gt) 0 var(--wh-gb); }
@@ -594,7 +658,7 @@ const CSS = /* css */ `
   .wh-meter-head { margin-bottom: 3px; }
   .wh-kv-item { padding: 5px 9px; }
   .wh-drawer-head { height: 36px; padding-top: 4px; }
-  .wh-row { padding: 4px 10px 8px; }
+  .wh-row { padding: 4px 10px 8px; scroll-padding-inline: 10px; }
   .wh-modal-head { padding: 6px 6px 2px 16px; }
   .wh-modal-head h2 { font-size: 17px; }
   .wh-modal-body { padding: 2px 16px 12px; }

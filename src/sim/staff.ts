@@ -289,7 +289,9 @@ export class StaffSystem {
     for (const l of sim.litter.values()) {
       if (l.kind !== 'trash') continue;
       const t = Math.floor(l.z / TILE) * MAP_W + Math.floor(l.x / TILE);
-      const d = this.scratch[t];
+      if (this.scratch[t] === FAR) continue;
+      // a pile is worth a few extra steps: guests notice heaps far more than single wrappers
+      const d = this.scratch[t] - 3 * Math.min(4, sim.litterGrid[t] - 1);
       if (d >= bd) continue;
       if (this.assigned('litter', t, s)) continue;
       bd = d;
@@ -334,6 +336,7 @@ export class StaffSystem {
     for (const a of sim.animalSys.loose) {
       if (!sim.animals.has(a.id)) continue;
       if (this.assigned('recapture', a.id, s)) continue;
+      if (!sim.animalSys.homeFor(a)) continue; // nowhere to take it yet (home fence open / no habitat)
       const d = (a.x - s.x) ** 2 + (a.z - s.z) ** 2;
       if (d < bestD) {
         bestD = d;
@@ -485,8 +488,10 @@ export class StaffSystem {
         const a = sim.animals.get(s.jobRef);
         if (a && a.escaped) {
           const sp = SPECIES_BY_ID[a.speciesId];
-          if (sim.animalSys.returnHome(a))
-            sim.notify(null, `${s.name} safely returned ${a.name} the ${singularName(sp.id)} to its habitat.`, 'good', { x: a.x, z: a.z });
+          if (sim.animalSys.returnHome(a)) {
+            const where = w.habitats.get(a.home)?.name ?? 'its habitat';
+            sim.notify(null, `${s.name} safely returned ${a.name} the ${singularName(sp.id)} to ${where}.`, 'good', { x: a.x, z: a.z });
+          }
         }
         break;
       }

@@ -520,6 +520,22 @@ export class MockSim implements ISimulation {
     return this.res(true, -refund, undefined, false, at);
   }
 
+  moveObject(objectId: number, tx: number, tz: number, rot: number, dryRun = false): CommandResult {
+    const w = this.world;
+    const o = w.objects.get(objectId);
+    const at = { x: (tx + 0.5) * TILE, z: (tz + 0.5) * TILE };
+    if (!o || o.defId === 'entrance_gate') return this.res(false, 0, 'Cannot move that', dryRun, at);
+    const own = w.footprint(o).map((t) => w.idx(t.x, t.z));
+    for (const i of own) w.objectGrid[i] = 0;
+    const why = w.canPlaceObject(OBJECTS_BY_ID[o.defId], tx, tz, rot);
+    for (const i of own) w.objectGrid[i] = o.id;
+    if (why) return this.res(false, 0, why, dryRun, at);
+    if (dryRun) return this.res(true, 0, undefined, true, at);
+    w.removeObject(objectId);
+    w.addObject(o.defId, tx, tz, rot, o.seed);
+    return this.res(true, 0, undefined, false, at);
+  }
+
   renameHabitat(habitatId: number, name: string): CommandResult {
     const n = name.replace(/\s+/g, ' ').trim().slice(0, 32);
     if (!this.world.habitats.has(habitatId)) return this.res(false, 0, 'No such habitat', false);
@@ -585,12 +601,29 @@ export class MockSim implements ISimulation {
     return this.res(true, sp.cost, warn, false, at);
   }
 
-  sellAnimal(animalId: number): CommandResult {
+  moveAnimal(animalId: number, wx: number, wz: number, dryRun = false): CommandResult {
+    const w = this.world;
     const a = this.animals.get(animalId);
-    if (!a) return this.res(false, 0, 'No such animal', false);
+    const t = w.tileOfWorld(wx, wz);
+    const at = { x: wx, z: wz };
+    const hab = w.habitatAt(t.x, t.z);
+    if (!a) return this.res(false, 0, 'No such animal', dryRun, at);
+    if (!hab) return this.res(false, 0, 'Animals must be placed inside a fenced habitat', dryRun, at);
+    if (dryRun) return this.res(true, 0, undefined, true, at);
+    a.x = wx;
+    a.z = wz;
+    a.y = w.heightAt(wx, wz);
+    a.habitatId = hab.id;
+    return this.res(true, 0, undefined, false, at);
+  }
+
+  sellAnimal(animalId: number, dryRun = false): CommandResult {
+    const a = this.animals.get(animalId);
+    if (!a) return this.res(false, 0, 'No such animal', dryRun);
+    const v = Math.round(SPECIES_BY_ID[a.speciesId].cost * 0.5);
+    if (dryRun) return this.res(true, -v, undefined, true);
     this.animals.delete(animalId);
     this.events.emit('animalRemoved', { id: animalId });
-    const v = Math.round(SPECIES_BY_ID[a.speciesId].cost * 0.5);
     this.events.emit('notify', { text: `${a.name} was rehomed for ${money(v)}.`, kind: 'info', focus: { x: a.x, z: a.z } });
     return this.res(true, -v, undefined, false, { x: a.x, z: a.z });
   }

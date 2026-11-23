@@ -95,13 +95,14 @@ function genIce(): Img {
       const v = y / S;
       const i = y * S + x;
       const cloud = pfbm(u, v, 3, 3, 4, 31);
-      pworley(u, v, 6, 6, 32, wv, 1);
-      const crack = 1 - sstep(0.0, 0.03, wv[1] - wv[0]);
+      // a few long fracture lines (not a cell network): worley edges, mostly masked out
+      pworley(u, v, 3, 3, 32, wv, 1);
+      const crack = (1 - sstep(0.0, 0.04, wv[1] - wv[0])) * sstep(0.15, 0.45, pfbm(u, v, 4, 4, 2, 34));
       pworley(u, v, 40, 40, 33, wv, 1);
       const bubble = (1 - sstep(0.05, 0.12, wv[0])) * sstep(0.6, 0.9, wv[2]);
-      const l = 0.82 + cloud * 0.12 + crack * 0.25 + bubble * 0.2;
+      const l = 0.84 + cloud * 0.12 + crack * 0.08 + bubble * 0.08;
       img.set(i, 0.8 * l, 0.9 * l, 0.97 * l, 1);
-      img.h[i] = sat(0.5 + cloud * 0.15 - crack * 0.4 + bubble * 0.2);
+      img.h[i] = sat(0.5 + cloud * 0.2 - crack * 0.12 + bubble * 0.05);
     }
   return img;
 }
@@ -135,12 +136,6 @@ export function graniteMaterial(): RockMaterial {
 }
 
 /** Generate the rock detail textures / materials now (prewarm). */
-export function prewarmRockMaterials(): void {
-  graniteMat();
-  sandstoneMat();
-  iceMat();
-}
-
 // ---------------------------------------------------------------------------
 // Rock shape generator
 
@@ -248,6 +243,8 @@ interface RockPaint {
   bands?: number;
   /** Sun-bleached, paler upward faces (0..1). */
   bleach?: number;
+  /** Ice: cavities and undersides deepen to saturated blue instead of grey. */
+  ice?: boolean;
   seed: number;
 }
 
@@ -287,6 +284,15 @@ function appendRock(md: MeshData, shape: RockShape, m: THREE.Matrix4, paint: Roc
     const cav = shape.disp.length === vcount ? shape.disp[i] : 0;
     let ao = 0.78 + 0.22 * sstep(-0.5, 0.4, cav);
     ao *= 0.62 + 0.38 * sstep(-0.6, 0.5, n.y);
+    if (paint.ice) {
+      // light scattered through thick ice comes out blue: shade crevices by
+      // absorbing red / green rather than darkening
+      const deep = 1 - ao;
+      r *= 1 - deep * 1.5;
+      gg *= 1 - deep * 0.7;
+      b *= 1 - deep * 0.15;
+      ao = 1 - deep * 0.35;
+    }
     // ground contact: damp, darker, earthy
     const gh = p.y - groundY;
     const wet = 1 - sstep(0.0, 0.28, gh);
@@ -479,9 +485,10 @@ function outcrop(variant: number, lod: boolean): THREE.Group {
 }
 
 /**
- * Ice / snow rockery for polar habitats: rounded, wind-polished blocks of
- * blue-white ice (smooth normals, a few fresh fracture faces) under heavy
- * snow caps, sitting in a snow drift.
+ * Ice rockery for polar habitats: angular blocks of blue-white ice (many
+ * fresh fracture faces, blue crevices) with snow on their upward faces. No
+ * snow drift around the base: it would show as a white sheet off snow
+ * terrain, and polar terrain already supplies the snow.
  */
 export function buildIceRocks(variant: number): THREE.Group {
   const rng = new Rng(9400 + variant * 7919);
@@ -493,12 +500,9 @@ export function buildIceRocks(variant: number): THREE.Group {
   ];
   if (variant % 2) blocks.push({ r: [0.38, 0.5, 0.36], x: -0.35, z: -0.6, det: 2 });
   blocks.forEach((b, k) => {
-    const shape = rockShape(rng, { radii: [b.r[0] * 1.25, b.r[1] * 1.3, b.r[2] * 1.25], detail: rockDetail(b.det), cuts: 9, cutDepth: [0.48, 0.74], noise: 0.05, freq: 2.0, flatBase: 0.5, seed: 400 + k + variant * 11 });
-    appendRock(md, shape, mtx(b.x * rng.range(0.9, 1.1), -minY(shape) - b.r[1] * 0.15, b.z * rng.range(0.9, 1.1), rng.range(0, 6.28)), { base: [0.54, 0.69, 0.8], vary: 0.12, lichen: 0, moss: 0, snow: 1, seed: 70 + k });
+    const shape = rockShape(rng, { radii: [b.r[0] * 1.25, b.r[1] * 1.3, b.r[2] * 1.25], detail: rockDetail(b.det), cuts: 14, cutDepth: [0.42, 0.78], noise: 0.03, freq: 2.0, flatBase: 0.5, seed: 400 + k + variant * 11 });
+    appendRock(md, shape, mtx(b.x * rng.range(0.9, 1.1), -minY(shape) - b.r[1] * 0.08, b.z * rng.range(0.9, 1.1), rng.range(0, 6.28)), { base: [0.5, 0.68, 0.82], vary: 0.1, lichen: 0, moss: 0, snow: 0.85, ice: true, seed: 70 + k });
   });
-  // snow drift around the base
-  const drift = rockShape(rng, { radii: [1.05, 0.4, 0.85], detail: 2, cuts: 0, cutDepth: [1, 1], noise: 0.35, freq: 2.2, flatBase: 0.1, seed: 480 + variant });
-  appendRock(md, drift, mtx(0.05, -0.22, 0.1, rng.range(0, 6.28)), { base: [0.9, 0.92, 0.95], vary: 0.03, lichen: 0, moss: 0, snow: 1, seed: 90 });
   return finishRocks(md, iceMat(), 'ice');
 }
 

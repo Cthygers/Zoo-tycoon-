@@ -1,17 +1,18 @@
-// Zoo menu: finances (ledger, daily chart, admission price), goals, statistics
-// and settings (graphics quality, sound, save, new game). Refreshes at ~2 Hz
-// while open.
+// Zoo menu: finances (ledger, daily chart, admission price), goals, statistics,
+// recent messages and settings (graphics quality, sound, save, new game).
+// Refreshes at ~2 Hz while open.
 
 import { QUALITY_KEY, SOUND_KEY } from '../core/constants';
 import type { IAudio, IRenderContext, ISimulation, QualityLevel } from '../core/contracts';
 import type { LedgerEntry } from '../core/types';
-import { button, el, escapeHtml, fmtMoney, fmtPct, setText, storageSet, swallowPointer, toggleClass } from './dom';
+import { button, el, escapeHtml, fmtClock, fmtMoney, fmtPct, setText, storageSet, swallowPointer, toggleClass } from './dom';
 import { icon, type IconName } from './icons';
+import type { MessageLog } from './notify';
 import { logoSvg } from './screens';
 import { showDialog } from './panels';
 import { cue } from './sound';
 
-export type ZooTab = 'finance' | 'goals' | 'stats' | 'settings';
+export type ZooTab = 'finance' | 'goals' | 'stats' | 'messages' | 'settings';
 
 export interface ZooPanelHost {
   sim: ISimulation;
@@ -22,6 +23,10 @@ export interface ZooPanelHost {
   newGame(): void;
   toast(text: string, kind: 'info' | 'good' | 'warn' | 'bad'): void;
   qualityChanged(q: QualityLevel): void;
+  /** Recent notifications (toasts), newest first. */
+  log: MessageLog;
+  /** Fly the camera to a ground point (a message's location). */
+  focus(x: number, z: number): void;
 }
 
 const INCOME = '#70a24a';
@@ -31,6 +36,7 @@ const TABS: { id: ZooTab; name: string; icon: IconName }[] = [
   { id: 'finance', name: 'Finances', icon: 'coin' },
   { id: 'goals', name: 'Goals', icon: 'trophy' },
   { id: 'stats', name: 'Zoo stats', icon: 'chart' },
+  { id: 'messages', name: 'Messages', icon: 'bell' },
   { id: 'settings', name: 'Settings', icon: 'sliders' },
 ];
 
@@ -59,6 +65,8 @@ export class ZooPanel {
       el('div', 'wh-modal-main', [el('div', 'wh-modal-head', [this.heading, button('wh-btn-ghost wh-btn-icon', 'close', null, () => this.close(), 'Close')]), this.body]),
     ]);
     this.root = el('div', 'wh-modal-back hidden', [modal]);
+    // closed: no taps, focus or key presses reach the menu's controls (see .wh-modal-back.hidden)
+    this.root.inert = true;
     this.root.addEventListener('click', (ev) => {
       if (ev.target === this.root) this.close();
     });
@@ -73,6 +81,7 @@ export class ZooPanel {
     if (!this.isOpen) cue('open');
     this.root.classList.remove('hidden');
     this.root.removeAttribute('aria-hidden');
+    this.root.inert = false;
     this.showTab(tab);
   }
 
@@ -81,6 +90,7 @@ export class ZooPanel {
     cue('close');
     this.root.classList.add('hidden');
     this.root.setAttribute('aria-hidden', 'true');
+    this.root.inert = true;
     this.refreshFn = null;
     // a focused control inside the hidden modal would keep swallowing key presses
     const a = document.activeElement as HTMLElement | null;
@@ -106,6 +116,7 @@ export class ZooPanel {
     if (tab === 'finance') this.refreshFn = this.financeTab();
     else if (tab === 'goals') this.refreshFn = this.goalsTab();
     else if (tab === 'stats') this.refreshFn = this.statsTab();
+    else if (tab === 'messages') this.refreshFn = this.messagesTab();
     else this.settingsTab();
     this.refreshFn?.();
   }
@@ -182,10 +193,13 @@ export class ZooPanel {
         setText(yday.v, '—');
         setText(yday.s, 'First day');
       }
+      // goal rewards, animal sales and removal refunds are booked as income without a category of their own
+      const other = t.income - t.admissions - t.shopIncome - t.donations;
       const rows: [string, number][] = [
         ['Tickets', t.admissions],
         ['Shops', t.shopIncome],
         ['Donations', t.donations],
+        ['Rewards & refunds', Math.abs(other) < 0.5 ? 0 : other],
         ['Construction', -t.construction],
         ['Animals', -t.animalPurchases],
         ['Wages', -t.salaries],
@@ -266,6 +280,38 @@ export class ZooPanel {
         statHtml('Admission', fmtMoney(sim.admissionPrice), 'ticket'),
         statHtml('Status', sim.isOpen() ? 'Open' : 'Closed', 'clock'),
       ].join('');
+    };
+  }
+
+  // ------------------------------------------------------------ messages
+  private messagesTab(): () => void {
+    const log = this.host.log;
+    const list = el('div', 'wh-list');
+    this.body.append(list);
+    let shown = -1;
+    return () => {
+      if (log.version === shown) return;
+      shown = log.version;
+      list.textContent = '';
+      if (!log.entries.length) {
+        list.append(el('div', { class: 'wh-note', text: 'No messages yet. News about your animals, guests and staff will show up here.' }));
+        return;
+      }
+      for (const m of log.entries) {
+        const when = `Day ${m.day} · ${fmtClock(m.minute)}${m.count > 1 ? ` · ×${m.count}` : ''}`;
+        const li = el('div', { class: `wh-li wh-msg ${m.kind}${m.focus ? ' tap' : ''}` });
+        li.innerHTML = `${icon(m.kind)}<div class="wh-li-main"><div class="wh-msg-t">${escapeHtml(m.text)}</div><div class="wh-li-s">${when}</div></div>${
+          m.focus ? icon('target', 'wh-msg-go') : ''
+        }`;
+        const at = m.focus;
+        if (at)
+          li.addEventListener('click', () => {
+            cue('tap');
+            this.close();
+            this.host.focus(at.x, at.z);
+          });
+        list.append(li);
+      }
     };
   }
 

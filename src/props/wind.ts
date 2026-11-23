@@ -171,6 +171,8 @@ export function cloneWithHooks<T extends THREE.Material>(material: T): T {
   const f = preFadeHooks(material);
   c.onBeforeCompile = w ? w.prev : f ? f.prev : material.onBeforeCompile;
   c.customProgramCacheKey = w ? w.prevKey : f ? f.prevKey : material.customProgramCacheKey;
+  // the layer turns alpha-to-coverage on for the fade only
+  if (f) c.alphaToCoverage = false;
   if (hasSway(c)) applyWind(c);
   return c;
 }

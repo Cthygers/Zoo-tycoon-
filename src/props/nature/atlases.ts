@@ -742,23 +742,69 @@ const SHEET_OF: Record<AtlasKind, SheetKind> = {
 
 type Mip = { data: Uint8Array; width: number; height: number };
 
-// Per-atlas mip chains awaiting composition into their sheet (prewarm builds
-// one atlas per step; each keeps its own coverage-preserving alpha scale).
+/** Paint one atlas: its coverage-preserving mip chain (pure; also run in a worker). */
+export function paintAtlas(kind: AtlasKind): Mip[] {
+  const t = foliageTexture(GEN[kind].gen(), 0.5, false);
+  const m = t.mipmaps as Mip[];
+  t.dispose();
+  return m;
+}
+
+// Per-atlas mip chains awaiting composition into their sheet (painted ahead
+// by paintAtlasesOffThread / the prewarm steps, or on first use).
 const pendingMips = new Map<AtlasKind, Mip[]>();
 
 function atlasMips(kind: AtlasKind): Mip[] {
   let m = pendingMips.get(kind);
   if (!m) {
-    const t = foliageTexture(GEN[kind].gen(), 0.5, false);
-    m = t.mipmaps as Mip[];
-    t.dispose();
+    m = paintAtlas(kind);
     pendingMips.set(kind, m);
   }
   return m;
 }
 
+/**
+ * Paint the atlases of every sheet not built yet in a web worker, so the
+ * loading screen's main thread only composes the sheets (painting is ~0.2–0.4 s
+ * per atlas on a desktop, several times that on a phone). Resolves once all
+ * are back; without worker support (or on a worker error) it resolves early
+ * and the rest are painted on the main thread when first needed.
+ */
+export function paintAtlasesOffThread(onProgress?: (fraction: number) => void): Promise<void> {
+  const kinds: AtlasKind[] = [];
+  for (const sk of Object.keys(SHEETS) as SheetKind[]) {
+    if (hasCachedTexture(sheetKey(sk))) continue;
+    for (const k of Object.keys(SHEETS[sk].slots) as AtlasKind[]) if (!pendingMips.has(k)) kinds.push(k);
+  }
+  if (kinds.length === 0 || typeof Worker === 'undefined') return Promise.resolve();
+  let worker: Worker;
+  try {
+    worker = new Worker(new URL('./atlasworker.ts', import.meta.url), { type: 'module' });
+  } catch {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    let done = 0;
+    const finish = () => {
+      worker.terminate();
+      resolve();
+    };
+    worker.onmessage = (e: MessageEvent<{ kind: AtlasKind; mips: Mip[] }>) => {
+      if (!pendingMips.has(e.data.kind)) pendingMips.set(e.data.kind, e.data.mips);
+      onProgress?.(++done / kinds.length);
+      if (done === kinds.length) finish();
+    };
+    worker.onerror = (e) => {
+      e.preventDefault();
+      console.warn('[props] foliage worker failed; painting on the main thread', e.message);
+      finish();
+    };
+    for (const k of kinds) worker.postMessage(k);
+  });
+}
+
 /** Compose a sheet's mip chain from its atlases' chains (levels they lack are box-filtered). */
-function composeSheet(sk: SheetKind): THREE.DataTexture {
+function composeSheet(sk: SheetKind): Mip[] {
   const sh = SHEETS[sk];
   const levels: Mip[] = [];
   for (let w = sh.w, h = sh.h; ; w = Math.max(1, w >> 1), h = Math.max(1, h >> 1)) {
@@ -801,7 +847,7 @@ function composeSheet(sk: SheetKind): THREE.DataTexture {
           b.data[(y * b.width + x) * 4 + c] = sum >> 2;
         }
   }
-  return mipTexture(levels);
+  return levels;
 }
 
 function mipTexture(mips: Mip[]): THREE.DataTexture {
@@ -819,25 +865,49 @@ function mipTexture(mips: Mip[]): THREE.DataTexture {
   return t;
 }
 
-function sheetTexture(sk: SheetKind): THREE.DataTexture {
-  const full = cachedTexture(`sheet-${sk}`, () => composeSheet(sk));
-  if (!texLow() || full.mipmaps.length < 2) return full;
-  // low tier: drop the top mip (half resolution, same layout)
-  return cachedTexture(`sheet-${sk}@lo`, () => mipTexture(full.mipmaps.slice(1) as Mip[]));
+/**
+ * A mip-chain texture whose pixels stay in JS memory only until three has
+ * uploaded them (a sheet's chain is ≈ 11 MB). Should three need them again
+ * (lost context restored, …) they are generated anew by `make`.
+ */
+function uploadOnceTexture(make: () => Mip[]): THREE.DataTexture {
+  let chain: Mip[] | null = make();
+  const level = (L: number): Uint8Array => (chain ??= make())[L].data;
+  const mips = chain.map((m, L) => ({ width: m.width, height: m.height, get data() { return level(L); } }));
+  const t = mipTexture(mips);
+  t.image = { width: mips[0].width, height: mips[0].height, get data() { return level(0); } };
+  t.onUpdate = () => {
+    chain = null;
+  };
+  return t;
 }
 
-/** Prewarm steps: paint each atlas into its sheet, then build each sheet texture. */
+function sheetKey(sk: SheetKind): string {
+  return texLow() ? `sheet-${sk}@lo` : `sheet-${sk}`;
+}
+
+function sheetTexture(sk: SheetKind): THREE.DataTexture {
+  const low = texLow();
+  return cachedTexture(sheetKey(sk), () =>
+    uploadOnceTexture(() => {
+      const mips = composeSheet(sk);
+      // low tier: half resolution, same layout (the chain without its top level)
+      return low ? mips.slice(1) : mips;
+    }),
+  );
+}
+
+/**
+ * Loading-screen steps: paint each atlas of a sheet, then build the sheet
+ * texture (run them at the tier that will use the sheets, see withQuality).
+ */
 export function atlasSteps(): (() => void)[] {
   const steps: (() => void)[] = [];
   for (const sk of Object.keys(SHEETS) as SheetKind[]) {
-    for (const k of Object.keys(SHEETS[sk].slots) as AtlasKind[]) steps.push(() => void (texCached(sk) || atlasMips(k)));
+    for (const k of Object.keys(SHEETS[sk].slots) as AtlasKind[]) steps.push(() => void (hasCachedTexture(sheetKey(sk)) || atlasMips(k)));
     steps.push(() => void sheetTexture(sk));
   }
   return steps;
-}
-
-function texCached(sk: SheetKind): boolean {
-  return hasCachedTexture(`sheet-${sk}`);
 }
 
 /** Atlas of a species: its sheet texture and its rect in the sheet. */

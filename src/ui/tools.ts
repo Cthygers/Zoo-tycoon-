@@ -3,7 +3,7 @@
 // gesture ends, a pending action that the player must confirm (✓ / ✗).
 
 import * as THREE from 'three';
-import { MAP_H, MAP_W, TILE, WATER_LEVEL } from '../core/constants';
+import { ENTRANCE_TILE, MAP_H, MAP_W, TILE, WATER_LEVEL } from '../core/constants';
 import type { ICreatureFactory, IPropsLayer, IRenderContext, ISimulation, SpeciesSuitability } from '../core/contracts';
 import type { TileRect } from '../core/events';
 import { PathType, Terrain, type CommandResult, type StaffRole, type Tool } from '../core/types';
@@ -25,11 +25,19 @@ export interface PendingAction {
   ok: boolean;
   note?: string;
   noteKind?: 'bad' | 'warn';
+  /** Allowed, but probably not what the player wants (the confirm button says so). */
+  risky?: boolean;
   commit(): CommandResult;
 }
 
 /** Bulldoze tool: clear everything in a rectangle, or only fence runs. */
 export type BulldozeMode = 'area' | 'fence';
+
+/** An existing animal or object being moved with the matching placement tool. */
+export interface MoveTarget {
+  kind: 'animal' | 'object';
+  id: number;
+}
 
 export interface AnimalPreviewInfo {
   speciesId: string;
@@ -54,6 +62,11 @@ export interface ToolHost {
 }
 
 type TP = { x: number; z: number };
+
+/** The paved plaza at the gate, which bulldozing leaves in place (mirrors the sim's protected entrance tiles). */
+function isEntrancePlaza(x: number, z: number): boolean {
+  return Math.abs(x - ENTRANCE_TILE.x) <= 2 && z >= ENTRANCE_TILE.z - 2 && z <= ENTRANCE_TILE.z;
+}
 
 const removeStates: EdgeState[] = [];
 /** A shared array of `n` 'remove' edge states (no per-preview allocation). */
@@ -80,6 +93,8 @@ export class ToolManager implements ToolInput {
   fenceMode: 'rect' | 'line' = 'rect';
   pathStraight = false;
   bulldozeMode: BulldozeMode = 'area';
+  /** Set while the object / animal tool moves something that exists instead of buying a new one. */
+  moving: MoveTarget | null = null;
 
   readonly group = new THREE.Group();
   private fills: DrapedMesh;
@@ -102,6 +117,8 @@ export class ToolManager implements ToolInput {
   // object tool
   private ghost: THREE.Object3D | null = null;
   private ghostDef = '';
+  /** Model seed of the ghost (a moved object's ghost looks exactly like the object). */
+  private ghostSeed = 1;
   private ghostTile: TP | null = null;
   private ghostLocked = false;
   private ghostOk = true;
@@ -152,9 +169,16 @@ export class ToolManager implements ToolInput {
 
   // ------------------------------------------------------------ tool selection
   setTool(tool: Tool): void {
+    this.switchTool(tool, null);
+  }
+
+  private switchTool(tool: Tool, moving: MoveTarget | null): void {
     const sameKind = tool.kind === this.tool.kind;
     const prev = this.tool;
     this.tool = tool;
+    // a tool change ends a move in progress (and the highlight on the object being moved)
+    if (this.moving?.kind === 'object') this.host.props.setHighlight(null);
+    this.moving = moving;
     const keepSel =
       sameKind &&
       ((tool.kind === 'fence') ||
@@ -174,6 +198,28 @@ export class ToolManager implements ToolInput {
       if (p) this.showGridAt(p.x, p.z);
     }
     this.refresh();
+  }
+
+  /**
+   * Pick up an existing animal or object: the animal / object tool then puts it down
+   * somewhere else (for free) instead of buying a new one. Returns the tool, or null if
+   * the thing is gone.
+   */
+  startMove(target: MoveTarget): Tool | null {
+    const sim = this.host.sim;
+    const o = target.kind === 'object' ? sim.world.objects.get(target.id) : undefined;
+    const a = target.kind === 'animal' ? sim.animals.get(target.id) : undefined;
+    const tool: Tool | null = o ? { kind: 'object', defId: o.defId, rot: o.rot } : a ? { kind: 'animal', speciesId: a.speciesId } : null;
+    if (!tool) return null;
+    this.switchTool(tool, target);
+    if (o) {
+      // the ghost starts on the object itself, ready to be dragged; the original stays highlighted
+      this.ghostTile = { x: o.tx, z: o.tz };
+      this.ghostLocked = true;
+      this.host.props.setHighlight(o.id);
+    }
+    this.refresh();
+    return tool;
   }
 
   private resetState(): void {
@@ -491,7 +537,9 @@ export class ToolManager implements ToolInput {
     }
   }
 
+  /** Confirm-bar note: why it fails, else the sim's warning (outranks a plain remark), else its remark. */
   private note(r: CommandResult): { note?: string; noteKind?: 'bad' | 'warn' } {
+    if (r.ok && r.warning) return { note: r.warning, noteKind: 'warn' };
     if (!r.reason) return {};
     return { note: r.reason, noteKind: r.ok ? 'warn' : 'bad' };
   }
@@ -535,6 +583,9 @@ export class ToolManager implements ToolInput {
     }
     const states: EdgeState[] = edges.map((e) => (sim.world.getFence(e) === fenceId ? 'same' : this.edgeBlocked(e) ? 'blocked' : 'new'));
     this.fences.set(fenceId, edges, states);
+    // the sim warns when the fence won't make a habitat (a path inside, a gap where it crosses a path…)
+    const r = sim.placeFences(edges, fenceId, true);
+    const warning = r.ok ? r.warning : undefined;
     // crisp draped line under the ghosts so the run reads clearly over any scenery
     for (let i = 0; i < edges.length; i++) {
       const e = edges[i];
@@ -542,9 +593,10 @@ export class ToolManager implements ToolInput {
       if (e.dir === 'h') this.fills.line(e.x * TILE, e.z * TILE, (e.x + 1) * TILE, e.z * TILE, 0.22, c);
       else this.fills.line(e.x * TILE, e.z * TILE, e.x * TILE, (e.z + 1) * TILE, 0.22, c);
     }
-    // faint fill of the area that will be enclosed (rect mode)
+    // faint fill of the area that will be enclosed (rect mode) — only if it really becomes a habitat
     const s = this.sel!;
-    if (this.fenceMode === 'rect' && s.a.x !== s.b.x && s.a.z !== s.b.z) {
+    const isRect = this.fenceMode === 'rect' && s.a.x !== s.b.x && s.a.z !== s.b.z;
+    if (isRect && !warning) {
       const x0 = Math.min(s.a.x, s.b.x) * TILE,
         x1 = Math.max(s.a.x, s.b.x) * TILE,
         z0 = Math.min(s.a.z, s.b.z) * TILE,
@@ -554,17 +606,17 @@ export class ToolManager implements ToolInput {
     }
     this.fills.end();
     const def = FENCES_BY_ID[fenceId];
-    const r = sim.placeFences(edges, fenceId, true);
     const n = states.filter((x) => x === 'new').length;
     const metres = n * TILE;
-    const area = this.fenceMode === 'rect' && s.a.x !== s.b.x && s.a.z !== s.b.z ? Math.abs(s.b.x - s.a.x) * Math.abs(s.b.z - s.a.z) : 0;
-    this.setLabel({ x: s.b.x * TILE, z: s.b.z * TILE }, fmtMoney(r.cost), area ? `${metres} m · ${area} tiles` : `${metres} m`, r.ok);
+    const area = isRect ? Math.abs(s.b.x - s.a.x) * Math.abs(s.b.z - s.a.z) : 0;
+    this.setLabel({ x: s.b.x * TILE, z: s.b.z * TILE }, fmtMoney(r.cost), area ? `${metres} m · ${area} tiles` : `${metres} m`, r.ok && !warning);
     this.setPending({
       title: `${def?.name ?? 'Fence'} · ${metres} m`,
-      verb: 'Build',
+      // building a fence that won't enclose anything has to be a deliberate choice
+      verb: warning ? 'Build anyway' : 'Build',
       cost: r.cost,
       ok: r.ok,
-      ...this.note(r),
+      ...(warning ? { note: warning, noteKind: 'bad' as const, risky: true } : this.note(r)),
       commit: () => sim.placeFences(edges, fenceId),
     });
   }
@@ -698,15 +750,17 @@ export class ToolManager implements ToolInput {
     let res: CommandResult | null = null;
     const edges = this.removeEdges;
     edges.length = 0;
+    const seen = new Set<number>();
+    let pathTiles = 0;
     if (r) {
       const sub = Math.min(48, Math.max(2, (Math.max(r.x1 - r.x0, r.z1 - r.z0) + 1) * 2));
       this.fills.rect(r.x0 * TILE, r.z0 * TILE, (r.x1 + 1) * TILE, (r.z1 + 1) * TILE, COL.remove, sub);
       res = sim.bulldoze(r, true);
       this.fills.outline(r.x0, r.z0, r.x1, r.z1, 0.14, COL.removeLine);
-      // mark objects that will be removed
-      const seen = new Set<number>();
+      // mark objects that will be removed, and count them and the path tiles for the confirm bar
       for (let z = r.z0; z <= r.z1; z++)
         for (let x = r.x0; x <= r.x1; x++) {
+          if (w.isPath(x, z) && !isEntrancePlaza(x, z)) pathTiles++;
           const o = w.objectAt(x, z);
           if (!o || seen.has(o.id) || o.defId === 'entrance_gate') continue;
           seen.add(o.id);
@@ -729,9 +783,14 @@ export class ToolManager implements ToolInput {
     const refund = -res.cost;
     this.setLabel({ x: (r.x1 + 1) * TILE, z: (r.z1 + 1) * TILE }, res.ok ? `+${fmtMoney(refund)}` : 'Nothing here', `${r.x1 - r.x0 + 1}×${r.z1 - r.z0 + 1}`, res.ok);
     const rect = { ...r };
-    const nf = edges.length;
+    // say what goes: "Picnic Table · 6 path tiles · 8 m fence" (the size is on the floating label)
+    const parts: string[] = [];
+    if (seen.size === 1) parts.push(OBJECTS_BY_ID[w.objects.get([...seen][0])!.defId]?.name ?? '1 object');
+    else if (seen.size) parts.push(`${seen.size} objects`);
+    if (pathTiles) parts.push(`${pathTiles} path tile${pathTiles > 1 ? 's' : ''}`);
+    if (edges.length) parts.push(`${edges.length * TILE} m fence`);
     this.setPending({
-      title: `Clear ${r.x1 - r.x0 + 1}×${r.z1 - r.z0 + 1} area${nf ? ` · ${nf * TILE} m fence` : ''}`,
+      title: parts.length ? `Clear ${parts.join(' · ')}` : `Clear ${r.x1 - r.x0 + 1}×${r.z1 - r.z0 + 1} area`,
       verb: 'Remove',
       cost: res.cost,
       ok: res.ok,
@@ -846,7 +905,7 @@ export class ToolManager implements ToolInput {
       verb: 'Remove',
       cost: res.cost,
       ok: res.ok,
-      ...(res.ok ? {} : { note: 'Tap a fence, or drag along one', noteKind: 'bad' as const }),
+      ...(res.ok ? this.note(res) : { note: 'Tap a fence, or drag along one', noteKind: 'bad' as const }),
       commit: () => sim.removeFences(todo),
     });
   }
@@ -886,6 +945,7 @@ export class ToolManager implements ToolInput {
     }
     this.ghost = null;
     this.ghostDef = '';
+    this.ghostSeed = 1;
     this.ghostTile = null;
     this.ghostLocked = false;
   }
@@ -894,12 +954,15 @@ export class ToolManager implements ToolInput {
     const sim = this.host.sim;
     const def = OBJECTS_BY_ID[defId];
     if (!def) return;
-    if (!this.ghost || this.ghostDef !== defId) {
+    const mv = this.moving?.kind === 'object' ? sim.world.objects.get(this.moving.id) : undefined;
+    const seed = mv ? mv.seed : 1;
+    if (!this.ghost || this.ghostDef !== defId || this.ghostSeed !== seed) {
       this.dropGhost();
       try {
-        this.ghost = this.host.props.createObjectModel(defId, 1);
+        this.ghost = this.host.props.createObjectModel(defId, seed);
         ghostify(this.ghost);
         this.ghostDef = defId;
+        this.ghostSeed = seed;
         this.group.add(this.ghost);
       } catch (err) {
         console.warn('[ui] ghost model failed', err);
@@ -917,19 +980,22 @@ export class ToolManager implements ToolInput {
     const [w, d] = rotatedSize(def, rot);
     const cx = (t.x + w / 2) * TILE,
       cz = (t.z + d / 2) * TILE;
-    const r = sim.placeObject(defId, t.x, t.z, rot, true);
+    const r = mv ? sim.moveObject(mv.id, t.x, t.z, rot, true) : sim.placeObject(defId, t.x, t.z, rot, true);
+    // a moved object's ghost still on its old spot: nothing to do yet, but nothing wrong either
+    const home = !!mv && mv.tx === t.x && mv.tz === t.z && mv.rot === rot;
+    const looksOk = r.ok || home;
     if (this.ghost) {
       this.ghost.visible = true;
       this.ghost.position.set(cx, sim.world.heightAt(cx, cz), cz);
       this.ghost.rotation.set(0, (rot * Math.PI) / 2, 0);
-      if (r.ok !== this.ghostOk || !this.ghost.userData.tinted) {
-        tintGhost(this.ghost, r.ok);
+      if (looksOk !== this.ghostOk || !this.ghost.userData.tinted) {
+        tintGhost(this.ghost, looksOk);
         this.ghost.userData.tinted = true;
-        this.ghostOk = r.ok;
+        this.ghostOk = looksOk;
       }
     }
-    for (let z = t.z; z < t.z + d; z++) for (let x = t.x; x < t.x + w; x++) this.fills.tile(x, z, r.ok ? COL.ok : COL.bad, 0.05);
-    this.fills.outline(t.x, t.z, t.x + w - 1, t.z + d - 1, 0.1, r.ok ? COL.okLine : COL.badLine);
+    for (let z = t.z; z < t.z + d; z++) for (let x = t.x; x < t.x + w; x++) this.fills.tile(x, z, looksOk ? COL.ok : COL.bad, 0.05);
+    this.fills.outline(t.x, t.z, t.x + w - 1, t.z + d - 1, 0.1, looksOk ? COL.okLine : COL.badLine);
     this.fills.end();
     if (!this.ghostLocked) {
       // desktop hover preview: no pending until click
@@ -937,9 +1003,22 @@ export class ToolManager implements ToolInput {
       this.setLabel(null);
       return;
     }
-    this.setLabel({ x: cx, z: cz }, fmtMoney(def.cost), r.ok ? def.name : r.reason ?? '', r.ok);
     const tx = t.x,
       tz = t.z;
+    if (mv) {
+      const id = mv.id;
+      this.setLabel({ x: cx, z: cz }, 'Move', looksOk ? def.name : r.reason ?? '', looksOk);
+      this.setPending({
+        title: `Move ${def.name}`,
+        verb: 'Move here',
+        cost: 0,
+        ok: r.ok,
+        ...(home ? { note: 'Drag it to a new spot, or turn it' } : this.note(r)),
+        commit: () => sim.moveObject(id, tx, tz, rot),
+      });
+      return;
+    }
+    this.setLabel({ x: cx, z: cz }, fmtMoney(def.cost), r.ok ? def.name : r.reason ?? '', r.ok);
     this.setPending({
       title: def.name,
       verb: 'Build',
@@ -989,7 +1068,8 @@ export class ToolManager implements ToolInput {
     const w = sim.world;
     const tile = w.tileOfWorld(p.x, p.z);
     const hab = w.habitatAt(tile.x, tile.z);
-    const r = sim.buyAnimal(speciesId, p.x, p.z, true);
+    const mover = this.moving?.kind === 'animal' ? sim.animals.get(this.moving.id) : undefined;
+    const r = mover ? sim.moveAnimal(mover.id, p.x, p.z, true) : sim.buyAnimal(speciesId, p.x, p.z, true);
     const y = surfaceY(w, p.x, p.z) - 0.05;
     this.marker.place(p.x, y, p.z, r.ok, Math.max(0.8, Math.min(2.6, sp.length * 0.45)));
     let suit: SpeciesSuitability | null = null;
@@ -1025,13 +1105,14 @@ export class ToolManager implements ToolInput {
     this.setLabel(null);
     const px = p.x,
       pz = p.z;
+    const moverId = mover?.id ?? 0;
     this.setPending({
-      title: `${sp.name}${hab ? ` · ${hab.name}` : ''}`,
-      verb: 'Adopt',
+      title: `${mover ? `Move ${mover.name}` : sp.name}${hab ? ` · ${hab.name}` : ''}`,
+      verb: mover ? 'Move here' : 'Adopt',
       cost: r.cost,
       ok: r.ok,
       ...this.note(r),
-      commit: () => sim.buyAnimal(speciesId, px, pz),
+      commit: () => (moverId ? sim.moveAnimal(moverId, px, pz) : sim.buyAnimal(speciesId, px, pz)),
     });
   }
 

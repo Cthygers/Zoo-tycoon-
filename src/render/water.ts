@@ -46,8 +46,10 @@ export class WaterSurface {
       uWaves: { value: waves },
       uNoise: { value: noise },
       uTime: { value: 0 },
-      uDeep: { value: new THREE.Color(0.008, 0.03, 0.034) },
-      uShallow: { value: new THREE.Color(0.06, 0.09, 0.075) },
+      // body colour (in-scatter) of shallow / deep water: teal-green, light
+      // enough that deep pools never read as holes from a high camera
+      uDeep: { value: new THREE.Color(0.016, 0.052, 0.064) },
+      uShallow: { value: new THREE.Color(0.07, 0.1, 0.088) },
       uBank: { value: new THREE.Color(0.02, 0.03, 0.015) },
     };
     const m = new THREE.MeshPhysicalMaterial({
@@ -86,6 +88,9 @@ export class WaterSurface {
           `float wDepth = vDepth;
           if (wDepth < -0.02) discard;
           vec3 wV = normalize(cameraPosition - vWPos);
+          // seen from afar, sub-pixel ripples tilt many facets toward the
+          // brighter sky: rougher, more reflective water (a sky sheen)
+          float wFar = smoothstep(30.0, 120.0, length(cameraPosition - vWPos));
           float pathLen = max(wDepth, 0.0) / max(wV.y, 0.22);
           // clear-ish shallows (the bed is tinted per channel by the ground
           // shader; wading legs stay visible), murky dark deep pools
@@ -99,7 +104,7 @@ export class WaterSurface {
           foam = max(foam, (1.0 - smoothstep(0.0, 0.01, wDepth)) * 0.25 * fn2);
           diffuseColor.rgb = mix(mix(uShallow, uDeep, smoothstep(0.6, 2.4, pathLen)), vec3(0.42, 0.43, 0.41), foam);`,
         )
-        .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = mix(roughness, 0.55, foam);')
+        .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = mix(mix(roughness, 0.22, wFar), 0.55, foam);')
         .replace(
           '#include <normal_fragment_maps>',
           `{
@@ -123,9 +128,12 @@ export class WaterSurface {
             float bank = 1.0 - smoothstep(0.015, 0.16, rW.y);
             reflectedLight.indirectSpecular = mix(reflectedLight.indirectSpecular, uBank * (0.6 + 0.4 * fn), bank * 0.85);
             vec3 wDiff = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse;
-            vec3 wSpec = reflectedLight.directSpecular + reflectedLight.indirectSpecular;
             float NdV = clamp(dot(normal, geometryViewDir), 0.0, 1.0);
-            float F = 0.02 + 0.98 * pow(1.0 - NdV, 5.0);
+            // Schlick Fresnel (already part of the BRDF's specular), raised to a
+            // reflectance floor for distant water
+            float Fs = 0.02 + 0.98 * pow(1.0 - NdV, 5.0);
+            float F = max(Fs, 0.1 * wFar);
+            vec3 wSpec = reflectedLight.directSpecular + reflectedLight.indirectSpecular * (F / Fs);
             float a = clamp(max(absorb, foam), 0.0, 1.0);
             float alpha = a + (1.0 - a) * F;
             gl_FragColor = vec4(wDiff * a * (1.0 - F) + wSpec * (1.0 - foam * 0.7), alpha);

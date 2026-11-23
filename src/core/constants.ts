@@ -39,7 +39,7 @@ export const CLOSE_HOUR = 20;
 export const START_MINUTE = 7 * 60 + 30; // game starts at 07:30 on day 1
 
 export const START_MONEY = 60000;
-export const DEFAULT_ADMISSION = 20;
+export const DEFAULT_ADMISSION = 15;
 
 export const SAVE_KEY = 'wildhaven-save-v1';
 /** localStorage key for the chosen graphics quality tier. */

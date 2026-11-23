@@ -458,12 +458,6 @@ const drink: Act = (ctx, st, pose) => {
 
 /** Constant tail flicking (a Thomson's gazelle hallmark), on top of every action. */
 function post(ctx: AnimCtx, st: PRState, pose: Pose): void {
-  // horns grow in with age: fawns are hornless (the horn bones scale about the horn bases)
-  const horns = ctx.roles.chains.horns;
-  if (horns) {
-    const k = 0.04 + 0.96 * smooth(0.12, 0.9, ctx.growth);
-    for (let i = 0; i < horns.length; i++) if (horns[i] >= 0) pose.s[horns[i]] = k;
-  }
   const T = ctx.roles.tail;
   if (!T.length || ctx.action === 'sleep') return;
   const burst = smooth(0.2, 0.6, Math.sin(ctx.time * 0.9 + ctx.seed) * 0.5 + 0.5);
@@ -544,7 +538,6 @@ function design(ctx: DesignContext): CreatureDesign {
       { name: 'horn.L', parent: 'head', pos: hb },
       { name: 'horn.R', parent: 'head', pos: [-hb[0], hb[1], hb[2]] },
     ],
-    chains: { horns: ['horn.L', 'horn.R'] },
   });
   const head = withRegion(headPrims(), 'head');
   const prims: Prim[] = [
@@ -604,6 +597,8 @@ function design(ctx: DesignContext): CreatureDesign {
     anim: driver(gazelleDriver(p)),
     babyScale: 0.45,
     babyHead: 1.3,
+    // fawns are hornless: the horns grow in about their bases
+    babyBones: { 'horn.L': 0.04, 'horn.R': 0.04 },
     height: male ? 0.95 : 0.85,
     radius: 0.4,
   };

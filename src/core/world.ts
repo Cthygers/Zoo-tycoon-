@@ -32,6 +32,13 @@ export interface EdgeRef {
   z: number;
 }
 
+/**
+ * Why a fenced-off region is not a habitat: a path runs inside it, it relies on the
+ * unfenced map edge as a side, or it covers more than half of the map.
+ */
+export type EnclosureProblem = 'path' | 'mapEdge' | 'tooBig';
+const ENCLOSURE_PROBLEMS: readonly EnclosureProblem[] = ['path', 'mapEdge', 'tooBig'];
+
 export interface WorldSave {
   version: 1;
   seed: number;
@@ -594,6 +601,72 @@ export class World {
       hab.viewTiles = Array.from(view);
     }
     if (emit) this.events.emit('habitatsChanged', {});
+  }
+
+  /**
+   * Read-only preview of habitat detection (the rules of recomputeHabitats), with the
+   * `extra` edges treated as fenced so fences can be checked before they are built.
+   * Returns a lookup giving, for a tile, why its fenced-off region is NOT a habitat,
+   * or null when it is (or would be) one or is the public space around the entrance.
+   * One flood fill of the map per call; the lookup is cheap.
+   */
+  enclosureProblems(extra: readonly EdgeRef[] = []): (x: number, z: number) => EnclosureProblem | null {
+    const W = MAP_W,
+      H = MAP_H,
+      n = W * H;
+    const hFence = this.hFence.slice();
+    const vFence = this.vFence.slice();
+    for (const e of extra) {
+      if (!this.edgeInBounds(e)) continue;
+      if (e.dir === 'h') hFence[this.hIdx(e.x, e.z)] = 1;
+      else vFence[this.vIdx(e.x, e.z)] = 1;
+    }
+    // per tile: 0 habitat / public, else 1 + index into ENCLOSURE_PROBLEMS
+    const code = new Uint8Array(n);
+    const seen = new Uint8Array(n);
+    const region = new Int32Array(n); // tiles of the region being flooded
+    const entrance = this.idx(ENTRANCE_TILE.x, ENTRANCE_TILE.z);
+    const VW = W + 1; // row stride of vFence
+    const paths = this.path;
+    for (let start = 0; start < n; start++) {
+      if (seen[start]) continue;
+      let len = 0;
+      region[len++] = start;
+      seen[start] = 1;
+      let hasPath = false,
+        mapEdge = false,
+        isPublic = false;
+      for (let k = 0; k < len; k++) {
+        const i = region[k];
+        const x = i % W,
+          z = (i - x) / W;
+        if (i === entrance) isPublic = true;
+        if (paths[i]) hasPath = true;
+        // the four sides: an open edge leads to a neighbour, or off the map
+        if (!vFence[z * VW + x + 1]) {
+          if (x + 1 >= W) mapEdge = true;
+          else if (!seen[i + 1]) (seen[i + 1] = 1), (region[len++] = i + 1);
+        }
+        if (!vFence[z * VW + x]) {
+          if (x === 0) mapEdge = true;
+          else if (!seen[i - 1]) (seen[i - 1] = 1), (region[len++] = i - 1);
+        }
+        if (!hFence[(z + 1) * W + x]) {
+          if (z + 1 >= H) mapEdge = true;
+          else if (!seen[i + W]) (seen[i + W] = 1), (region[len++] = i + W);
+        }
+        if (!hFence[z * W + x]) {
+          if (z === 0) mapEdge = true;
+          else if (!seen[i - W]) (seen[i - W] = 1), (region[len++] = i - W);
+        }
+      }
+      const problem: EnclosureProblem | null = isPublic ? null : hasPath ? 'path' : mapEdge ? 'mapEdge' : len > n * 0.5 ? 'tooBig' : null;
+      if (problem) {
+        const c = 1 + ENCLOSURE_PROBLEMS.indexOf(problem);
+        for (let k = 0; k < len; k++) code[region[k]] = c;
+      }
+    }
+    return (x, z) => (this.inBounds(x, z) && code[this.idx(x, z)] ? ENCLOSURE_PROBLEMS[code[this.idx(x, z)] - 1] : null);
   }
 
   habitatAt(x: number, z: number): Habitat | undefined {

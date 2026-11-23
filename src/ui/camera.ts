@@ -210,6 +210,24 @@ export class CameraController {
     this.velX = this.velZ = 0;
   }
 
+  /**
+   * Like focusOn, but the ground point ends up at the screen position (ndcX, ndcY)
+   * instead of the centre, e.g. the middle of the area a side panel leaves uncovered.
+   */
+  focusAt(x: number, z: number, ndcX: number, ndcY: number, distance?: number, duration?: number): void {
+    const d1 = distance === undefined ? this.distance : Math.min(this.limits.maxDistance, Math.max(this.limits.minDistance, distance));
+    let ox = 0,
+      oz = 0;
+    // offset from the orbit target to the ground under (ndcX, ndcY); it only depends on the
+    // orientation and grows linearly with the distance
+    if (this.groundPointAt(ndcX, ndcY, this.target.y, _hit)) {
+      const k = d1 / this.distance;
+      ox = (_hit.x - this.target.x) * k;
+      oz = (_hit.z - this.target.z) * k;
+    }
+    this.focusOn(x - ox, z - oz, distance, duration);
+  }
+
   /** Follow a moving entity until the user pans or fn returns null. */
   follow(fn: FollowFn, distance?: number): void {
     this.followFn = fn;

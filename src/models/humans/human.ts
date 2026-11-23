@@ -12,7 +12,8 @@ import type { QualitySettings } from '../../core/contracts';
 import type { HumanAppearance, StaffRole } from '../../core/types';
 import { buildGeometry, type SampleImpl, type VertexBaker } from '../build/geometry';
 import { resolveRoles } from '../rig/roles';
-import { RiggedModel, jointMatrix, type CrowdHost, type RigAsset } from '../model';
+import { RiggedModel, jointMatrix, type AssetPicker, type CrowdHost, type RigAsset } from '../model';
+import { disposeAsset } from '../assets';
 import { driver, hash1, unwrapDriver } from '../anim/util';
 import { humanDriver } from '../anim/human';
 import { humanDesign, type HairKind, type HumanBodyKey, type HumanDesign } from './design';
@@ -173,7 +174,6 @@ export class HumanModel extends RiggedModel implements BatchedModel {
   private readonly colors: HumanColors;
   private readonly cut: HumanCut;
   private readonly body: number;
-  private readonly detail: 0 | 1 | 2;
   private readonly crowd: CrowdRenderer | null;
   private readonly handIdx: number;
   private readonly palmY: number;
@@ -195,11 +195,11 @@ export class HumanModel extends RiggedModel implements BatchedModel {
   private itemMesh: THREE.Mesh | null = null;
   private stringMesh: THREE.Mesh | null = null;
 
-  constructor(asset: HumanAsset, app: HumanAppearance, role: 'guest' | StaffRole, seed: number, detail: 0 | 1 | 2, crowd: CrowdRenderer | null) {
-    super(asset, seed, app.female ? 'F' : 'M', app.height / asset.height, role, crowd as CrowdHost | null);
+  /** `pick` returns the body mesh of the current quality tier (re-picked after a tier change). */
+  constructor(asset: HumanAsset, app: HumanAppearance, role: 'guest' | StaffRole, seed: number, crowd: CrowdRenderer | null, pick: AssetPicker | null = null) {
+    super(asset, seed, app.female ? 'F' : 'M', app.height / asset.height, role, crowd as CrowdHost | null, pick);
     this.needsJoints = true;
     this.crowd = crowd;
-    this.detail = detail;
     const r = (k: number) => hash1(seed, k);
     const colors: HumanColors = {
       skin: app.skin,
@@ -233,6 +233,11 @@ export class HumanModel extends RiggedModel implements BatchedModel {
     const hp = asset.rig.rest;
     this.palmY = this.handIdx >= 0 ? -0.055 * (hp[this.handIdx * 3 + 1] / 0.87) : -0.05;
     this.itemSeed = Math.floor(r(5) * 1000);
+  }
+
+  /** Quality detail of the current body mesh. */
+  private get detail(): 0 | 1 | 2 {
+    return this.asset.detail ?? 1;
   }
 
   // ---------------------------------------------------------------- batching
@@ -455,7 +460,16 @@ export class HumanFactory {
     // about a third of female guests wear a skirt or dress
     const skirt = role === 'guest' && app.female && hash1(seed, 6) < 0.34;
     const key: HumanBodyKey = { female: app.female, child: app.child, hair: hairKind(app, role), skirt };
-    return new HumanModel(this.asset(key), app, role, seed, this.quality.creatureDetail, this.crowd);
+    return new HumanModel(this.asset(key), app, role, seed, this.crowd, () => this.asset(key));
+  }
+
+  /** Free the body meshes of every other quality detail (-1: all of them). */
+  disposeOtherDetails(detail: number): void {
+    for (const [k, a] of this.assets) {
+      if (a.detail === detail) continue;
+      disposeAsset(a);
+      this.assets.delete(k);
+    }
   }
 
   stats(): { key: string; triangles: number; ms: number }[] {

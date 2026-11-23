@@ -128,5 +128,5 @@ export function staffAppearance(rng: SimRng, role: StaffRole): HumanAppearance {
   return a;
 }
 
-export const STAFF_SALARY: Record<StaffRole, number> = { keeper: 40, groundskeeper: 30, vet: 60 };
+export const STAFF_SALARY: Record<StaffRole, number> = { keeper: 120, groundskeeper: 90, vet: 160 };
 export const STAFF_TITLE: Record<StaffRole, string> = { keeper: 'Keeper', groundskeeper: 'Groundskeeper', vet: 'Vet' };

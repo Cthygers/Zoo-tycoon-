@@ -26,6 +26,8 @@ export class LodChain {
   readonly ms: number[];
   /** Generous bounding sphere (mesh space) shared by every level (covers all poses). */
   readonly sphere: THREE.Sphere;
+  /** Set by dispose(): queued builds of this chain are dropped. */
+  disposed = false;
 
   constructor(base: THREE.BufferGeometry, sphere: THREE.Sphere, baseTriangles: number) {
     this.levels = LOD_RATIOS.map((_, i) => (i === 0 ? base : null));
@@ -46,7 +48,7 @@ export class LodChain {
    * frames.
    */
   step(level: number): boolean {
-    if (this.levels[level]) return true;
+    if (this.levels[level] || this.disposed) return true;
     let job = this.jobs[level];
     if (!job) job = this.jobs[level] = new SimplifyJob(this.levels[0]!, LOD_RATIOS[level]);
     if (!job.step()) return false;
@@ -72,6 +74,8 @@ export class LodChain {
   }
 
   dispose(): void {
+    this.disposed = true;
+    this.jobs.fill(null);
     // level 0 belongs to the asset; only the derived levels are ours
     for (let i = 1; i < this.levels.length; i++) {
       this.levels[i]?.dispose();

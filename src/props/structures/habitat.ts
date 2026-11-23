@@ -348,7 +348,7 @@ function buildDen(v: number): THREE.Object3D {
 // ---------------------------------------------------------------------------
 // Enrichment ball (0.9 m hard plastic, scuffed)
 
-export const BALL_COLORS = [0x2c5577, 0x8a2f26, 0x3c6136];
+const BALL_COLORS = [0x2c5577, 0x8a2f26, 0x3c6136];
 
 function buildBall(v: number): THREE.Object3D {
   const k = new Kit();

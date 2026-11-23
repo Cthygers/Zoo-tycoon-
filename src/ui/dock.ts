@@ -61,6 +61,7 @@ export class Dock {
   private tbThumb: HTMLElement;
   private tbName: HTMLElement;
   private tbHint: HTMLElement;
+  private tbTip: HTMLElement;
   private tbOpts: HTMLElement;
   private confirmEl: HTMLElement;
   private cfTitle: HTMLElement;
@@ -74,6 +75,8 @@ export class Dock {
   private fenceMode: 'rect' | 'line' = 'rect';
   private pathStraight = false;
   private bulldozeMode: BulldozeMode = 'area';
+  /** Tool bar hint replacing the tool's own (e.g. while moving an animal or object). */
+  private hintOverride = '';
 
   constructor(private host: DockHost) {
     // ---- category bar
@@ -103,10 +106,15 @@ export class Dock {
     this.tbThumb = el('div', 'wh-tb-thumb');
     this.tbName = el('div', 'wh-tb-name');
     this.tbHint = el('div', 'wh-tb-hint');
+    // first few times in build mode: one finger now builds, so say how the camera moves
+    this.tbTip = el('div', {
+      class: 'wh-tb-tip hidden',
+      html: `${icon('fingers')}<span class="wh-only-touch">Two fingers move the camera</span><span class="wh-only-mouse">Right-drag turns, middle-drag moves the camera</span>`,
+    });
     this.tbOpts = el('div', 'wh-tb-opts');
     this.toolbar = el('div', 'wh-toolbar wh-glass hidden', [
       this.tbThumb,
-      el('div', 'wh-tb-text', [this.tbName, this.tbHint]),
+      el('div', 'wh-tb-text', [this.tbName, this.tbHint, this.tbTip]),
       this.tbOpts,
       button('wh-btn-ghost wh-tb-done', null, 'Done', () => host.exitTool(), 'Finish building'),
     ]);
@@ -130,6 +138,38 @@ export class Dock {
   // ------------------------------------------------------------ drawer
   get drawerOpen(): boolean {
     return this.openCat !== null;
+  }
+
+  get openCategoryId(): CategoryId | null {
+    return this.openCat;
+  }
+
+  // elements the first-run tour points at (null when not on screen)
+  categoryButton(id: CategoryId): HTMLElement | null {
+    return this.catBtns.get(id) ?? null;
+  }
+
+  cardFor(match: (key: string) => boolean): HTMLElement | null {
+    if (!this.openCat) return null;
+    for (const [key, c] of this.cards) if (match(key)) return c.root;
+    return null;
+  }
+
+  get drawerEl(): HTMLElement | null {
+    return this.openCat ? this.drawer : null;
+  }
+
+  get toolbarEl(): HTMLElement | null {
+    return this.toolbar.classList.contains('hidden') ? null : this.toolbar;
+  }
+
+  get confirmBarEl(): HTMLElement | null {
+    return this.confirmVisible ? this.confirmEl : null;
+  }
+
+  /** Show or hide the camera-gesture line on the tool bar. */
+  setCameraTip(on: boolean): void {
+    toggleClass(this.tbTip, 'hidden', !on);
   }
 
   toggleCategory(id: CategoryId): void {
@@ -156,13 +196,14 @@ export class Dock {
       }
       this.row.append(this.card(item));
     }
-    this.row.scrollLeft = 0;
     this.drawer.classList.remove('hidden');
     this.refreshCats();
     this.refreshAffordability();
-    // scroll the active item into view
+    // Start at the first item, or centre the active one. Only after un-hiding: a scrollLeft write
+    // on a display:none row is dropped and the previous tab's offset comes back. Not scrollIntoView,
+    // which would also scroll the HUD layer behind the drawer.
     const active = this.cards.get(this.activeKey);
-    if (active) active.root.scrollIntoView({ block: 'nearest', inline: 'center' });
+    this.row.scrollLeft = active ? active.root.offsetLeft - (this.row.clientWidth - active.root.offsetWidth) / 2 : 0;
   }
 
   closeDrawer(): void {
@@ -232,9 +273,14 @@ export class Dock {
   }
 
   // ------------------------------------------------------------ tool bar
-  setTool(tool: Tool, item: CatalogItem | null): void {
+  /**
+   * Show the active tool. `label` renames the tool bar for a tool used for something other
+   * than its catalogue item (moving an existing animal or object); no card or category lights up.
+   */
+  setTool(tool: Tool, item: CatalogItem | null, label?: { name: string; hint: string }): void {
     this.tool = tool;
-    const key = item?.key ?? toolKey(tool);
+    this.hintOverride = label?.hint ?? '';
+    const key = label ? 'move' : item?.key ?? toolKey(tool);
     if (key !== this.activeKey) {
       const prev = this.cards.get(this.activeKey);
       if (prev) prev.root.classList.remove('on');
@@ -249,10 +295,11 @@ export class Dock {
       return;
     }
     if (item) {
-      this.activeCat = this.host.catalog.find((c) => c.items.includes(item))?.id ?? null;
-      setText(this.tbName, item.name);
+      this.activeCat = label ? null : this.host.catalog.find((c) => c.items.includes(item))?.id ?? null;
       this.setToolbarThumb(item);
     }
+    const name = label?.name ?? item?.name;
+    if (name) setText(this.tbName, name);
     this.buildOptions();
     toggleClass(this.toolbar, 'hidden', this.pendingShown);
     this.refreshCats();
@@ -321,7 +368,7 @@ export class Dock {
       default:
         break;
     }
-    setText(this.tbHint, hint);
+    setText(this.tbHint, this.hintOverride || hint);
   }
 
   private setBulldozeMode(m: BulldozeMode): void {
@@ -360,6 +407,7 @@ export class Dock {
     this.cfOk.innerHTML = `${icon('check')}<span class="wh-btn-label">${p.verb}${amount ? ` ${amount}` : ''}${this.tool.kind === 'staff' && p.cost > 0 ? '/day' : ''}</span>`;
     this.cfOk.disabled = !p.ok;
     toggleClass(this.cfOk, 'remove', p.verb === 'Remove');
+    toggleClass(this.cfOk, 'risky', !!p.risky);
     this.confirmEl.classList.remove('hidden');
   }
 

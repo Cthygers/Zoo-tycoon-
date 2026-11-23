@@ -97,19 +97,21 @@ vec3 grassBladeColor(float r, float t, bool dry) {
     if (k > 0.93) c = srgb(168.0, 156.0, 104.0);
     else if (k < 0.08) c = srgb(86.0, 116.0, 78.0);
   } else {
-    vec3 s1 = srgb(158.0, 138.0, 96.0), s2 = srgb(198.0, 180.0, 132.0), s3 = srgb(136.0, 130.0, 108.0);
+    // straw → pale straw, some grey-weathered and olive (still living) blades
+    vec3 s1 = srgb(152.0, 134.0, 93.0), s2 = srgb(180.0, 163.0, 118.0), s3 = srgb(136.0, 130.0, 106.0);
     c = mix(s1, s2, smoothstep(0.0, 0.8, r));
     if (fract(r * 7.31) > 0.8) c = mix(c, s3, 0.7);
-    if (fract(r * 17.3) > 0.9) c = srgb(128.0, 130.0, 78.0);
+    if (fract(r * 17.3) > 0.86) c = srgb(124.0, 126.0, 76.0);
   }
-  return c * (0.8 + 0.3 * t);
+  return c * (dry ? 0.88 + 0.18 * t : 0.8 + 0.3 * t);
 }
 
 Surf grassLike(vec2 uv, bool dry) {
   Surf s;
   float macro = pfbm(uv, 3.0, 4, dry ? 3.0 : 1.0);
   // thatch / soil between the blades (seldom visible, never black)
-  vec3 soil = dry ? srgb(128.0, 110.0, 80.0) : srgb(74.0, 74.0, 46.0);
+  // (dry thatch close to the blades in value: bright blades on dark soil read as speckle)
+  vec3 soil = dry ? srgb(128.0, 114.0, 82.0) : srgb(74.0, 74.0, 46.0);
   soil *= 0.85 + 0.3 * (0.5 + 0.5 * pfbm(uv, 24.0, 3, 4.0));
   s.alb = soil;
   s.h = 0.1 + 0.1 * pfbm(uv, 12.0, 3, 2.0);
@@ -119,7 +121,7 @@ Surf grassLike(vec2 uv, bool dry) {
   for (int k = 0; k < 3; k++) {
     float fk = float(k);
     float n = n0 * (1.0 + fk * 0.6);
-    vec4 b = blades(uv, floor(n), dry ? 1.25 : 1.15, dry ? 0.15 : 0.2, 13.0 * fk + (dry ? 50.0 : 0.0));
+    vec4 b = blades(uv, floor(n), dry ? 1.25 : 1.15, dry ? 0.18 : 0.2, 13.0 * fk + (dry ? 50.0 : 0.0));
     if (dry && k == 2 && hash12(vec2(b.z, 3.0)) > 0.6) continue;
     if (k == 2 && hash12(vec2(b.z, 5.0)) < thin * 0.7) continue;
     float hh = 0.25 + 0.75 * b.y - fk * 0.04;
@@ -161,20 +163,20 @@ Surf dirt(vec2 uv) {
   float crack = 1.0 - smoothstep(0.0, 0.035, cr.y - cr.x);
   s.alb *= 1.0 - 0.3 * crack * smoothstep(-0.2, 0.4, n1);
   s.h -= 0.15 * crack;
-  // pebbles
-  vec4 v = pvoronoi(uv, 36.0, 0.9, 24.0);
-  float r = 0.18 + 0.2 * fract(v.z * 7.0);
-  if (v.z > 0.55) {
-    float m = 1.0 - smoothstep(r * 0.75, r, v.x);
-    vec3 pc = mix(srgb(150.0, 140.0, 124.0), srgb(110.0, 100.0, 88.0), fract(v.z * 13.0));
+  // sparse pebbles, close to the soil in value (small bright flecks read as noise)
+  vec4 v = pvoronoi(uv, 20.0, 0.9, 24.0);
+  float r = 0.16 + 0.18 * fract(v.z * 7.0);
+  if (v.z > 0.72) {
+    float m = 1.0 - smoothstep(r * 0.7, r, v.x);
+    vec3 pc = mix(s.alb * vec3(1.2, 1.18, 1.16), srgb(104.0, 96.0, 86.0), 0.35 + 0.4 * fract(v.z * 13.0));
     s.alb = mix(s.alb, pc, m);
-    s.h = max(s.h, mix(s.h, 0.6 + 0.4 * sqrt(max(0.0, 1.0 - (v.x * v.x) / (r * r))), m));
+    s.h = max(s.h, mix(s.h, 0.55 + 0.35 * sqrt(max(0.0, 1.0 - (v.x * v.x) / (r * r))), m));
   }
-  // sparse straw
-  vec4 b = blades(uv, 22.0, 1.1, 0.07, 25.0);
-  if (fract(b.z * 5.3) > 0.55) {
-    s.alb = mix(s.alb, srgb(160.0, 140.0, 96.0) * (0.8 + 0.3 * b.w), b.x * 0.85);
-    s.h = mix(s.h, 0.7, b.x * 0.8);
+  // a little dull straw
+  vec4 b = blades(uv, 22.0, 1.1, 0.08, 25.0);
+  if (fract(b.z * 5.3) > 0.7) {
+    s.alb = mix(s.alb, srgb(128.0, 112.0, 78.0) * (0.85 + 0.2 * b.w), b.x * 0.7);
+    s.h = mix(s.h, 0.65, b.x * 0.7);
   }
   s.rough = 0.95;
   s.ao = mix(0.6, 1.0, smoothstep(0.1, 0.5, s.h));
@@ -200,41 +202,81 @@ Surf sand(vec2 uv) {
   return s;
 }
 
+// Periodic voronoi that also returns the offset to the nearest feature point:
+// xy = feature − p (cell units), z = F2 − F1 (≈ twice the distance to the
+// cell border, so insets give angular polygons), w = cell hash.
+vec4 pvorEdge(vec2 uv, float n, float seed) {
+  vec2 p = uv * n;
+  vec2 i = floor(p);
+  vec2 f = p - i;
+  float f1 = 8.0, f2 = 8.0, id = 0.0;
+  vec2 o1 = vec2(0.0);
+  for (int y = -1; y <= 1; y++)
+    for (int x = -1; x <= 1; x++) {
+      vec2 o = vec2(float(x), float(y));
+      vec2 c = mod(i + o, vec2(n));
+      vec2 r = o + hash22(c + seed * 7.31) - f;
+      float d = dot(r, r);
+      if (d < f1) { f2 = f1; f1 = d; o1 = r; id = hash12(c + seed * 3.17 + 11.0); }
+      else if (d < f2) { f2 = d; }
+    }
+  return vec4(o1, sqrt(f2) - sqrt(f1), id);
+}
+
+// Rocky ground: gritty soil and fine gravel, a few large weathered bedrock
+// slabs split by cracks, and sparse angular scree of very different sizes.
+// Stones and soil are close in value (dark grout lines read as paving).
 Surf rock(vec2 uv) {
   Surf s;
-  // dark gravelly soil matrix
-  float fine = pfbm(uv, 48.0, 3, 41.0);
-  s.alb = mix(srgb(62.0, 57.0, 50.0), srgb(88.0, 82.0, 72.0), 0.5 + 0.5 * fine);
-  s.h = 0.12 + 0.06 * fine;
-  vec4 g = pvoronoi(uv, 70.0, 0.9, 42.0);
-  float gm = 1.0 - smoothstep(0.28, 0.42, g.x);
-  s.alb = mix(s.alb, mix(srgb(118.0, 112.0, 104.0), srgb(84.0, 80.0, 74.0), g.z), gm * 0.8);
-  s.h = max(s.h, 0.16 + 0.12 * gm);
-  // rounded embedded stones at three sizes (≈65, 35, 18 cm)
-  for (int k = 0; k < 3; k++) {
-    float fk = float(k);
-    float n = k == 0 ? 6.0 : (k == 1 ? 11.0 : 22.0);
-    vec4 v = pvoronoi(uv, n, 0.85, 43.0 + fk * 5.0);
-    float keep = k == 0 ? 0.45 : (k == 1 ? 0.35 : 0.3);
-    if (v.z < keep) continue;
-    float r = 0.33 + 0.14 * fract(v.z * 7.0);
-    float d = v.x + 0.06 * pnoise(uv * n * 4.0 + v.z * 9.0, vec2(n * 4.0));
-    float m = 1.0 - smoothstep(r * 0.82, r, d);
-    float dome = sqrt(max(0.0, 1.0 - (d * d) / (r * r)));
-    float hh = 0.3 + 0.62 * dome * (1.0 - 0.18 * fk);
-    float t = fract(v.z * 11.0);
-    vec3 sc = t < 0.35 ? srgb(122.0, 118.0, 110.0) : (t < 0.6 ? srgb(98.0, 94.0, 88.0) : (t < 0.85 ? srgb(132.0, 122.0, 106.0) : srgb(84.0, 84.0, 82.0)));
-    float surf = pfbm(uv, n * 6.0, 3, 44.0 + fk);
-    sc *= 0.85 + 0.28 * (0.5 + 0.5 * surf);
-    float li = smoothstep(0.5, 0.72, pfbm(uv, n * 3.0, 3, 45.0 + fk));
-    sc = mix(sc, srgb(130.0, 132.0, 88.0), li * 0.45 * step(0.55, fract(v.z * 9.0)) * dome);
-    if (hh > s.h && m > 0.0) {
-      s.alb = mix(s.alb, sc * (0.75 + 0.25 * dome), m);
-      s.h = mix(s.h, hh + 0.04 * surf, m);
-    }
+  float big = pfbm(uv, 2.0, 3, 41.0);
+  float fine = pfbm(uv, 40.0, 3, 42.0);
+  s.alb = mix(srgb(94.0, 88.0, 78.0), srgb(118.0, 110.0, 97.0), 0.5 + 0.5 * fine);
+  s.alb *= 0.92 + 0.12 * big;
+  s.h = 0.14 + 0.05 * fine;
+  vec4 g = pvoronoi(uv, 64.0, 1.0, 43.0);
+  float gm = (1.0 - smoothstep(0.2, 0.4, g.x)) * step(0.4, g.z);
+  s.alb = mix(s.alb, mix(srgb(126.0, 120.0, 110.0), srgb(98.0, 94.0, 86.0), fract(g.z * 7.0)), gm * 0.6);
+  s.h = max(s.h, 0.17 + 0.08 * gm);
+
+  // exposed bedrock: irregular, partly buried patches (crisp edges from a
+  // thresholded noise field, rounded rims) split by a polygonal crack network
+  vec2 w = 0.06 * vec2(pfbm(uv, 5.0, 2, 44.0), pfbm(uv, 5.0, 2, 45.0));
+  float bed = pfbm(uv + w, 2.0, 5, 46.0);
+  float slab = smoothstep(0.1, 0.14, bed);
+  if (slab > 0.0) {
+    float surf = pfbm(uv, 12.0, 4, 47.0);
+    vec4 ic = pvoronoi(uv + w, 7.0, 1.0, 48.0);
+    float crack = 1.0 - smoothstep(0.0, 0.04, ic.y - ic.x);
+    vec3 sc = mix(srgb(114.0, 110.0, 102.0), srgb(130.0, 122.0, 106.0), fract(ic.z * 13.0));
+    sc *= 0.88 + 0.18 * (0.5 + 0.5 * surf);
+    float lichen = smoothstep(0.35, 0.6, pfbm(uv, 16.0, 3, 49.0)) * step(0.4, fract(ic.z * 3.7));
+    sc = mix(sc, srgb(132.0, 134.0, 96.0), lichen * 0.45);
+    sc *= 1.0 - 0.3 * crack;
+    float hh = 0.42 + 0.22 * smoothstep(0.12, 0.32, bed) + 0.06 * surf - 0.18 * crack;
+    s.alb = mix(s.alb, sc, slab);
+    s.h = mix(s.h, hh, slab);
   }
-  s.rough = 0.84;
-  s.ao = mix(0.4, 1.0, smoothstep(0.1, 0.55, s.h));
+
+  // scree: angular stones (inset voronoi polygons), tilted flat tops
+  for (int k = 0; k < 2; k++) {
+    float n = k == 0 ? 9.0 : 19.0;
+    vec4 v = pvorEdge(uv + w * 0.5, n, 50.0 + float(k) * 3.0);
+    if (fract(v.w * 3.1) < (k == 0 ? 0.6 : 0.75)) continue;
+    float inset = 0.18 + 0.45 * fract(v.w * 7.3);
+    float m = smoothstep(inset, inset + 0.06, v.z);
+    if (m <= 0.0) continue;
+    vec2 tilt = vec2(fract(v.w * 17.0), fract(v.w * 23.0)) - 0.5;
+    float top = 0.42 + 0.22 * smoothstep(inset, inset + 0.25, v.z) + dot(v.xy, tilt) * 0.3 - float(k) * 0.08;
+    if (top < s.h) continue;
+    float t = fract(v.w * 11.0);
+    vec3 sc = t < 0.4 ? srgb(120.0, 115.0, 107.0) : (t < 0.7 ? srgb(104.0, 100.0, 93.0) : (t < 0.9 ? srgb(128.0, 118.0, 101.0) : srgb(96.0, 95.0, 92.0)));
+    sc *= 0.86 + 0.2 * (0.5 + 0.5 * pfbm(uv, n * 4.0, 2, 51.0 + float(k)));
+    sc *= 0.88 + 0.12 * smoothstep(inset, inset + 0.2, v.z);
+    s.alb = mix(s.alb, sc, m);
+    s.h = mix(s.h, top, m);
+  }
+  s.rough = 0.86;
+  s.ao = mix(0.72, 1.0, smoothstep(0.1, 0.5, s.h));
   return s;
 }
 

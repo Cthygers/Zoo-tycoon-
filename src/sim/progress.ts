@@ -1,5 +1,6 @@
 // Zoo rating (0..100, smoothed) and the progressive objective list.
 
+import { MAP_W, TILE } from '../core/constants';
 import type { Objective } from '../core/types';
 import { OBJECTS_BY_ID } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
@@ -42,7 +43,6 @@ export interface Complaints {
   food: number;
   drink: number;
   bench: number;
-  litter: number;
   noAnimals: number;
   price: number;
 }
@@ -52,7 +52,11 @@ export class Progress {
   has = { food: false, drink: false, restroom: false, bench: false, bin: false, gift: false };
   speciesCount = 0;
   happyAnimals = 0;
-  complaints: Complaints = { restroom: 0, food: 0, drink: 0, bench: 0, litter: 0, noAnimals: 0, price: 0 };
+  complaints: Complaints = { restroom: 0, food: 0, drink: 0, bench: 0, noAnimals: 0, price: 0 };
+  /** Parties put off by a litter hot spot this report window (each counts once), and the worst spot. */
+  private litterParties = new Set<number>();
+  private worstLitterTile = -1;
+  private worstLitter = 0;
   private ratingAcc = 0;
   private complaintAcc = 0;
   private facilitiesRev = -1;
@@ -80,7 +84,19 @@ export class Progress {
 
   private clearComplaints() {
     const c = this.complaints;
-    c.restroom = c.food = c.drink = c.bench = c.litter = c.noAnimals = c.price = 0;
+    c.restroom = c.food = c.drink = c.bench = c.noAnimals = c.price = 0;
+    this.litterParties.clear();
+    this.worstLitterTile = -1;
+    this.worstLitter = 0;
+  }
+
+  /** A party leader saw `trash` items around path tile `tile`. */
+  noteLitter(leaderId: number, tile: number, trash: number) {
+    this.litterParties.add(leaderId);
+    if (trash > this.worstLitter) {
+      this.worstLitter = trash;
+      this.worstLitterTile = tile;
+    }
   }
 
   private refreshFacilities() {
@@ -88,21 +104,36 @@ export class Progress {
     if (this.facilitiesRev === w.revision) return;
     this.facilitiesRev = w.revision;
     const h = this.has;
+    const n = this.outlets;
     h.food = h.drink = h.restroom = h.bench = h.bin = h.gift = false;
+    n.food = n.drink = n.restroom = 0;
     for (const o of w.objects.values()) {
       const d = OBJECTS_BY_ID[o.defId];
       if (!d) continue;
-      if (d.shop?.kind === 'food') h.food = true;
-      if (d.shop?.kind === 'drink') h.drink = true;
-      if (d.shop?.kind === 'icecream') h.food = h.food || false;
-      if (d.shop?.kind === 'gift') h.gift = true;
+      const kind = d.shop?.kind;
+      if (kind === 'food') h.food = true;
+      if (kind === 'drink') h.drink = true;
+      if (kind === 'gift') h.gift = true;
       if (d.restroom) h.restroom = true;
       if (d.bench) h.bench = true;
       if (d.bin) h.bin = true;
+      // an ice cream cart takes some pressure off both the snack and the drinks kiosks
+      n.food += kind === 'food' ? 1 : kind === 'icecream' ? 0.5 : 0;
+      n.drink += kind === 'drink' ? 1 : kind === 'icecream' ? 0.5 : 0;
+      if (d.restroom) n.restroom++;
     }
   }
+  /** Food, drink and restroom outlets (an ice cream cart counts half for food and drink). */
+  private outlets = { food: 0, drink: 0, restroom: 0 };
 
-  /** Instantaneous rating target 0..100 from the current zoo. */
+  /**
+   * Instantaneous rating target 0..100 from the current zoo: up to 55 for the
+   * exhibits (a varied, large, appealing collection, scaled by how well the
+   * animals are kept) and up to 45 for the visit (mostly how happy guests are,
+   * then scenery, clean paths and enough facilities for the crowd). Collection
+   * size and variety keep counting with diminishing returns, so a small zoo
+   * rates in the 40s and only a big, well-run one reaches 80.
+   */
   targetRating(): number {
     const sim = this.sim;
     this.refreshFacilities();
@@ -118,11 +149,15 @@ export class Progress {
         appeal += SPECIES_BY_ID[a.speciesId]?.appeal ?? 5;
       }
     }
+    const welfare = n ? ah / n : 0;
+    const diversity = 1 - Math.exp(-species.size / 3.5);
+    const collection = 1 - Math.exp(-n / 18);
+    const avgAppeal = species.size ? appeal / species.size / 10 : 0;
+    const exhibits = 55 * (0.5 * diversity + 0.3 * collection + 0.2 * avgAppeal) * (0.4 + 0.6 * welfare);
+
     let gh = 0;
     for (const g of sim.guests.values()) gh += g.happiness;
     const guestHappy = sim.guests.size ? 0.5 * (gh / sim.guests.size) + 0.5 * sim.satisfaction : sim.satisfaction;
-    const animalPart = n ? (ah / n) * 30 * Math.min(1, 0.5 + n / 10) : 0;
-    const variety = Math.min(1, species.size / 8) * 12 + (species.size ? Math.min(1, appeal / species.size / 10) * 4 : 0);
     // scenery along the paths
     sim.ensureSceneryGrid();
     let sc = 0,
@@ -133,15 +168,18 @@ export class Progress {
       pathTiles++;
       sc += Math.min(4, sim.scenery[i]);
     }
-    const scenery = pathTiles ? Math.min(1, sc / pathTiles / 2) * 10 : 0;
+    const scenery = pathTiles ? Math.min(1, sc / pathTiles / 2) : 0;
     let trash = 0;
     for (const l of sim.litter.values()) if (l.kind === 'trash') trash++;
-    const cleanliness = (1 - Math.min(1, trash / (6 + pathTiles * 0.06))) * 10;
-    const h = this.has;
-    const fac = ((h.food ? 1 : 0) + (h.drink ? 1 : 0) + (h.restroom ? 1 : 0) + (h.bench ? 1 : 0) + (h.bin ? 1 : 0)) / 5;
-    const facilities = fac * 14;
-    const viewable = this.viewablePenalty();
-    const total = animalPart + guestHappy * 20 + variety + scenery + cleanliness + facilities - viewable;
+    const cleanliness = 1 - Math.min(1, trash / (6 + pathTiles * 0.06));
+    // about one of each outlet per 60 guests the zoo can hold, plus somewhere to sit and a bin
+    const need = Math.max(1, sim.guestSys.capacity / 60);
+    const o = this.outlets;
+    const outlets = (Math.min(1, o.food / need) + Math.min(1, o.drink / need) + Math.min(1, o.restroom / need)) / 3;
+    const facilities = 0.8 * outlets + 0.1 * (this.has.bench ? 1 : 0) + 0.1 * (this.has.bin ? 1 : 0);
+    const visit = 45 * (0.55 * guestHappy + 0.15 * scenery + 0.15 * cleanliness + 0.15 * facilities);
+
+    const total = exhibits + visit - this.viewablePenalty();
     return Math.max(0, Math.min(100, total));
   }
 
@@ -201,13 +239,37 @@ export class Progress {
     const c = this.complaints;
     const g = sim.guests.size;
     const thr = Math.max(3, g * 0.08);
-    if (c.restroom >= thr) sim.notify('cmp-restroom', 'Guests are complaining that they can’t find a restroom.', 'warn', undefined, 120);
-    if (c.food >= thr) sim.notify('cmp-food', 'Guests are hungry but there is nowhere to buy food.', 'warn', undefined, 120);
-    if (c.drink >= thr) sim.notify('cmp-drink', 'Guests are thirsty — build a drinks kiosk.', 'warn', undefined, 120);
+    this.refreshFacilities();
+    const h = this.has;
+    // a path cut off from the entrance first: otherwise guests seem to say things are missing
+    const cut = g ? sim.guestSys.unreachable() : null;
+    if (cut) sim.notify('cmp-cutoff', cut.text, 'warn', cut.focus, 300);
+    if (c.restroom >= thr)
+      sim.notify('cmp-restroom', h.restroom ? 'Guests can’t find a restroom nearby — build more around the zoo.' : 'Guests are complaining that there are no restrooms.', 'warn', undefined, 120);
+    if (c.food >= thr)
+      sim.notify('cmp-food', h.food ? 'Hungry guests can’t find food nearby — build snack kiosks around the zoo.' : 'Guests are hungry but there is nowhere to buy food.', 'warn', undefined, 120);
+    if (c.drink >= thr)
+      sim.notify('cmp-drink', h.drink ? 'Thirsty guests can’t find a drink nearby — build drinks kiosks around the zoo.' : 'Guests are thirsty — build a drinks kiosk.', 'warn', undefined, 120);
     if (c.bench >= thr) sim.notify('cmp-bench', 'Tired guests want benches to sit on.', 'info', undefined, 150);
-    if (c.litter >= thr) sim.notify('cmp-litter', 'Guests are disgusted by the litter — add bins and hire a groundskeeper.', 'warn', undefined, 150);
+    if (this.litterParties.size >= thr) this.reportLitter();
     if (c.noAnimals >= Math.max(2, thr * 0.5)) sim.notify('cmp-noanimals', 'Guests are disappointed: there are no animals to see yet!', 'warn', undefined, 150);
-    if (c.price >= thr) sim.notify('cmp-price', 'Many visitors turned away at the gate — admission seems too expensive.', 'warn', undefined, 150);
+    if (c.price >= thr)
+      sim.notify('cmp-price', `Many visitors turned away at the gate — they think about $${Math.round(sim.guestSys.fairPrice)} would be fair.`, 'warn', undefined, 150);
     this.clearComplaints();
+  }
+
+  /** Point at the worst litter spot, with advice that fits the staff and bins already there. */
+  private reportLitter() {
+    const sim = this.sim;
+    const t = this.worstLitterTile;
+    const focus = t >= 0 ? { x: ((t % MAP_W) + 0.5) * TILE, z: (((t / MAP_W) | 0) + 0.5) * TILE } : undefined;
+    let groundskeepers = 0;
+    for (const s of sim.staff.values()) if (s.role === 'groundskeeper') groundskeepers++;
+    const text = !groundskeepers
+      ? 'Guests are disgusted by the litter — hire a groundskeeper and put bins along the paths.'
+      : t >= 0 && !sim.binNear[t]
+        ? 'Guests are disgusted by the litter here — put litter bins along this path.'
+        : 'Guests are disgusted by the litter here — your groundskeepers can’t keep up, hire another.';
+    sim.notify('cmp-litter', text, 'warn', focus, 150);
   }
 }

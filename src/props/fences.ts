@@ -27,7 +27,6 @@ import {
   weatheredWoodMaterial,
 } from './materials';
 import { MultiBatch, type CullView, type InstParams, type SlotRef } from './lod/batched';
-import { applyFade } from './lod/fade';
 import { cloneWithHooks } from './wind';
 
 const HALF = TILE / 2;
@@ -752,10 +751,9 @@ export class FenceRenderer {
     const key = `${p.material.uuid}|${p.groundUv?.axis ?? ''}|${p.groundUv?.tile ?? 0}`;
     let m = this.patched.get(key);
     if (!m) {
+      // no near-camera fade: fences are low or see-through, and a dithered hole
+      // in rails / mesh reads as noise
       m = groundPatched(p.material, p.groundUv);
-      // close-up / follow cameras: fence sections between the camera and the subject dissolve
-      // (glass is already see-through)
-      if (!m.userData.glass) applyFade(m);
       this.patched.set(key, m);
     }
     return m;

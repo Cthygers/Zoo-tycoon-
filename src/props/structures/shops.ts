@@ -225,7 +225,7 @@ function buildDrinks(v: number): THREE.Object3D {
 // Ice-cream cart (1×1): painted cart on two spoked wheels, stainless lids,
 // striped parasol.
 
-export const PARASOL: [number, number][] = [
+const PARASOL: [number, number][] = [
   [0x8e3029, 0xe4d9c0],
   [0x2f6564, 0xe4d9c0],
   [0xb48a35, 0xe7dfca],

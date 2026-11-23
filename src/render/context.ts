@@ -13,7 +13,7 @@ import { BoardwalkDecks } from './boardwalk';
 import { computeCelestial, type Celestial } from './celestial';
 import { MESOPIC_EXPOSURE, installShaderPatches } from './grade';
 import { GrassField, type TuftShape } from './grass';
-import { createGroundMaterial, type GroundUniforms } from './groundMaterial';
+import { createGroundMaterial, type GroundMaterialOptions, type GroundUniforms } from './groundMaterial';
 import { OuterLand } from './outer';
 import { pickGround } from './pick';
 import { PostFX } from './post';
@@ -36,7 +36,21 @@ const SUN_LIGHT_HIGH = 0.55;
 const SUN_LIGHT_LOW = 0.85;
 /** Moonlight luminance on the ground for a full moon high in the sky. */
 const MOON_LUM = 0.08;
+/** Moon shadows are softer than sun shadows (PCF radius multiplier). */
+const MOON_SHADOW_SOFTEN = 1.8;
+/**
+ * Cap on the displayed brightness (luminance × exposure) of a surface facing
+ * the sun: ≈1.6× a sun-facing surface at noon, reached at ≈30° elevation
+ * (see daylight()).
+ */
+export const SUN_FACING_MAX = 4.5;
 const DEG = Math.PI / 180;
+/** The sky environment map is re-captured at most this often while time flows (s)… */
+const ENV_MIN_INTERVAL = 6;
+/** …when the sun moved this far since the last capture… */
+const ENV_SUN_STEP = 4 * DEG;
+/** …or this often anyway (cloud drift). */
+const ENV_MAX_AGE = 40;
 const FOG_DENSITY = 0.00085;
 const GROUND_ALBEDO = new THREE.Color(0.1, 0.12, 0.065);
 const BANK_ALBEDO = new THREE.Color(0.05, 0.07, 0.035);
@@ -142,6 +156,65 @@ export function gradeToneMap(c: THREE.Color, exposure: number, out: THREE.Color)
   );
 }
 
+/** Natural light for one sun elevation (see daylight()). */
+export interface Daylight {
+  /** Sky irradiance scale: SUN_E × the low-sun lift (E_TABLE). */
+  skyE: number;
+  /** Direct-sun share relative to the sky model (SUN_LIGHT_HIGH … LOW). */
+  sunLight: number;
+  /** Untrimmed direct luminance on horizontal ground (what exposure meters). */
+  sunLumMeter: number;
+  /** Ground luminance the exposure meters: direct (untrimmed) + sky. */
+  meterE: number;
+  /** Displayed brightness target of the ground (B_TABLE). */
+  displayB: number;
+  /** Factor on the direct sun that keeps sun-facing surfaces ≤ SUN_FACING_MAX. */
+  sunTrim: number;
+}
+
+const scratchGrey = new THREE.Color();
+
+/**
+ * Sun and sky light for a sun at `sunElev` (radians); writes the direct sun
+ * colour (atmospheric transmittance, partly desaturated) to `sunCol`.
+ *
+ * Below ~25° the light is lifted toward E_TABLE (partial adaptation baked
+ * into the light). Exposure meters the horizontal ground (B_TABLE / meterE),
+ * so under a low sun the surfaces facing it would get several times the
+ * ground's light and wash out: the direct sun is trimmed until they display
+ * at most SUN_FACING_MAX, while the exposure keeps metering the untrimmed
+ * light (golden-hour ground in the sun gets a little dimmer, shade does not).
+ */
+export function daylight(atm: AtmosphereModel, sunElev: number, sunCol: THREE.Color): Daylight {
+  const se = sunElev / DEG;
+  atm.transmittance(sunElev, atm.observerKm, sunCol);
+  // the model reddens the mid-morning / late-afternoon sun a little too much;
+  // keep the deep orange for the last few degrees only
+  const desat = (0.12 + 0.18 * smooth01(4, 12, se)) * (1 - smooth01(25, 45, se));
+  if (desat > 0) {
+    const l = luminance(sunCol);
+    sunCol.lerp(scratchGrey.setRGB(l, l, l), desat);
+  }
+  const sunLight = SUN_LIGHT_HIGH + (SUN_LIGHT_LOW - SUN_LIGHT_HIGH) * (1 - smooth01(4, 32, se));
+  const sunY = Math.max(Math.sin(sunElev), 0);
+  const skyLum = luminance(atm.skyIrradiance) * SUN_E;
+  const natural = luminance(sunCol) * SUN_E * sunLight * sunY + skyLum;
+  let lift = 1;
+  if (se < 25) {
+    const want = tableLog(E_TABLE, se);
+    const k = smooth01(15, 25, se); // blend back to the physical value above 15°
+    lift = Math.min(Math.max(want / Math.max(natural, 1e-7), 1), 3000);
+    lift = Math.exp(Math.log(lift) * (1 - k));
+  }
+  const skyE = SUN_E * lift;
+  const displayB = tableLog(B_TABLE, se);
+  const sunNormal = luminance(sunCol) * skyE * sunLight;
+  const sunLumMeter = sunNormal * sunY;
+  const meterE = sunLumMeter + skyLum * lift;
+  const sunTrim = sunNormal > 0 ? Math.min(1, (SUN_FACING_MAX * meterE) / (sunNormal * displayB)) : 1;
+  return { skyE, sunLight, sunLumMeter, meterE, displayB, sunTrim };
+}
+
 /** Per-tier environment detail (the contract's QualitySettings stay generic). */
 interface EnvTier {
   trees: number;
@@ -153,12 +226,28 @@ interface EnvTier {
   shadowReach: number;
   /** …within a light-space box of at most this half size around the focus (m). */
   shadowMaxHalf: number;
+  /** Ground texture-array resolution and maximum anisotropy. */
+  groundRes: number;
+  anisotropy: number;
+  /** Face size of the sky capture behind the PMREM environment. */
+  envCapture: number;
+  /**
+   * Re-render the shadow map every n-th frame. Its pass is ~30 % of the
+   * render CPU; on low, a frame of shadow lag on moving creatures is the
+   * cheaper trade.
+   */
+  shadowEvery: number;
 }
 const ENV_TIERS: Record<QualityLevel, EnvTier> = {
-  low: { trees: 420, nearSprites: 7, farSprites: 4, grassCapacity: 1000, tuft: { blades: 6, segs: 2 }, shadowReach: 26, shadowMaxHalf: 60 },
-  medium: { trees: 820, nearSprites: 11, farSprites: 5, grassCapacity: 1900, tuft: { blades: 7, segs: 2 }, shadowReach: 42, shadowMaxHalf: 85 },
-  high: { trees: 1400, nearSprites: 14, farSprites: 7, grassCapacity: 3400, tuft: { blades: 8, segs: 3 }, shadowReach: 70, shadowMaxHalf: 120 },
+  low: { trees: 420, nearSprites: 7, farSprites: 4, grassCapacity: 1000, tuft: { blades: 6, segs: 2 }, shadowReach: 26, shadowMaxHalf: 60, groundRes: 256, anisotropy: 2, envCapture: 128, shadowEvery: 2 },
+  medium: { trees: 820, nearSprites: 11, farSprites: 5, grassCapacity: 1900, tuft: { blades: 7, segs: 2 }, shadowReach: 42, shadowMaxHalf: 85, groundRes: 512, anisotropy: 4, envCapture: 256, shadowEvery: 1 },
+  high: { trees: 1400, nearSprites: 14, farSprites: 7, grassCapacity: 3400, tuft: { blades: 8, segs: 3 }, shadowReach: 70, shadowMaxHalf: 120, groundRes: 512, anisotropy: 8, envCapture: 256, shadowEvery: 1 },
 };
+
+/** Ground shader features per tier (compile-time defines). */
+function groundOptions(level: QualityLevel): GroundMaterialOptions {
+  return { antiTile: level === 'high', cloudShadows: level !== 'low', caustics: level !== 'low' };
+}
 
 /** Camera frustum rays (NDC x, y pairs) used to fit the shadow box. */
 const NDC_RAYS = [-1, -1, 1, -1, 1, 1, -1, 1, 0, 1];
@@ -189,10 +278,15 @@ export class RenderContext implements IRenderContext {
   private sky: SkyDome;
   private envScene = new THREE.Scene();
   private pmrem: THREE.PMREMGenerator;
-  private envRT: THREE.WebGLRenderTarget | null = null;
+  /** Sky capture (cube) and its prefiltered environment; both reused across refreshes. */
+  private envCapture: THREE.WebGLCubeRenderTarget | null = null;
+  private envCamera: THREE.CubeCamera | null = null;
+  private envRT: THREE.WebGLCubeRenderTarget | null = null;
   private envSunElev = -999;
   private envAge = 1e9;
   private envDirty = true;
+  /** Sky irradiance luminance when the environment was captured (see applyEnvIntensity). */
+  private envSkyLum = 0;
   private lutSunElev = -999;
   private clockMinute = 12 * 60;
   private clockDay = 1;
@@ -206,6 +300,7 @@ export class RenderContext implements IRenderContext {
   private tileTex: TileIndexTexture;
   private groundMat: THREE.MeshStandardMaterial;
   private groundU: GroundUniforms;
+  private setGroundOptions: (opts: GroundMaterialOptions) => void;
   private terrain: TerrainMesh;
   private outer: OuterLand;
   private water: WaterSurface;
@@ -238,6 +333,7 @@ export class RenderContext implements IRenderContext {
   private height = 1;
   private contextLost = false;
   private lastDt = 1 / 60;
+  private frameCount = 0;
   private shadowHalf = new THREE.Vector2(-1, -1);
 
   // deferred world updates (processed once per frame)
@@ -254,8 +350,7 @@ export class RenderContext implements IRenderContext {
   private onRestored = () => {
     this.contextLost = false;
     this.textures.generate();
-    this.envRT?.dispose();
-    this.envRT = null;
+    this.disposeEnvironment();
     this.envDirty = true;
     this.lutSunElev = -999;
     this.atmosphere.rayTex.needsUpdate = true;
@@ -305,9 +400,7 @@ export class RenderContext implements IRenderContext {
     this.camera.lookAt(this.focus);
 
     // ---- procedural textures
-    const aniso = Math.min(r.capabilities.getMaxAnisotropy(), level === 'low' ? 2 : level === 'medium' ? 4 : 8);
-    this.textures = new GroundTextures(r, level === 'low' ? 256 : 512, aniso);
-    this.textures.generate();
+    this.textures = this.createTextures(env);
 
     // ---- sky
     this.atmosphere = new AtmosphereModel(1.35);
@@ -329,13 +422,10 @@ export class RenderContext implements IRenderContext {
 
     // ---- ground
     this.tileTex = new TileIndexTexture(world);
-    const gm = createGroundMaterial(this.textures, this.tileTex.texture, {
-      antiTile: level === 'high',
-      cloudShadows: level !== 'low',
-      caustics: level !== 'low',
-    });
+    const gm = createGroundMaterial(this.textures, this.tileTex.texture, groundOptions(level));
     this.groundMat = gm.material;
     this.groundU = gm.uniforms;
+    this.setGroundOptions = gm.setOptions;
     this.terrain = new TerrainMesh(world, this.groundMat);
     this.scene.add(this.terrain.mesh);
     this.outer = new OuterLand(world, this.groundMat, {
@@ -394,6 +484,27 @@ export class RenderContext implements IRenderContext {
     this.setFocus(this.focus.x, this.focus.z, this.viewRadius);
   }
 
+  private createTextures(env: EnvTier): GroundTextures {
+    const aniso = Math.min(this.renderer.capabilities.getMaxAnisotropy(), env.anisotropy);
+    const t = new GroundTextures(this.renderer, env.groundRes, aniso);
+    t.generate();
+    return t;
+  }
+
+  /** Regenerate the ground textures for another tier and re-point every user. */
+  private replaceTextures(env: EnvTier) {
+    const old = this.textures;
+    const t = (this.textures = this.createTextures(env));
+    this.groundU.uAlbedoArr.value = t.albedo;
+    this.groundU.uDetailArr.value = t.detail;
+    this.groundU.uNoise.value = t.noise;
+    this.sky.uniforms.uNoise.value = t.noise;
+    this.water.uniforms.uWaves.value = t.waves;
+    this.water.uniforms.uNoise.value = t.noise;
+    this.grass.uniforms.uNoise.value = t.noise;
+    old.dispose();
+  }
+
   private objectsChanged() {
     this.pendingTiles = { x0: 0, z0: 0, x1: MAP_W - 1, z1: MAP_H - 1 };
     this.grass.markDirty();
@@ -404,13 +515,18 @@ export class RenderContext implements IRenderContext {
     s.mapSize.set(this.quality.shadowMapSize, this.quality.shadowMapSize);
     s.bias = -0.0004;
     s.normalBias = 0.03;
-    s.radius = this.quality.level === 'low' ? 1.5 : 2.5;
+    s.radius = this.shadowRadius();
     const cam = s.camera;
     cam.near = 1;
     cam.far = 500;
     s.map?.dispose();
     s.map = null;
     this.shadowHalf.set(-1, -1);
+  }
+
+  /** PCF filter radius (texels) of sun shadows for the current tier. */
+  private shadowRadius(): number {
+    return this.quality.level === 'low' ? 1.5 : 2.5;
   }
 
   // ------------------------------------------------------------ time of day
@@ -426,11 +542,13 @@ export class RenderContext implements IRenderContext {
     const atm = this.atmosphere;
 
     const lutDelta = Math.abs(sunElev - this.lutSunElev);
+    // sky colours change fast near the horizon, slowly under a high sun
+    const lutStep = (sunElev > 25 * DEG ? 1.5 : sunElev > 10 * DEG ? 0.7 : 0.35) * DEG;
     if (lutDelta > 4 * DEG) {
       // big jump (start-up, load, time skip): update synchronously
       atm.compute(sunElev);
       this.lutSunElev = sunElev;
-    } else if (lutDelta > 0.35 * DEG && !atm.busy) {
+    } else if (lutDelta > lutStep && !atm.busy) {
       atm.request(sunElev); // amortised over the next frames in update()
       this.lutSunElev = sunElev;
     }
@@ -441,26 +559,9 @@ export class RenderContext implements IRenderContext {
     this._night = t * t * (3 - 2 * t);
     const night = this._night;
 
-    // ---- natural light: sun (direct) + sky, lifted at low sun (see E_TABLE)
-    atm.transmittance(sunElev, atm.observerKm, this.sunCol);
-    // the model reddens the mid-morning / late-afternoon sun a little too much;
-    // keep the deep orange for the last few degrees only
-    const desat = (0.12 + 0.18 * smooth01(4, 12, se)) * (1 - smooth01(25, 45, se));
-    if (desat > 0) {
-      const l = luminance(this.sunCol);
-      this.sunCol.lerp(this.tmpC.setRGB(l, l, l), desat);
-    }
-    const sunLight = SUN_LIGHT_HIGH + (SUN_LIGHT_LOW - SUN_LIGHT_HIGH) * (1 - smooth01(4, 32, se));
-    const sunY = Math.max(this.sunDirection.y, 0);
-    const natural = luminance(this.sunCol) * SUN_E * sunLight * sunY + luminance(atm.skyIrradiance) * SUN_E;
-    let lift = 1;
-    if (se < 25) {
-      const want = tableLog(E_TABLE, se);
-      const k = smooth01(15, 25, se); // blend back to the physical value above 15°
-      lift = Math.min(Math.max(want / Math.max(natural, 1e-7), 1), 3000);
-      lift = Math.exp(Math.log(lift) * (1 - k));
-    }
-    const skyE = SUN_E * lift;
+    // ---- natural light: sun (direct) + sky, lifted at low sun (see daylight)
+    const dl = daylight(atm, sunElev, this.sunCol);
+    const { skyE, sunLight } = dl;
 
     // ---- moon: fades in as the sky darkens, blue-tinted (night grade desaturates further)
     const moonUp = smooth01(-2, 8, cel.moonElev / DEG);
@@ -473,7 +574,7 @@ export class RenderContext implements IRenderContext {
       .multiply(MOON_TINT)
       .multiplyScalar(tl > 1e-5 ? moonLumTarget / Math.max(luminance(this.tmpC.copy(this.moonCol)), 1e-5) : 0);
 
-    const sunLum = luminance(this.sunCol) * skyE * sunLight * sunY;
+    const sunLum = dl.sunLumMeter * dl.sunTrim;
     const moonLum = luminance(this.moonCol) * Math.max(this.moonDir.y, 0);
     const useMoon = moonLum > sunLum;
     if (useMoon) {
@@ -481,11 +582,13 @@ export class RenderContext implements IRenderContext {
       this.sun.color.copy(this.moonCol);
       this.sun.intensity = 1;
       this.sun.shadow.intensity = 0.7;
+      this.sun.shadow.radius = this.shadowRadius() * MOON_SHADOW_SOFTEN;
     } else {
       this.lightDir.copy(this.sunDirection);
       this.sun.color.copy(this.sunCol);
-      this.sun.intensity = skyE * sunLight;
+      this.sun.intensity = skyE * sunLight * dl.sunTrim;
       this.sun.shadow.intensity = 1;
+      this.sun.shadow.radius = this.shadowRadius();
     }
     if (this.lightDir.y < 0.02) {
       // never light from below the horizon
@@ -555,13 +658,24 @@ export class RenderContext implements IRenderContext {
     this.grass.uniforms.uSunCol.value.copy(this.sun.color).multiplyScalar(this.sun.intensity);
 
     // ---- exposure: displayed brightness per sun elevation (B_TABLE) / scene light
-    const E = Math.max(sunLum, moonLum) + luminance(skyIrr) + 1e-5;
-    const B = tableLog(B_TABLE, se);
-    this.targetExposure = Math.min(Math.max(B / E, 0.7), 20);
+    const E = Math.max(dl.sunLumMeter, moonLum) + luminance(skyIrr) + 1e-5;
+    this.targetExposure = Math.min(Math.max(dl.displayB / E, 0.7), 20);
 
-    // PMREM refresh (≈50 draws + blur passes): only every ~4° of sun motion
-    if (Math.abs(sunElev - this.envSunElev) > 4 * DEG) this.envDirty = true;
+    // environment re-capture (≈50 passes) only every few degrees of sun motion;
+    // in between its brightness follows the sky (applyEnvIntensity)
+    if (Math.abs(sunElev - this.envSunElev) > ENV_SUN_STEP) this.envDirty = true;
+    this.applyEnvIntensity();
     this.post?.setNight(night);
+  }
+
+  /**
+   * Scale the (possibly several degrees old) environment map by how much the
+   * sky irradiance changed since it was captured, so ambient light dims and
+   * brightens continuously between captures.
+   */
+  private applyEnvIntensity(): void {
+    const lum = luminance(this.skyIrr);
+    this.scene.environmentIntensity = this.envSkyLum > 0 ? Math.min(Math.max(lum / this.envSkyLum, 0.25), 4) : 1;
   }
 
   // ------------------------------------------------------------ focus / shadows
@@ -727,22 +841,40 @@ export class RenderContext implements IRenderContext {
     }
   }
 
+  /**
+   * Re-capture the sky into the PMREM environment when the sun moved (or the
+   * clouds drifted) noticeably, at most every ENV_MIN_INTERVAL real seconds so
+   * fast-forward does not pay for it every couple of seconds; a jump (load,
+   * skip, settle) refreshes at once. Both render targets are reused.
+   */
   private updateEnvironment() {
-    // throttle: only when the sun moved noticeably (or every ~40 s for cloud drift)
-    if (!this.envDirty && this.envAge < 40) return;
-    // throttled while time flows; a jump (load, skip, settle) refreshes at once
+    if (!this.envDirty && this.envAge < ENV_MAX_AGE) return;
     const jump = Math.abs(Math.asin(this.sunDirection.y) - this.envSunElev) > 10 * DEG;
-    if (this.envRT && this.envAge < 2 && !jump) return;
-    // the sky is smooth: 128² faces are plenty for rough ground / foliage on low
-    const size = this.quality.level === 'low' ? 128 : 256;
-    const rt = this.pmrem.fromScene(this.envScene, 0, 0.1, 10, { size });
-    const old = this.envRT;
-    this.envRT = rt;
-    this.scene.environment = rt.texture;
-    old?.dispose();
+    if (this.envRT && this.envAge < ENV_MIN_INTERVAL && !jump) return;
+    // the sky is smooth: small capture faces are plenty (PMREM upsamples to 256²)
+    const size = ENV_TIERS[this.quality.level].envCapture;
+    if (!this.envCapture || this.envCapture.width !== size) {
+      this.envCapture?.dispose();
+      this.envCapture = new THREE.WebGLCubeRenderTarget(size, { type: THREE.HalfFloatType, depthBuffer: false });
+      this.envCamera = new THREE.CubeCamera(0.1, 10, this.envCapture);
+    }
+    this.envCamera!.update(this.renderer, this.envScene);
+    this.envRT = this.pmrem.fromCubemap(this.envCapture.texture, this.envRT);
+    this.scene.environment = this.envRT.texture;
     this.envSunElev = Math.asin(this.sunDirection.y);
+    this.envSkyLum = luminance(this.skyIrr);
     this.envDirty = false;
     this.envAge = 0;
+    this.applyEnvIntensity();
+  }
+
+  private disposeEnvironment() {
+    this.envRT?.dispose();
+    this.envRT = null;
+    this.envCapture?.dispose();
+    this.envCapture = null;
+    this.envCamera = null;
+    this.envSkyLum = 0;
   }
 
   render(): void {
@@ -750,6 +882,12 @@ export class RenderContext implements IRenderContext {
     this.renderer.info.reset();
     this.updateEnvironment();
     this.updateShadowFrustum();
+    // (after the environment capture, which would otherwise consume needsUpdate)
+    const sm = this.renderer.shadowMap;
+    const every = ENV_TIERS[this.quality.level].shadowEvery;
+    sm.autoUpdate = every <= 1;
+    if (every > 1 && (this.frameCount % every === 0 || !this.sun.shadow.map)) sm.needsUpdate = true;
+    this.frameCount++;
     if (this.post) this.post.render(this.lastDt);
     else this.renderer.render(this.scene, this.camera);
   }
@@ -784,6 +922,11 @@ export class RenderContext implements IRenderContext {
     this.shadowHalf.set(-1, -1); // force frustum refresh
     const envPrev = ENV_TIERS[prev.level],
       env = ENV_TIERS[level];
+    // ground: tier textures (resolution / anisotropy) and shader features
+    const newTextures = envPrev.groundRes !== env.groundRes || envPrev.anisotropy !== env.anisotropy;
+    if (newTextures) this.replaceTextures(env);
+    this.setGroundOptions(groundOptions(level));
+    if (envPrev.envCapture !== env.envCapture) this.envDirty = true;
     if (envPrev.grassCapacity !== env.grassCapacity || envPrev.tuft.blades !== env.tuft.blades || envPrev.tuft.segs !== env.tuft.segs) {
       this.scene.remove(this.grass.mesh);
       this.grass.dispose();
@@ -791,7 +934,7 @@ export class RenderContext implements IRenderContext {
       this.scene.add(this.grass.mesh);
     }
     this.grass.configure(q.grassDensity, q.detailDistance);
-    if (envPrev.trees !== env.trees || envPrev.nearSprites !== env.nearSprites || envPrev.farSprites !== env.farSprites) {
+    if (newTextures || envPrev.trees !== env.trees || envPrev.nearSprites !== env.nearSprites || envPrev.farSprites !== env.farSprites) {
       this.outer.setForest({
         treeCount: env.trees,
         nearSprites: env.nearSprites,
@@ -824,7 +967,7 @@ export class RenderContext implements IRenderContext {
     this.groundMat.dispose();
     this.tileTex.dispose();
     this.sky.dispose();
-    this.envRT?.dispose();
+    this.disposeEnvironment();
     this.pmrem.dispose();
     this.atmosphere.dispose();
     this.textures.dispose();

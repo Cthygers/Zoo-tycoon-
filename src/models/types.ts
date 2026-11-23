@@ -79,6 +79,13 @@ export interface CoatSample {
   pw(part: string): number;
   /** Smallest raw SDF distance (m) from the sample to any primitive tagged `part` (1e3 if none). */
   pd(part: string): number;
+  /**
+   * Ambient occlusion 0 (open) … 1 (deep crease) within `radius` metres of
+   * the surface, from the shape itself: bake skin folds, horn bases and other
+   * cavities into the colour (they read on every tier, also without micro
+   * detail). Costs a few field evaluations per vertex — call it only where needed.
+   */
+  ao(radius: number): number;
   /** Base coat colour (linear). */
   readonly color: THREE.Color;
   /** Pattern colour (stripes / patches), used where the pattern mask is on. */
@@ -283,6 +290,13 @@ export interface CreatureDesign {
   babyScale?: number;
   /** Extra head scale of a newborn, default 1.3. */
   babyHead?: number;
+  /**
+   * Juvenile scale of single bones (children inherit it), easing to 1 over
+   * growth 0.15 … 0.95: features that grow in with age (tusks, horns ≈ 0.05–0.1;
+   * give them their own bone at the base) or that young animals have
+   * oversized (cub paws > 1).
+   */
+  babyBones?: Record<string, number>;
   /** Override computed standing height (m). */
   height?: number;
   /** Override computed radius (m). */
@@ -298,8 +312,13 @@ export interface DesignContext {
 /** What a species file exports (default export). */
 export interface SpeciesModel {
   id: string;
-  /** Male and female use different meshes (e.g. lion mane). */
+  /**
+   * Male and female use different meshes (e.g. lion mane). Young animals show
+   * no sexual dimorphism: below growth `maturesAt` males use the female mesh.
+   */
   dimorphic?: boolean;
+  /** Growth (0..1) from which a dimorphic male uses the male mesh (default 0.7). */
+  maturesAt?: number;
   design(ctx: DesignContext): CreatureDesign;
   /** Per-instance uniform scale (default: males 1.0, females 0.94, ±3% jitter). */
   instanceScale?(sex: 'M' | 'F', rand: number): number;

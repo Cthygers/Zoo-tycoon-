@@ -17,8 +17,9 @@
 //    tier.shadowNear / shadowFar metres of the camera focus;
 //  - LOD: templates whose PropSpec has buildLod get both versions; objects
 //    swap by camera distance with hysteresis (checked every few frames).
-// Vegetation materials get a near-camera dithered fade (lod/fade.ts); lamps
-// and lit windows get ground light pools + halos (lights/nightlights.ts).
+// Vegetation materials get a near-camera fade (lod/fade.ts); lamps and lit
+// windows get ground light pools + halos (lights/nightlights.ts). Templates are
+// built for the types in use while loading (prewarm), others on first use.
 
 import * as THREE from 'three';
 import { TILE } from '../core/constants';
@@ -27,20 +28,19 @@ import type { EventBus, TileRect } from '../core/events';
 import { hashFloat } from '../core/rng';
 import type { Litter, ObjectDef, PlacedObject } from '../core/types';
 import type { World } from '../core/world';
-import { FENCES } from '../data/fences';
-import { OBJECTS, OBJECTS_BY_ID, rotatedSize } from '../data/objects';
+import { OBJECTS_BY_ID, rotatedSize } from '../data/objects';
 import { createFenceSegment, disposeFenceStyles, fenceDetail, fenceStyle, FenceRenderer } from './fences';
 import { Highlighter } from './highlight';
 import { findEmitters, NightLights, type LocalEmitter } from './lights/nightlights';
 import { LitterRenderer } from './litter';
 import { frustumToArray, InstancedBatch, MultiBatch, supportsMultiDraw, type CullView, type InstParams, type PropBatch } from './lod/batched';
 import { autoLod } from './lod/autolod';
-import { applyFade, fadeUniforms, updateFade, wantsFade } from './lod/fade';
+import { applyFade, fadeModeOf, fadeUniforms, updateFade } from './lod/fade';
 import { propsTier, type PropsTier } from './lod/tiers';
 import { concreteMaterial, disposePropMaterials, projectBoxUVs, surfaceTextures } from './materials';
-import * as natureModule from './nature';
+import { atlasSteps, disposeNatureResources, paintAtlasesOffThread, withQuality } from './nature';
 import { PROP_SPECS, type PropSpec } from './registry';
-import * as structuresModule from './structures';
+import { disposeStructures } from './structures';
 import { applyWind, cloneWithHooks, disposeWind, hasSway, setupWindMesh, updateWind } from './wind';
 
 export { supportsMultiDraw } from './lod/batched';
@@ -51,13 +51,6 @@ const DEFAULT_GLOW = new THREE.Color(0xffd9a0);
 const LOD_INTERVAL = 8;
 /** Far LOD level starts at this multiple of the tier's lodDist. */
 const LOD_FAR = 2.2;
-
-// Optional hooks of the builder modules (looked up by name so a missing one never breaks the layer).
-type ProgressFn = (fraction: number) => void;
-function moduleFn<T extends (...args: never[]) => unknown>(mod: object, name: string): T | null {
-  const f = (mod as Record<string, unknown>)[name];
-  return typeof f === 'function' ? (f as T) : null;
-}
 
 // ---------------------------------------------------------------------------
 // Templates
@@ -224,6 +217,8 @@ export class PropsLayer implements IPropsLayer {
   private prewarmMs = 0;
   private lodDirty = true;
   private cullDirty = true;
+  /** world.objects must be (re-)added before the next frame / pick. */
+  private pendingRebuild = true;
 
   // culling state
   private readonly view: CullView = {
@@ -258,7 +253,6 @@ export class PropsLayer implements IPropsLayer {
     this.tier = propsTier(quality);
     const want = opts.backend ?? 'auto';
     this.backend = want === 'auto' ? (supportsMultiDraw() ? 'batched' : 'instanced') : want;
-    moduleFn<(l: string) => void>(natureModule, 'setNatureQuality')?.(quality.level);
     this.root.name = 'props';
     this.objRoot.name = 'objects';
     this.uniqueRoot.name = 'unique-objects';
@@ -268,19 +262,22 @@ export class PropsLayer implements IPropsLayer {
     this.highlight = new Highlighter(world);
     this.night = new NightLights(world);
     this.night.setPointLights(this.tier.pointLights);
+    this.night.setWarmFill(!quality.postFX);
     this.root.add(this.objRoot, this.uniqueRoot, this.fences.group, this.litter.group, this.highlight.group, this.night.group);
     scene.add(this.root);
 
+    // The world's objects are added by prewarm() (loading screen, time-sliced)
+    // or on the first update(), never here: building their templates can take
+    // seconds on a phone and must not run as one task.
     this.unsub.push(
       events.on('objectAdded', ({ id }) => {
         const o = world.objects.get(id);
-        if (o) this.addObject(o);
+        if (o && !this.pendingRebuild) this.addObject(o);
       }),
       events.on('objectRemoved', ({ id }) => this.removeObject(id)),
-      events.on('worldReset', () => this.rebuildAll()),
+      events.on('worldReset', () => (this.pendingRebuild = true)),
       events.on('terrainChanged', (r) => this.refreshRect(r)),
     );
-    this.rebuildAll();
   }
 
   // ------------------------------------------------------------ templates
@@ -416,8 +413,11 @@ export class PropsLayer implements IPropsLayer {
       if (m.constructor === THREE.MeshStandardMaterial && !Object.prototype.hasOwnProperty.call(m, 'onBeforeCompile')) this.plainMats.add(m);
     }
     if (hasSway(m)) applyWind(m);
-    if (!this.fadeMats.has(m) && wantsFade(m)) {
-      applyFade(m);
+    const fade = this.fadeMats.has(m) ? null : fadeModeOf(m);
+    if (fade) {
+      applyFade(m, fade);
+      // MSAA tiers: the fade resolves as translucency instead of a dither
+      m.alphaToCoverage = this.quality.antialias;
       this.fadeMats.add(m);
     }
     const ne = m.userData.nightEmissive;
@@ -628,6 +628,7 @@ export class PropsLayer implements IPropsLayer {
   }
 
   private rebuildAll(): void {
+    this.pendingRebuild = false;
     for (const b of this.batchList) b.clear();
     for (const r of this.uniques) if (r.unique) this.uniqueRoot.remove(r.unique);
     this.uniques.length = 0;
@@ -682,6 +683,7 @@ export class PropsLayer implements IPropsLayer {
 
   update(dt: number, nightFactor: number, camera: THREE.Camera): void {
     if (this.disposed) return;
+    if (this.pendingRebuild) this.rebuildAll();
     this.time += dt;
     this.frame++;
     updateWind(dt);
@@ -792,6 +794,7 @@ export class PropsLayer implements IPropsLayer {
   // ------------------------------------------------------------ picking / selection
 
   pickObject(raycaster: THREE.Raycaster): number | null {
+    if (this.pendingRebuild) this.rebuildAll();
     if (this.backend === 'instanced') for (const b of this.batchList) if (b.dirty) b.cull(this.view);
     let best = Infinity;
     let bestId: number | null = null;
@@ -902,13 +905,16 @@ export class PropsLayer implements IPropsLayer {
     this.fences.setShadowRange(this.tier.shadowNear, this.tier.shadowFar, this.tier.fenceLod);
     this.litter.setShadows(quality.shadows);
     this.night.setPointLights(this.tier.pointLights);
+    this.night.setWarmFill(!quality.postFX);
     for (const b of this.batchList) b.setShadows(quality.shadows);
     for (const m of this.nightMats) m.emissiveIntensity = Math.max(this.nightLevel, 0) * this.glowOf(m.userData.nightEmissive as number);
-    if (prev.level !== quality.level) {
-      // builders take the tier (leaf-card counts, segments): rebuild templates
-      moduleFn<(l: string) => void>(natureModule, 'setNatureQuality')?.(quality.level);
-      this.disposeTemplates(false);
+    for (const m of this.fadeMats) {
+      if (m.alphaToCoverage === quality.antialias) continue;
+      m.alphaToCoverage = quality.antialias;
+      m.needsUpdate = true;
     }
+    // builders take the tier (leaf-card counts, segments): rebuild templates
+    if (prev.level !== quality.level) this.disposeTemplates(false);
     // re-add every object with the new distances / shadow rules
     this.rebuildAll();
     this.lodDirty = true;
@@ -950,47 +956,58 @@ export class PropsLayer implements IPropsLayer {
     this.sizeClass.clear();
   }
 
+  /**
+   * Loading screen: build what the current world draws, in short main-thread
+   * tasks so the loading bar keeps moving — the foliage atlases are painted
+   * in a worker, then the shared leaf sheets are composed, one template (def
+   * variant with its LODs and textures) is built per object type in use,
+   * the fence styles in use, and finally the instances. Other object types are
+   * built on first use (build-menu thumbnail / ghost or placement), so a new
+   * zoo only pays for the handful of types it starts with.
+   */
   async prewarm(onProgress?: (fraction: number) => void): Promise<void> {
     const t0 = performance.now();
-    const report = (f: number) => onProgress?.(Math.min(1, Math.max(0, f)));
-    const breathe = () => new Promise<void>((r) => setTimeout(r, 0));
-    report(0);
-    // 1. textures / materials of the builder modules
-    const nat = moduleFn<(cb?: ProgressFn) => Promise<void> | void>(natureModule, 'prewarmNatureAsync');
-    if (nat) await nat((f) => report(0.3 * f));
-    report(0.3);
-    await breathe();
-    if (this.disposed) return;
-    const st = moduleFn<(cb?: ProgressFn) => Promise<void> | void>(structuresModule, 'prewarmStructuresAsync');
-    if (st) await st((f) => report(0.3 + 0.2 * f));
-    report(0.5);
-    await breathe();
-    // 2. every template / variant (+ LOD), time-sliced so the loading bar animates
-    const jobs: [string, number][] = [];
-    for (const def of OBJECTS) {
-      if (def.notBuildable && !PROP_SPECS[def.id]) continue;
-      const spec = this.specFor(def.id);
-      for (let v = 0; v < Math.max(1, spec.variants | 0); v++) jobs.push([def.id, v]);
+    await withQuality(this.quality, () => paintAtlasesOffThread((f) => onProgress?.(f * 0.5)));
+    // the shared leaf sheets (and any atlas the worker could not paint), at this layer's tier
+    const steps: (() => void)[] = atlasSteps().map((step) => () => withQuality(this.quality, step));
+    const used = new Set<string>();
+    for (const o of this.world.objects.values()) {
+      if (!OBJECTS_BY_ID[o.defId]) continue;
+      const variant = this.variantOf(this.specFor(o.defId), o.seed);
+      const key = `${o.defId}#${variant}`;
+      if (used.has(key)) continue;
+      used.add(key);
+      steps.push(() => void this.template(o.defId, variant));
     }
+    const detail = fenceDetail(this.quality);
+    for (const id of this.fencesInUse()) {
+      steps.push(() => void fenceStyle(id, detail));
+      // far version of detailed fences (batched back-end, see FenceRenderer)
+      if (this.backend === 'batched' && detail > 0 && this.tier.fenceLod > 0) steps.push(() => void fenceStyle(id, 0));
+    }
+    steps.push(() => this.rebuildAll());
     let slice = performance.now();
-    for (let i = 0; i < jobs.length; i++) {
+    for (let i = 0; i < steps.length; i++) {
       if (this.disposed) return;
       try {
-        this.template(jobs[i][0], jobs[i][1]);
+        steps[i]();
       } catch (err) {
-        console.error(`[props] prewarm of "${jobs[i][0]}" failed`, err);
+        console.error('[props] prewarm step failed', err);
       }
-      report(0.5 + (0.45 * (i + 1)) / jobs.length);
-      if (performance.now() - slice > 14) {
-        await breathe();
+      onProgress?.(0.5 + (0.5 * (i + 1)) / steps.length);
+      if (performance.now() - slice > 12) {
+        await new Promise<void>((r) => setTimeout(r, 0));
         slice = performance.now();
       }
     }
-    // 3. fence styles at the current detail
-    const detail = fenceDetail(this.quality);
-    for (const f of FENCES) fenceStyle(f.id, detail);
     this.prewarmMs = Math.round(performance.now() - t0);
-    report(1);
+  }
+
+  /** Fence ids present in the world. */
+  private fencesInUse(): Set<number> {
+    const ids = new Set<number>();
+    for (const arr of [this.world.hFence, this.world.vFence]) for (const id of arr) if (id) ids.add(id);
+    return ids;
   }
 
   dispose(): void {
@@ -1007,8 +1024,8 @@ export class PropsLayer implements IPropsLayer {
     this.highlight.dispose();
     this.night.dispose();
     disposePropMaterials();
-    moduleFn<() => void>(natureModule, 'disposeNatureResources')?.();
-    moduleFn<() => void>(structuresModule, 'disposeStructures')?.();
+    disposeNatureResources();
+    disposeStructures();
     this.root.removeFromParent();
   }
 }

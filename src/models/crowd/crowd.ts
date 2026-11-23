@@ -47,6 +47,8 @@ export class CrowdRenderer implements CrowdHost {
   readonly root: THREE.Group;
   private readonly batches = new Map<string, SkinnedBatch>();
   private readonly materials = new Map<string, BatchMaterials>();
+  /** Every live model created with this host (batched, standalone or detached). */
+  private readonly registered = new Set<RiggedModel>();
   private readonly models = new Set<RiggedModel>();
   /** Models rendered standalone (re-checked each frame in case they move into the scene). */
   private readonly loose = new Set<RiggedModel>();
@@ -54,7 +56,8 @@ export class CrowdRenderer implements CrowdHost {
   private itemMaterial: THREE.Material | null = null;
   private policy: LodPolicy;
   private readonly queue: { chain: LodChain; level: number }[] = [];
-  private readonly queued = new Set<string>();
+  /** LOD levels already queued per chain (bit mask), so a rebuilt mesh with a reused key still gets its LODs. */
+  private readonly queued = new WeakMap<LodChain, number>();
   /** Force every creature to one LOD level (debug / harness), -1 = automatic. */
   forceLod = -1;
   /**
@@ -98,6 +101,14 @@ export class CrowdRenderer implements CrowdHost {
   }
 
   // ---------------------------------------------------------------- CrowdHost
+  register(model: RiggedModel): void {
+    this.registered.add(model);
+  }
+
+  unbatch(model: RiggedModel): void {
+    if (model.isBatched) this.detach(model);
+  }
+
   parentChanged(model: RiggedModel): void {
     const want = model.object.parent !== null && this.inScene(model.object);
     if (want && !model.isBatched) this.attach(model);
@@ -111,6 +122,31 @@ export class CrowdRenderer implements CrowdHost {
   release(model: RiggedModel): void {
     if (model.isBatched) this.detach(model);
     this.loose.delete(model);
+    this.registered.delete(model);
+  }
+
+  /** Every live model of this host (for re-picking meshes after a quality change). */
+  liveModels(): IterableIterator<RiggedModel> {
+    return this.registered.values();
+  }
+
+  /**
+   * Dispose the batches no instance uses any more (and their materials), e.g.
+   * the previous tier's batches once every model moved to its new mesh.
+   */
+  pruneEmptyBatches(): void {
+    for (const [key, b] of this.batches) {
+      if (b.live > 0) continue;
+      b.removeFromParent();
+      b.dispose();
+      this.batches.delete(key);
+      const m = this.materials.get(key);
+      if (m) {
+        m.material.dispose();
+        m.depth.dispose();
+        this.materials.delete(key);
+      }
+    }
   }
 
   // ---------------------------------------------------------------- batches
@@ -176,15 +212,15 @@ export class CrowdRenderer implements CrowdHost {
         ids[l] = id;
         return id;
       }
-      this.request(chain, l, model.asset.key);
+      this.request(chain, l);
     }
     return ids[0];
   }
 
-  private request(chain: LodChain, level: number, key: string): void {
-    const k = `${key}#${level}`;
-    if (this.queued.has(k)) return;
-    this.queued.add(k);
+  private request(chain: LodChain, level: number): void {
+    const mask = this.queued.get(chain) ?? 0;
+    if (mask & (1 << level)) return;
+    this.queued.set(chain, mask | (1 << level));
     this.queue.push({ chain, level });
   }
 
@@ -194,6 +230,10 @@ export class CrowdRenderer implements CrowdHost {
     // at least one clustering pass per frame, then as many as fit in the budget
     do {
       const job = this.queue[0];
+      if (job.chain.disposed) {
+        this.queue.shift();
+        continue;
+      }
       const t = now();
       let done = true;
       try {

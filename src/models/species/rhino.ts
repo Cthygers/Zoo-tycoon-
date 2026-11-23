@@ -139,10 +139,14 @@ function headPrims(): Prim[] {
   ];
 }
 
+/** Horn bases (head-local, before HEAD_T): the horn bones sit here so horns grow in with age. */
+const FRONT_HORN = hp(0.84, 0.16);
+const REAR_HORN = hp(0.52, 0.16);
+
 function hornPrims(male: boolean): Prim[] {
   const g = male ? 1 : 0.86;
   // front horn: broad base on the nose, curving slightly forward then back
-  const base = hp(0.84, 0.16);
+  const base = FRONT_HORN;
   const fh: Vec3[] = [
     base,
     [0, base[1] + 0.17 * g, base[2] + 0.02],
@@ -150,11 +154,11 @@ function hornPrims(male: boolean): Prim[] {
     [0, base[1] + 0.5 * g, base[2] - 0.05],
     [0, base[1] + 0.62 * g, base[2] - 0.12],
   ];
-  const rb = hp(0.52, 0.16);
+  const rb = REAR_HORN;
   const rh: Vec3[] = [rb, [0, rb[1] + 0.12, rb[2] - 0.0], [0, rb[1] + 0.22, rb[2] - 0.04]];
   return [
-    ...tube('head', fh, [0.115, 0.09, 0.062, 0.035, 0.01], { blend: 0.03, part: 'horn', region: 'horns' }),
-    ...tube('head', rh, [0.085, 0.055, 0.012], { blend: 0.03, part: 'horn', region: 'horns' }),
+    ...tube('horn_1', fh, [0.115, 0.09, 0.062, 0.035, 0.01], { blend: 0.03, part: 'horn', region: 'horns', skinWeight: 4 }),
+    ...tube('horn_2', rh, [0.085, 0.055, 0.012], { blend: 0.03, part: 'hornRear', region: 'horns', skinWeight: 4 }),
   ];
 }
 
@@ -222,8 +226,15 @@ function tailPrims(): Prim[] {
 const SKIN = 0x5f584f;
 const TOP = 0x6f675b;
 const MUD = 0x5f4f3e;
-const HORN = 0x4b4238;
-const HORN_TIP = 0x6f665a;
+// keratin: dark, warm brown at the base, worn paler and greyer towards the tip
+const HORN_BASE = 0x35291e;
+const HORN_MID = 0x4a3b2c;
+const HORN_TIP = 0x8a7d68;
+/** Front / rear horn: base (model space) and height, for the keratin ramp. */
+const hornRamp = (male: boolean) => ({
+  front: { y: H(FRONT_HORN)[1], h: 0.62 * (male ? 1 : 0.86) * HEAD_T.scale },
+  rear: { y: H(REAR_HORN)[1], h: 0.22 * HEAD_T.scale },
+});
 
 // fold lines (segments) for crease stripes: [a, b]
 const FOLDS: [Vec3, Vec3][] = [
@@ -233,7 +244,8 @@ const FOLDS: [Vec3, Vec3][] = [
   [[0.22, 1.05, -1.2], [0.42, 0.75, -1.05]],
 ];
 
-function rhinoCoat(eye: Vec3) {
+function rhinoCoat(eye: Vec3, male: boolean) {
+  const ramp = hornRamp(male);
   return (c: CoatSample): void => {
     const { x, y, z } = c;
     const ax = Math.abs(x);
@@ -264,14 +276,23 @@ function rhinoCoat(eye: Vec3) {
       c.w = 0.14 * smooth(1.25, 1.0, y);
     }
     if (c.pw('fold') > 0.2) blendHex(c.color, 0x3e3933, 0.5);
-    // horns: dark keratin, worn paler towards the tip
-    if (c.part === 'horn') {
-      c.color.setHex(HORN);
-      blendHex(c.color, HORN_TIP, smooth(1.4, 1.9, y) * 0.6 + n * 0.15);
+    // horns: keratin with fibrous vertical streaks, dark and warm at the base,
+    // worn paler towards the tip, a little glossy
+    if (c.part === 'horn' || c.part === 'hornRear') {
+      const r = c.part === 'horn' ? ramp.front : ramp.rear;
+      const t = clamp01((y - r.y) / r.h);
+      const fib = fbm(x * 60, y * 6, z * 60, 2, 94);
+      c.color.setHex(HORN_BASE);
+      blendHex(c.color, HORN_MID, smooth(0.05, 0.5, t));
+      blendHex(c.color, HORN_TIP, smooth(0.62, 1.0, t) * 0.8 + fib * 0.12);
+      c.color.multiplyScalar(1 - 0.35 * c.ao(0.08));
       c.w = 0;
-      c.gloss = 0.5;
+      c.gloss = 0.55;
       return;
     }
+    // dark cavity line where the horns grow out of the skin
+    const hornD = Math.min(c.pd('horn'), c.pd('hornRear'));
+    blendHex(c.color, 0x2a241f, smooth(0.045, 0.004, hornD) * 0.7);
     // lip: slightly paler, nostrils / mouth line dark
     if (c.pd('mouth') < 0.025) blendHex(c.color, 0x3b302b, smooth(0.025, 0.005, c.pd('mouth')) * 0.85);
     // big mud / dust patches
@@ -293,6 +314,11 @@ function rhinoCoat(eye: Vec3) {
       c.fur = 3;
       c.w = 0;
     }
+    // folds, the gaps between legs and belly, around the ears and eyes: baked
+    // occlusion keeps the heavy relief readable on every tier
+    const occ = c.ao(0.16);
+    c.color.multiplyScalar(1 - 0.5 * occ);
+    c.color2.multiplyScalar(1 - 0.5 * occ);
   };
 }
 
@@ -467,7 +493,13 @@ function makeDriver(height: number, walkSpeed: number, runSpeed: number) {
 
 function design(ctx: DesignContext): CreatureDesign {
   const male = ctx.sex === 'M';
-  const sk = quadSkeleton(J);
+  const sk = quadSkeleton({
+    ...J,
+    extra: [
+      { name: 'horn_1', parent: 'head', pos: H(FRONT_HORN) },
+      { name: 'horn_2', parent: 'head', pos: H(REAR_HORN) },
+    ],
+  });
   const head = withRegion(transformPrims(headPrims(), HEAD_T), 'head');
   const prims: Prim[] = [
     ...bodyPrims(),
@@ -489,7 +521,8 @@ function design(ctx: DesignContext): CreatureDesign {
     resolution: 0.88,
     regions: {
       head: { scale: 0.52 },
-      horns: { scale: 0.38, aniso: [1, 1.5, 1] },
+      // cell cap: the tapering tips survive the coarse low tier
+      horns: { scale: 0.38, aniso: [1, 1.5, 1], cell: 0.034 },
       ears: { scale: 0.34 },
       FL: { scale: 0.68, aniso: [1, 1.4, 1] },
       FR: { scale: 0.68, aniso: [1, 1.4, 1] },
@@ -497,12 +530,14 @@ function design(ctx: DesignContext): CreatureDesign {
       HR: { scale: 0.68, aniso: [1, 1.4, 1] },
       tail: { scale: 0.34, aniso: [1, 2, 1] },
     },
-    coat: rhinoCoat(eye),
+    coat: rhinoCoat(eye, male),
     look: { skin: 'wrinkled', pattern: 'stripes', roughness: 0.9, sheen: 0.05, grain: 0.014, bump: 0.5, mottle: 0.18 },
     eyes: [{ bone: 'head', pos: eye, radius: 0.018, color: 0x1e140c }],
     anim: driver(makeDriver(ctx.def.height, ctx.def.walkSpeed, ctx.def.runSpeed)),
     babyScale: 0.3,
     babyHead: 1.2,
+    // calves are born hornless; the horns grow from the nasal bosses
+    babyBones: { horn_1: 0.08, horn_2: 0.08 },
     height: 1.95,
     radius: 0.9,
   };

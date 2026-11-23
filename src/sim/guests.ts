@@ -5,7 +5,7 @@
 // shops and restrooms (see queues.ts), rest on benches, drop litter, donate and
 // head home together.
 
-import { CLOSE_HOUR, GAME_MINUTES_PER_SECOND, MAP_H, MAP_W, OPEN_HOUR, TILE } from '../core/constants';
+import { CLOSE_HOUR, DEFAULT_ADMISSION, GAME_MINUTES_PER_SECOND, MAP_H, MAP_W, OPEN_HOUR, TILE } from '../core/constants';
 import type { PlacedObject, ShopKind } from '../core/types';
 import { FENCES_BY_ID } from '../data/fences';
 import { OBJECTS_BY_ID } from '../data/objects';
@@ -22,16 +22,27 @@ const HALF_DX = [0, 1, -1, 0, 1];
 const HALF_DZ = [0, 0, 1, 1, 1];
 const DX = [1, -1, 0, 0];
 const DZ = [0, 0, 1, -1];
-/** Minute of day after which remaining guests are removed (escorted out). */
+/** From this minute of the day security shows the last visitors out (they hurry to the gate). */
 const LATE_CLEAR = (CLOSE_HOUR + 1.5) * 60;
 /** Average party size (arrival rates are in people, parties spawn as units). */
 const AVG_PARTY = 2.25;
 /**
- * Most people the ticket booths let in per game hour. People walk in real time
- * while the clock runs 240× faster, so this also caps how crowded the entrance
- * avenue gets on a busy morning (~1.6 people per real second at most).
+ * People the ticket booths let in per game hour: a base plus a little per exhibit,
+ * so a bigger zoo welcomes more visitors. People walk in real time while the clock
+ * runs GAME_MINUTES_PER_SECOND game minutes per second (an hour is 20 s), so this
+ * also caps how crowded the entrance avenue gets on a busy morning.
  */
-const GATE_PER_HOUR = 20;
+const GATE_BASE = 14;
+const GATE_PER_EXHIBIT = 2.5;
+const GATE_MAX = 30;
+/** Ticket price guests think is fair: a base plus this much per point of the zoo's attraction. */
+const FAIR_BASE = 13.5;
+const FAIR_PER_ATTRACTION = 0.25;
+/** Share of guests who stop to look at an exhibit they pass on the way somewhere else. */
+const GLANCE_CHANCE = 0.7;
+/** With more than this many tiles to go, guests walk briskly (this much faster than their stroll). */
+const BRISK_AFTER = 12;
+const BRISK = 1.2;
 /**
  * Relative arrival rate for each hour of the day: a morning rush after the gates
  * open, a lunchtime plateau, then fewer and fewer newcomers towards closing.
@@ -41,6 +52,21 @@ const ARRIVALS_BY_HOUR = [0, 0, 0, 0, 0, 0, 0, 0, 0.8, 1.3, 1.4, 1.25, 1.05, 0.9
 const FOLLOW_WALK = [-0.45, -0.62, 0.45, -0.62, 0, -1.2];
 const FOLLOW_STAND = [0.56, -0.2, -0.56, -0.2, 0, -0.85];
 const FOLLOW_BESIDE = [0.56, 0, -0.56, 0, 1.12, 0];
+
+/** Options for GuestSystem.wantService. */
+interface ServiceOpts {
+  /** Farthest path distance (tiles) worth walking. */
+  maxDist?: number;
+  /** Skip lines longer than this. */
+  maxLine?: number;
+  /** A spur-of-the-moment buy: no thoughts or complaints when nothing suits. */
+  impulse?: boolean;
+  /** The need is not pressing: a shop far off the route to the planned exhibit can wait. */
+  canWait?: boolean;
+  /** A substitute kind of service (counts as a little farther). */
+  alt?: ServiceKind;
+}
+type ServiceAnswer = 'ok' | 'later' | 'full' | 'far' | 'cutoff' | 'broke' | 'none';
 
 /** Party-wide minimum of the basic needs (filled by partyNeeds). */
 interface PartyNeeds {
@@ -61,8 +87,12 @@ export class GuestSystem {
   /** Guests allowed in the park right now (scales with zoo size). */
   capacity = 40;
   private capRev = -1;
-  /** Admission value factor from the last arrival-rate estimate (1 = fair price). */
+  /** Ticket price (dollars) visitors think the zoo is worth (refreshed with the arrival rate). */
+  fairPrice = DEFAULT_ADMISSION;
+  /** Share of would-be visitors who pay at the current price (above 1 = a bargain draws extra). */
   priceFactor = 1;
+  /** People per game hour who look at the price and walk away (from the last estimate). */
+  private turnedAway = 0;
   private deterred = 0;
   private pn: PartyNeeds = { hunger: 1, thirst: 1, bladder: 1, energy: 1, kids: 0 };
   /** Diagnostics since the simulation was created (not saved). */
@@ -142,10 +172,13 @@ export class GuestSystem {
     return a + (b - a) * f;
   }
 
-  /** Expected arrivals (people) per game hour right now. */
-  arrivalRate(): number {
+  private appealTmp = new Map<string, number>();
+
+  /** Draw of the animals on show (species appeal, herd sizes, how well they look). */
+  private attraction(): number {
     const sim = this.sim;
-    const appeal = new Map<string, number>();
+    const appeal = this.appealTmp;
+    appeal.clear();
     let count = 0;
     let happy = 0;
     for (const a of sim.animals.values()) {
@@ -158,14 +191,38 @@ export class GuestSystem {
     for (const v of appeal.values()) attraction += v;
     attraction += Math.min(20, count * 0.4);
     if (count) attraction *= 0.7 + 0.3 * (happy / count);
-    attraction = Math.min(130, attraction);
-    const fair = 8 + attraction * 0.6;
-    const priceFactor = Math.max(0.05, Math.min(1.5, 1.5 - (0.5 * sim.admissionPrice) / fair));
-    this.priceFactor = priceFactor;
+    return Math.min(130, attraction);
+  }
+
+  /** Habitats with animals guests can see. */
+  private exhibitCount(): number {
+    let n = 0;
+    for (const hab of this.sim.world.habitats.values()) if (hab.viewTiles.length && this.sim.population(hab.id).count.size) n++;
+    return n;
+  }
+
+  /**
+   * Expected paying arrivals (people) per game hour right now. Also refreshes
+   * `fairPrice`, `priceFactor` and how many walk away because of the price.
+   */
+  arrivalRate(): number {
+    const sim = this.sim;
+    const attraction = this.attraction();
+    // more and better exhibits, and a good reputation, make a dearer ticket acceptable
+    this.fairPrice = FAIR_BASE + FAIR_PER_ATTRACTION * attraction * (0.6 + (0.6 * sim.rating) / 100);
+    const r = sim.admissionPrice / this.fairPrice;
+    // a bargain draws a few more people; above the fair price fewer and fewer will pay
+    this.priceFactor = r <= 1 ? 1 + 0.3 * (1 - r) : Math.max(0.03, 1 - 1.4 * (r - 1));
     // word of mouth saturates: a huge zoo is not proportionally busier than a big one
     const draw = 2 + (attraction * 0.7) / (1 + attraction / 60);
-    const demand = draw * (0.35 + (sim.rating / 100) * 1.1) * priceFactor;
-    return Math.min(demand * GuestSystem.arrivalCurve(sim.minuteOfDay), GATE_PER_HOUR * Math.min(1, GuestSystem.arrivalCurve(sim.minuteOfDay) * 1.6));
+    const demand = draw * (0.35 + (sim.rating / 100) * 1.1);
+    const curve = GuestSystem.arrivalCurve(sim.minuteOfDay);
+    const gate = Math.min(GATE_MAX, GATE_BASE + GATE_PER_EXHIBIT * this.exhibitCount()) * Math.min(1, curve * 1.6);
+    // the booths cap how many reach the till; the price decides how many of those pay
+    const atGate = Math.min(demand * curve * Math.max(1, this.priceFactor), gate);
+    const paying = Math.min(1, this.priceFactor);
+    this.turnedAway = atGate * (1 - paying);
+    return atGate * paying;
   }
 
   private trySpawn(hours: number) {
@@ -178,8 +235,8 @@ export class GuestSystem {
     const rate = this.arrivalRate();
     sim.spawnAcc += (rate * hours) / AVG_PARTY;
     // visitors who looked at the ticket price and walked away
-    if (this.priceFactor < 0.75) {
-      this.deterred += (rate / this.priceFactor) * (1 - this.priceFactor) * hours;
+    if (this.priceFactor < 0.85) {
+      this.deterred += this.turnedAway * hours;
       if (this.deterred >= 1) {
         sim.progress.complaints.price += Math.floor(this.deterred);
         this.deterred -= Math.floor(this.deterred);
@@ -241,8 +298,16 @@ export class GuestSystem {
     const x = lead ? lead.x + (slot % 2 ? 0.5 : -0.5) : (tx + 0.5) * TILE + rng.range(-0.6, 0.6);
     const z = lead ? lead.z + 0.55 * Math.ceil(slot / 2) : MAP_H * TILE - 0.25;
     const id = sim.nextIds.guest++;
-    // seconds until 18:00: late arrivals make it a shorter visit so the zoo empties gradually
-    const untilEvening = ((CLOSE_HOUR - 2) * 60 - sim.minuteOfDay) / GAME_MINUTES_PER_SECOND;
+    // A visit lasts 8–12 game hours: people walk in real time while the clock runs
+    // GAME_MINUTES_PER_SECOND game minutes per second, so crossing the zoo takes a few
+    // game hours. Everyone wants to be out a little before closing, so most stay until
+    // late afternoon, late arrivals make it a shorter visit, and the zoo empties
+    // through the evening.
+    const stay = (rng.range(8, 12) * 60) / GAME_MINUTES_PER_SECOND;
+    const untilDeadline = ((CLOSE_HOUR - rng.range(0.2, 0.9)) * 60 - sim.minuteOfDay) / GAME_MINUTES_PER_SECOND;
+    // the ticket against what the zoo seems worth: a bargain cheers, overpaying sours the visit
+    const value = sim.admissionPrice / Math.max(1, this.fairPrice);
+    const ticketValue = lead ? lead.ticketValue : value <= 0.8 ? 0.04 : value > 1.05 ? -Math.min(0.3, 0.5 * (value - 1)) : 0;
     const g: GuestSim = {
       id,
       name: personName(rng, appearance.female),
@@ -255,10 +320,10 @@ export class GuestSystem {
       action: 'walk',
       actionTime: 0,
       needs: {
-        hunger: rng.range(0.45, 1),
-        thirst: rng.range(0.45, 1),
-        bladder: rng.range(0.5, 1),
-        energy: rng.range(0.78, 1),
+        hunger: rng.range(0.5, 1),
+        thirst: rng.range(0.5, 1),
+        bladder: rng.range(0.6, 1),
+        energy: rng.range(0.8, 1),
         fun: rng.range(0.3, 0.5),
       },
       happiness: rng.range(0.6, 0.8),
@@ -284,10 +349,7 @@ export class GuestSystem {
       goalRef: 0,
       timer: 0,
       holdTime: 0,
-      // a visit lasts roughly 5½–10 game hours (people walk in real time while the clock
-      // runs 240× faster, so seeing a few exhibits takes most of a day), shorter for
-      // late arrivals so the zoo empties through the late afternoon
-      visitLeft: Math.max(22, Math.min(rng.range(85, 150), untilEvening * rng.range(0.75, 1.05))),
+      visitLeft: Math.max(25, Math.min(stay, untilDeadline)),
       think: 0,
       mood: 0,
       funRate: 0,
@@ -296,6 +358,8 @@ export class GuestSystem {
       lookTimer: rng.range(1, 3),
       donated: false,
       viewed: [],
+      plan: 0,
+      ticketValue,
       scenic: 0.3,
       qObj: 0,
       qPos: -1,
@@ -310,6 +374,10 @@ export class GuestSystem {
       // walk in from the gate to its tile centre
       g.ax = (tx + 0.5) * TILE + rng.range(-0.5, 0.5);
       g.az = ((tile / MAP_W) | 0) * TILE + TILE * 0.5;
+    }
+    if (!lead) {
+      if (ticketValue < -0.04) g.thoughts.push('The tickets here are expensive.');
+      else if (ticketValue > 0) g.thoughts.push('The tickets are a real bargain!');
     }
     sim.guests.set(id, g);
     const fee = child ? Math.round(sim.admissionPrice * 0.5) : sim.admissionPrice;
@@ -327,13 +395,17 @@ export class GuestSystem {
     sim.ensureSceneryGrid();
     sim.nav.sync();
     this.syncQueues();
-    // after closing, stragglers still inside are shown out by security
-    const late = sim.minuteOfDay >= LATE_CLEAR || sim.minuteOfDay < OPEN_HOUR * 60 - 60;
+    // late in the evening security walks the stragglers to the gate; anyone
+    // still inside after midnight is taken out of the park
+    const m = sim.minuteOfDay;
+    const gone = m < OPEN_HOUR * 60 - 60;
+    const escort = m >= LATE_CLEAR;
     for (const g of sim.guests.values()) {
-      if (late && g.phase !== 3) {
+      if (gone && g.phase !== 3) {
         this.toRemove.push(g.id);
         continue;
       }
+      if (escort && !g.leader && g.goal !== 'leave' && g.phase !== 3) this.sendHome(g, 'Security is showing the last visitors out.');
       this.updateGuest(g, dt);
     }
     this.queues.advance();
@@ -392,6 +464,7 @@ export class GuestSystem {
     this.capRev = -1;
     this.habCrowdTime = -1;
     this.glanceRev = -1;
+    this.habExitRev = -1;
     const rel = this.released;
     this.queues.sync(rel);
     this.queues.rebuildFrom(sim.guests.values(), rel);
@@ -552,13 +625,15 @@ export class GuestSystem {
     const sim = this.sim;
     const n = g.needs;
     const sitting = g.action === 'sit';
-    // needs, per simulated second (one game hour = 15 s); everyone's body clock differs a little
+    // Needs, per simulated second (one game hour = 20 s); everyone's body clock differs a
+    // little. Tuned so a typical visit has one meal, a drink or two and a restroom break
+    // or two, with long enough between them to walk across the zoo.
     const k = 0.8 + 0.45 * hash01(g.seed, 11);
-    n.hunger = Math.max(0, n.hunger - (dt * k) / 175);
-    n.thirst = Math.max(0, n.thirst - (dt * (1.85 - k)) / 150);
-    n.bladder = Math.max(0, n.bladder - (dt * (0.6 + 0.8 * hash01(g.seed, 13))) / 170);
+    n.hunger = Math.max(0, n.hunger - (dt * k) / 215);
+    n.thirst = Math.max(0, n.thirst - (dt * (1.85 - k)) / 165);
+    n.bladder = Math.max(0, n.bladder - (dt * (0.6 + 0.8 * hash01(g.seed, 13))) / 230);
     if (sitting) n.energy = Math.min(1, n.energy + dt * 0.05);
-    else if (g.speed > 0.2) n.energy = Math.max(0, n.energy - dt / (g.appearance.child ? 285 : 265));
+    else if (g.speed > 0.2) n.energy = Math.max(0, n.energy - dt / (g.appearance.child ? 300 : 280));
     else n.energy = Math.max(0, n.energy - dt / 600);
     if (g.action === 'watch') n.fun = Math.min(1, n.fun + g.funRate * dt);
     else n.fun = Math.max(0, n.fun - dt / 220);
@@ -566,7 +641,7 @@ export class GuestSystem {
     g.mood *= 1 - Math.min(1, 0.03 * dt);
     const basic = Math.min(n.hunger, n.thirst, n.bladder);
     const comfort = basic < 0.25 ? basic * 2 : 0.5 + basic * 0.5;
-    const target = Math.max(0, Math.min(1, 0.24 + 0.4 * n.fun + 0.1 * n.energy + 0.14 * comfort + 0.12 * g.scenic + g.mood));
+    const target = Math.max(0, Math.min(1, 0.24 + 0.4 * n.fun + 0.1 * n.energy + 0.14 * comfort + 0.12 * g.scenic + g.mood + g.ticketValue));
     g.happiness += (target - g.happiness) * Math.min(1, dt * 0.06);
     g.visitLeft -= dt;
     g.lookTimer -= dt;
@@ -595,11 +670,15 @@ export class GuestSystem {
           // walking out through the gate to the map edge
           g.action = 'leave';
           g.hidden = false;
-          g.speed = g.walkSpeed;
+          g.speed = g.walkSpeed * (sim.minuteOfDay >= LATE_CLEAR ? 1.4 : 1);
           g.z += g.speed * dt;
           turnTowards(g, 0, dt);
           g.y = personY(sim.world, g.x, Math.min(g.z, MAP_H * TILE - 0.01));
-          if (g.z > MAP_H * TILE + 0.6) this.toRemove.push(g.id);
+          if (g.z > MAP_H * TILE + 0.6) {
+            this.toRemove.push(g.id);
+            // the party steps out through the gate together
+            for (const id of g.party) if (sim.guests.get(id)?.phase === 3) this.toRemove.push(id);
+          }
           break;
         }
       }
@@ -981,24 +1060,52 @@ export class GuestSystem {
       const dot = -fz * nx + fx * nz;
       if (dot !== 0) g.lane = Math.sign(dot) * Math.max(0.35, Math.min(0.6, Math.abs(lane)));
     }
-    const reached = walkToNext(sim.world, g, dt, g.goal === 'leave' && sim.minuteOfDay >= (CLOSE_HOUR - 0.5) * 60 ? 1.35 : 1);
+    const m = sim.minuteOfDay;
+    // a long way to go: a brisk walk rather than a stroll; at closing time, hurry
+    const pace =
+      g.goal === 'leave' && m >= LATE_CLEAR ? 1.6 : g.goal === 'leave' && m >= (CLOSE_HOUR - 0.5) * 60 ? 1.35 : g.goalKey && this.field(g.goalKey)[g.tile] > BRISK_AFTER ? BRISK : 1;
+    const reached = walkToNext(sim.world, g, dt, pace);
     g.lane = lane;
     if (reached) {
       // reached the tile centre: immediately pick the next tile so motion is continuous
       if (g.goal === 'wander') g.wanderSteps--;
-      // on a long walk to a habitat, urgent needs (restroom, food, drink, a rest) take over
-      if (g.goal === 'view' && g.think <= 0) {
+      if (g.goal !== 'leave' && g.think <= 0) {
         g.think = 4;
+        // time to head for the gate, or (on a long walk to a habitat) urgent needs take over
         const n = this.partyNeeds(g);
-        if (n.bladder < 0.24 || n.hunger < 0.25 || n.thirst < 0.25 || n.energy < 0.25) {
+        if (this.homeTime(g) || (g.goal === 'view' && (n.bladder < 0.24 || n.hunger < 0.25 || n.thirst < 0.25 || n.energy < 0.25))) {
           this.think(g);
           g.think = 14;
           if (g.phase !== 0) return;
           g.next = -1;
         }
       }
+      if (this.glance(g)) return;
       this.chooseNext(g);
     }
+  }
+
+  /** Whether this party is the kind to stop at this exhibit when passing it. */
+  private wouldGlance(g: GuestSim, habId: number): boolean {
+    return hash01(g.seed, habId) < GLANCE_CHANCE;
+  }
+
+  /**
+   * Passing the fence of an exhibit the party hasn't seen yet, most stop for a
+   * look (it counts as a visit), then carry on to where they were going.
+   */
+  private glance(g: GuestSim): boolean {
+    if (g.goal !== 'view' && g.goal !== 'wander') return false;
+    const habId = this.viewHabitats()[g.tile];
+    if (!habId || habId === g.goalRef || g.viewed.includes(habId) || !this.wouldGlance(g, habId)) return false;
+    const hab = this.sim.world.habitats.get(habId);
+    if (!hab || this.crowdAt(habId) > Math.max(4, hab.viewTiles.length * 0.5)) return false;
+    const n = this.partyNeeds(g);
+    if (n.bladder < 0.3 || n.hunger < 0.3 || n.thirst < 0.3 || n.energy < 0.3) return false;
+    // stand right here at the fence (the plan stays: think() resumes it afterwards)
+    this.setGoal(g, 'view', `t:${g.tile}`, habId);
+    this.arrive(g);
+    return true;
   }
 
   /** Decide the next tile (or arrive). Returns false if the guest stopped walking. */
@@ -1136,9 +1243,54 @@ export class GuestSystem {
     if (g.thoughts.length > 5) g.thoughts.shift();
   }
 
+  /** Walking time (s) from the guest's tile to the gate (0 if there is no way out). */
+  private walkOutTime(g: GuestSim): number {
+    const d = this.distance('exit', g.tile);
+    return d === FAR ? 0 : (d * TILE) / Math.max(0.6, g.walkSpeed * (d > BRISK_AFTER ? BRISK : 1));
+  }
+
+  /** Why the party should head for the gate now (null = stay a while longer). */
+  private homeTime(g: GuestSim): string | null {
+    const sim = this.sim;
+    const m = sim.minuteOfDay;
+    if (!sim.isOpen() || m >= (CLOSE_HOUR - 0.5) * 60) return 'The zoo is closing — time to go home.';
+    // allow for the walk back to the gate: from the far end of a big zoo that takes game hours
+    const walk = this.walkOutTime(g) * 1.1;
+    if (m + walk * GAME_MINUTES_PER_SECOND >= CLOSE_HOUR * 60 - 10) return 'The zoo closes soon — time to head back.';
+    if (g.visitLeft <= walk) return g.happiness > 0.6 ? 'What a lovely day at the zoo!' : 'Time to go home.';
+    return null;
+  }
+
+  /** A happy party heading home may stop at a gift shop that is (nearly) on the way out. */
+  private souvenirOnTheWayOut(g: GuestSim): boolean {
+    if (g.money < 15 || g.happiness < 0.55 || g.holding === 'gift' || g.holding === 'balloon' || hash01(g.seed, 31) > 0.5) return false;
+    const exit = this.field('exit');
+    const here = exit[g.tile];
+    if (here === FAR) return false;
+    for (const p of this.queues.points.values()) {
+      if (p.service !== 'gift' || p.tile < 0 || p.full() || exit[p.tile] === FAR) continue;
+      const d = this.distance(p.key, g.tile);
+      if (d === FAR || d + exit[p.tile] - here > 6) continue;
+      this.setGoal(g, 'shop', p.key, p.obj);
+      g.qObj = p.obj;
+      g.qPos = -1;
+      return true;
+    }
+    return false;
+  }
+
+  /** Drop whatever the party is doing and head for the gate. */
+  private sendHome(g: GuestSim, thought: string) {
+    this.resumeWalking(g);
+    if (g.phase === 3) return; // stranded off the paths: already being removed
+    g.phase = 0;
+    this.leave(g, thought);
+  }
+
   private leave(g: GuestSim, thought: string) {
     if (g.goal === 'leave') return;
     this.addThought(g, thought);
+    if (g.ticketValue < -0.08 && g.happiness < 0.55) this.addThought(g, 'That was too expensive for what we saw.');
     if (g.qObj) this.queues.leave(g);
     g.seatObj = 0;
     g.hidden = false;
@@ -1159,49 +1311,48 @@ export class GuestSystem {
     g.think = 6;
     if (g.qObj && g.qPos < 0) g.qObj = 0;
     // ---------------------------------------------------------- going home
-    const closing = !sim.isOpen() || sim.minuteOfDay >= (CLOSE_HOUR - 0.5) * 60;
-    if (closing) return this.leave(g, 'The zoo is closing — time to go home.');
-    // stagger departures through the late afternoon
-    if (sim.minuteOfDay >= (CLOSE_HOUR - 2) * 60 && hash01(g.seed, sim.day) < (sim.minuteOfDay - (CLOSE_HOUR - 2) * 60) / 90)
-      return this.leave(g, 'It’s getting late, let’s head home.');
-    // allow for the walk back to the gate (people walk in real time, the clock runs 240× faster)
-    const exitD = this.distance('exit', tile);
-    const walkMin = exitD === FAR ? 0 : Math.min(80, ((exitD * TILE) / Math.max(0.6, g.walkSpeed)) * GAME_MINUTES_PER_SECOND * 1.1);
-    if (sim.minuteOfDay + walkMin >= CLOSE_HOUR * 60 - 10) return this.leave(g, 'The zoo closes soon — time to head back.');
+    const home = this.homeTime(g);
+    if (home) {
+      if (sim.minuteOfDay < (CLOSE_HOUR - 1) * 60 && this.souvenirOnTheWayOut(g)) return;
+      return this.leave(g, home);
+    }
     const n = this.partyNeeds(g);
-    if (g.visitLeft <= 0) return this.leave(g, g.happiness > 0.6 ? 'What a lovely day at the zoo!' : 'Time to go home.');
     if (n.energy < 0.12) return this.leave(g, n.kids ? 'The kids are worn out. Time to go home.' : 'I’m exhausted. Time to go home.');
     if (g.happiness < 0.22) return this.leave(g, 'This zoo is awful. I’m leaving!');
     if (g.money < 2 && n.hunger < 0.3) return this.leave(g, 'I’ve run out of money and I’m starving.');
 
     // ---------------------------------------------------------- needs
+    // Not desperate yet: a shop far behind can wait until we have seen what we came for.
+    const c = sim.progress.complaints;
     if (n.bladder < 0.3) {
-      const r = this.wantService(g, 'restroom');
+      const r = this.wantService(g, 'restroom', { canWait: n.bladder > 0.15 });
       if (r === 'ok') return;
-      if (r === 'none') {
-        sim.progress.complaints.restroom++;
-        this.addThought(g, 'I really need a restroom!');
+      if (r !== 'later') {
+        if (r === 'none' || r === 'far') {
+          c.restroom++;
+          this.addThought(g, 'I really need a restroom!');
+        } else if (r === 'cutoff') this.addThought(g, 'There are restrooms, but no path leads to them!');
+        g.mood -= 0.08;
+        if (n.bladder < 0.08) return this.leave(g, r === 'full' ? 'The restroom queues are hopeless. I’m going home!' : 'I can’t find a restroom. I’m going home!');
       }
-      g.mood -= 0.08;
-      if (n.bladder < 0.08) return this.leave(g, r === 'none' ? 'There are no restrooms here. I’m going home!' : 'The restroom queues are hopeless. I’m going home!');
     }
     if (n.hunger < 0.35) {
-      const r = this.wantService(g, 'food');
-      if (r === 'ok' || this.wantService(g, 'icecream') === 'ok') return;
-      if (r === 'none') {
-        sim.progress.complaints.food++;
-        this.addThought(g, g.money < 4 ? 'I’m hungry, but I can’t afford anything.' : 'I’m hungry but there’s nowhere to eat!');
-      }
-      g.mood -= 0.05;
+      const r = this.wantService(g, 'food', { alt: 'icecream', canWait: n.hunger > 0.15 });
+      if (r === 'ok') return;
+      if (r === 'none' || r === 'far') {
+        c.food++;
+        this.addThought(g, 'I’m hungry but there’s nowhere to eat!');
+      } else if (r === 'broke') this.addThought(g, 'I’m hungry, but I can’t afford anything.');
+      if (r !== 'later') g.mood -= 0.05;
     }
     if (n.thirst < 0.35) {
-      const r = this.wantService(g, 'drink');
-      if (r === 'ok' || this.wantService(g, 'icecream') === 'ok') return;
-      if (r === 'none') {
-        sim.progress.complaints.drink++;
+      const r = this.wantService(g, 'drink', { alt: 'icecream', canWait: n.thirst > 0.15 });
+      if (r === 'ok') return;
+      if (r === 'none' || r === 'far') {
+        c.drink++;
         this.addThought(g, 'I’m so thirsty. Where can I get a drink?');
       }
-      g.mood -= 0.05;
+      if (r !== 'later') g.mood -= 0.05;
     }
     if (n.energy < 0.35 || (g.holding === 'food' && rng.chance(0.35))) {
       const d = this.distance('bench', tile);
@@ -1213,18 +1364,18 @@ export class GuestSystem {
     }
     // passing a kiosk with a short queue: a snack or a drink on impulse
     if (g.money >= 6 && rng.chance(0.5)) {
-      if (n.thirst < 0.55 && this.wantService(g, 'drink', 9, 1, true) === 'ok') return;
-      if (n.hunger < 0.5 && this.wantService(g, 'food', 9, 1, true) === 'ok') return;
+      if (n.thirst < 0.55 && this.wantService(g, 'drink', { maxDist: 9, maxLine: 1, impulse: true }) === 'ok') return;
+      if (n.hunger < 0.5 && this.wantService(g, 'food', { maxDist: 9, maxLine: 1, impulse: true }) === 'ok') return;
     }
-    // ---------------------------------------------------------- treats
-    if (!g.donated && g.happiness > 0.68 && g.money > 4 && g.viewed.length >= 2 && rng.chance(0.15) && this.distance('donation', tile) < 40)
+    // ---------------------------------------------------------- treats (only when close by: nobody crosses the zoo for them)
+    if (!g.donated && g.happiness > 0.68 && g.money > 4 && g.viewed.length >= 2 && rng.chance(0.15) && this.distance('donation', tile) < 15)
       return this.setGoal(g, 'donate', 'donation', 0);
     if ((g.holding === 'none' || g.holding === 'food') && g.money >= 15 && g.happiness > 0.62 && g.seenSpecies.length >= 2 && rng.chance(n.kids ? 0.12 : 0.07)) {
-      if (this.wantService(g, 'gift') === 'ok') return;
+      if (this.wantService(g, 'gift', { maxDist: 15, impulse: true }) === 'ok') return;
     }
     const hour = sim.minuteOfDay / 60;
     if (g.holding === 'none' && g.money >= 4 && hour > 11 && hour < 17.5 && rng.chance(n.kids ? 0.12 : 0.05)) {
-      if (this.wantService(g, 'icecream') === 'ok') return;
+      if (this.wantService(g, 'icecream', { maxDist: 12, impulse: true }) === 'ok') return;
     }
     // ---------------------------------------------------------- animals
     if (this.chooseHabitat(g)) return;
@@ -1240,40 +1391,69 @@ export class GuestSystem {
       g.visitLeft -= 25;
       g.mood -= 0.04;
     } else if (g.viewed.length) {
-      g.visitLeft -= 8; // seen everything: a few more strolls, then home
+      g.visitLeft -= 20; // seen everything: a stroll or two more, then home
     }
     this.setWander(g, rng.int(5, 12));
   }
 
   /**
-   * Head for the best shop / restroom of a kind: near, short queue, not one we
-   * gave up on recently. 'full' = there is one, but every line is too long.
+   * Head for the best shop / restroom of a kind (or of the substitute `alt`,
+   * e.g. an ice cream instead of a snack, which counts as a little farther):
+   * near, little detour from the exhibit the party is on its way to, short
+   * queue, not one we gave up on recently. Otherwise say why not: it can wait
+   * until after that exhibit ('later', only with `canWait`), every line is too
+   * long ('full'), the nearest is too far away ('far'), none can be reached
+   * from here ('cutoff'), the guest can't afford any ('broke') or none has
+   * been built ('none'). `impulse` buys add no thoughts or complaints.
    */
-  private wantService(g: GuestSim, kind: ServiceKind, maxDist = 45, maxLine = 99, impulse = false): 'ok' | 'full' | 'none' {
+  private wantService(g: GuestSim, kind: ServiceKind, opts: ServiceOpts = {}): ServiceAnswer {
     const sim = this.sim;
+    const maxDist = opts.maxDist ?? 45;
+    const maxLine = opts.maxLine ?? 99;
+    const planning = g.plan && !g.viewed.includes(g.plan);
+    const toPlan = planning ? this.field(`hab:${g.plan}`) : null;
+    const planHere = toPlan ? toPlan[g.tile] : FAR;
     let best: ServicePoint | null = null;
     let bestScore = Infinity;
-    let exists = false,
+    let built = false,
+      affordable = false,
+      reachable = false,
+      near = false,
+      deferred = false,
       crowded = false;
     let crowdedName = '';
     for (const p of this.queues.points.values()) {
-      if (p.service !== kind) continue;
-      if (kind !== 'restroom') {
+      if (p.service !== kind && p.service !== opts.alt) continue;
+      built = true;
+      if (p.service !== 'restroom') {
         const o = sim.world.objects.get(p.obj);
         const price = o ? OBJECTS_BY_ID[o.defId]?.shop?.price ?? 0 : 0;
         if (g.money < price) continue;
       }
+      affordable = true;
       const d = this.distance(p.key, g.tile);
-      if (d === FAR || d > maxDist) continue;
+      if (d === FAR) continue;
+      reachable = true;
+      if (d > maxDist) continue;
+      near = true;
       if (p.line.length > maxLine) continue;
-      exists = true;
+      let score = d + (p.line.length + p.busy() * 0.5) * 2.6 + (p.service === kind ? 0 : 8);
+      // on the way somewhere: weigh the detour, so a stop along the route beats one behind us
+      const planThere = toPlan && p.tile >= 0 ? toPlan[p.tile] : FAR;
+      if (planHere !== FAR && planThere !== FAR) {
+        const detour = d + planThere - planHere;
+        if (opts.canWait && detour > 8 + planHere * 0.5) {
+          deferred = true;
+          continue;
+        }
+        score += detour - 0.5 * d;
+      }
       const avoided = g.avoidObj === p.obj && sim.time < g.avoidUntil;
       if (avoided || p.full()) {
         crowded = true;
         if (!crowdedName) crowdedName = OBJECTS_BY_ID[sim.world.objects.get(p.obj)?.defId ?? '']?.name ?? '';
         continue;
       }
-      const score = d + (p.line.length + p.busy() * 0.5) * 2.6;
       if (score < bestScore) {
         bestScore = score;
         best = p;
@@ -1285,15 +1465,14 @@ export class GuestSystem {
       g.qPos = -1;
       return 'ok';
     }
-    if (impulse) return exists ? 'full' : 'none';
-    if (exists && crowded) {
+    const why = deferred ? 'later' : !built ? 'none' : !affordable ? 'broke' : !reachable ? 'cutoff' : !near ? 'far' : 'full';
+    if (opts.impulse) return why;
+    if (why === 'full' && crowded) {
       this.counters.full++;
       this.addThought(g, `The queue at the ${crowdedName || 'kiosk'} is far too long.`);
       g.mood -= 0.02;
-      return 'full';
-    }
-    this.counters.none++;
-    return 'none';
+    } else if (why !== 'full' && why !== 'later') this.counters.none++;
+    return why;
   }
 
   private freeSeatExists(): boolean {
@@ -1325,8 +1504,86 @@ export class GuestSystem {
     return this.habCrowd.get(habId) ?? 0;
   }
 
+  private habExit = new Map<number, number>();
+  private habExitRev = -1;
+
+  /** Path distance (tiles) from a habitat's viewing fence to the gate, cached per world revision. */
+  private habExitDist(habId: number): number {
+    const w = this.sim.world;
+    if (this.habExitRev !== w.revision) {
+      this.habExitRev = w.revision;
+      this.habExit.clear();
+    }
+    let d = this.habExit.get(habId);
+    if (d === undefined) {
+      d = FAR;
+      const exit = this.field('exit');
+      for (const t of w.habitats.get(habId)?.viewTiles ?? []) d = Math.min(d, exit[t]);
+      this.habExit.set(habId, d);
+    }
+    return d;
+  }
+
+  /**
+   * An exhibit, shop or restroom no path from the entrance leads to (so the
+   * player is told to reconnect it, rather than that it is missing), or null.
+   */
+  unreachable(): { text: string; focus: { x: number; z: number } } | null {
+    const sim = this.sim;
+    const w = sim.world;
+    if (!sim.gateTiles(this.gateTmp).length) return null;
+    for (const hab of w.habitats.values()) {
+      if (!hab.viewTiles.length || !sim.population(hab.id).count.size || this.habExitDist(hab.id) !== FAR) continue;
+      const t = hab.viewTiles[0];
+      return {
+        text: `Guests can’t reach ${hab.name} — connect its viewing path to the paths from the entrance.`,
+        focus: { x: ((t % MAP_W) + 0.5) * TILE, z: (((t / MAP_W) | 0) + 0.5) * TILE },
+      };
+    }
+    const exit = this.field('exit');
+    for (const p of this.queues.points.values()) {
+      if (p.tile < 0 || exit[p.tile] !== FAR) continue;
+      const o = w.objects.get(p.obj);
+      if (!o) continue;
+      const c = w.objectCenter(o);
+      return {
+        text: `Guests can’t reach the ${OBJECTS_BY_ID[o.defId]?.name ?? 'shop'} — connect it to the paths from the entrance.`,
+        focus: { x: c.x, z: c.z },
+      };
+    }
+    return null;
+  }
+
+  /** Seconds to walk to a habitat, watch, and still make it back to the gate (Infinity if unreachable). */
+  private tripTime(g: GuestSim, habId: number): number {
+    const there = this.distance(`hab:${habId}`, g.tile);
+    const back = this.habExitDist(habId);
+    if (there === FAR || back === FAR) return Infinity;
+    return ((there + back) * TILE) / Math.max(0.6, g.walkSpeed * BRISK) + 12;
+  }
+
+  /** A habitat with animals the guest can see and hasn't viewed yet. */
+  private worthSeeing(g: GuestSim, habId: number): boolean {
+    const hab = this.sim.world.habitats.get(habId);
+    return !!hab && hab.viewTiles.length > 0 && !g.viewed.includes(habId) && this.sim.population(habId).count.size > 0;
+  }
+
+  /**
+   * Pick the next exhibit. The party keeps to the one it set out for (after a
+   * snack, a restroom or a look at another exhibit on the way). Otherwise it
+   * weighs every exhibit it still has time for by what it would see: the
+   * exhibit itself plus the unseen ones the walk there passes (most people
+   * stop for a look on the way). Nearer is likelier, though how far people
+   * are happy to head first differs, and crowded fence lines put them off.
+   */
   private chooseHabitat(g: GuestSim): boolean {
     const sim = this.sim;
+    if (g.plan && this.worthSeeing(g, g.plan) && this.tripTime(g, g.plan) <= g.visitLeft) {
+      this.setGoal(g, 'view', `hab:${g.plan}`, g.plan);
+      return true;
+    }
+    g.plan = 0;
+    const reach = 10 + 30 * hash01(g.seed, 23); // tiles
     let best = 0,
       bestScore = 0;
     for (const hab of sim.world.habitats.values()) {
@@ -1341,18 +1598,44 @@ export class GuestSystem {
       }
       const viewed = g.viewed.includes(hab.id);
       const d = this.distance(`hab:${hab.id}`, g.tile);
-      if (d === FAR) continue;
-      // nearby exhibits win, but people avoid a crowded fence line
+      if (d === FAR || this.tripTime(g, hab.id) > g.visitLeft) continue;
+      const value = appeal * (viewed ? 0.1 : unseen ? 1 : 0.5) + this.sightsOnTheWay(g, hab.id);
       const crowd = this.crowdAt(hab.id) / Math.max(4, hab.viewTiles.length * 0.5);
-      const score = (appeal * (viewed ? 0.1 : unseen ? 1 : 0.4) * (0.6 + 0.8 * sim.rng.float())) / ((1 + d / 28) * (1 + crowd * crowd));
+      const score = (value * (0.75 + 0.5 * sim.rng.float())) / ((1 + d / reach) * (1 + crowd * crowd));
       if (score > bestScore) {
         bestScore = score;
         best = hab.id;
       }
     }
     if (!best || bestScore < 0.25) return false;
+    // a favourite seen before is a one-off stroll back, not a plan to keep
+    if (!g.viewed.includes(best)) g.plan = best;
     this.setGoal(g, 'view', `hab:${best}`, best);
     return true;
+  }
+
+  private routeSeen: number[] = [];
+
+  /**
+   * Expected appeal of the unseen exhibits the party would pass on its way to
+   * `habId`: follows the same downhill steps the walk will take.
+   */
+  private sightsOnTheWay(g: GuestSim, habId: number): number {
+    const field = this.field(`hab:${habId}`);
+    const views = this.viewHabitats();
+    const nav = this.sim.nav;
+    const seen = this.routeSeen;
+    seen.length = 0;
+    let value = 0;
+    for (let t = g.tile, steps = 0; t >= 0 && field[t] !== 0 && field[t] !== FAR && steps < 160; steps++) {
+      const h = views[t];
+      if (h && h !== habId && !seen.includes(h) && !g.viewed.includes(h)) {
+        seen.push(h);
+        if (this.wouldGlance(g, h)) value += this.viewAppealGrid[t] * 10;
+      }
+      t = nav.downhill(field, t, g.seed);
+    }
+    return value;
   }
 
   // ================================================================ arrival
@@ -1479,7 +1762,7 @@ export class GuestSystem {
 
   /**
    * Choose a viewing tile reachable along the habitat's viewing tiles (within
-   * a short stroll) that is close to the animals and not crowded.
+   * a short stroll, ~8 tiles) that is close to the animals and not crowded.
    */
   private pickViewTile(g: GuestSim, habId: number, viewTiles: number[]): number {
     const sim = this.sim;
@@ -1507,7 +1790,7 @@ export class GuestSystem {
     const adj = sim.nav.adj;
     let best = g.tile,
       bestScore = -Infinity;
-    for (let head = 0; head < q.length && head < 110; head++) {
+    for (let head = 0; head < q.length && head < 60; head++) {
       const t = q[head];
       const isView = viewTiles.includes(t);
       if (isView) {
@@ -1592,7 +1875,7 @@ export class GuestSystem {
     switch (g.goal) {
       case 'enter':
         // just through the turnstiles: some parties stop to get their bearings
-        if (!g.thoughts.length && !g.viewed.length && rng.chance(0.4) && this.gateTmp.length && sim.gateTiles(this.gateTmp).includes(g.tile)) {
+        if (!g.plan && !g.viewed.length && rng.chance(0.4) && this.gateTmp.length && sim.gateTiles(this.gateTmp).includes(g.tile)) {
           this.addThought(g, g.party.length ? 'Where shall we go first?' : 'Where shall I go first?');
           g.action = 'idle';
           g.timer = rng.range(1.5, 4);
@@ -1644,7 +1927,8 @@ export class GuestSystem {
     const rng = sim.rng;
     const hab = sim.world.habitats.get(g.goalRef);
     g.action = 'watch';
-    g.timer = rng.range(9, 17);
+    // a stop on the way somewhere is a shorter look than the exhibit the party came for
+    g.timer = g.plan && g.plan !== hab?.id ? rng.range(5, 9) : rng.range(9, 17);
     g.funRate = 0;
     if (!hab) return;
     let count = 0,
@@ -1763,26 +2047,44 @@ export class GuestSystem {
   }
 
   // ================================================================ surroundings
-  private glance = new Float32Array(N_TILES);
+  private viewAppealGrid = new Float32Array(N_TILES);
+  private viewHabGrid = new Uint16Array(N_TILES);
   private glanceRev = -1;
   private glanceTime = -1;
 
-  /** Per path tile: appeal (0..1) of the animals visible from it (refreshed every few seconds). */
-  private viewAppeal(): Float32Array {
+  /** Refresh the per-tile view grids (every few seconds, or when the world changed). */
+  private refreshViewGrids() {
     const sim = this.sim;
-    if (this.glanceRev === sim.world.revision && sim.time - this.glanceTime < 4) return this.glance;
+    if (this.glanceRev === sim.world.revision && sim.time - this.glanceTime < 4 && this.glanceTime <= sim.time) return;
     this.glanceRev = sim.world.revision;
     this.glanceTime = sim.time;
-    const v = this.glance;
+    const v = this.viewAppealGrid;
+    const h = this.viewHabGrid;
     v.fill(0);
+    h.fill(0);
     for (const hab of sim.world.habitats.values()) {
       if (!hab.viewTiles.length) continue;
       let appeal = 0;
       for (const sid of sim.population(hab.id).count.keys()) appeal = Math.max(appeal, SPECIES_BY_ID[sid]?.appeal ?? 5);
       if (!appeal) continue;
-      for (const t of hab.viewTiles) v[t] = Math.max(v[t], appeal / 10);
+      for (const t of hab.viewTiles) {
+        if (appeal / 10 <= v[t]) continue;
+        v[t] = appeal / 10;
+        h[t] = hab.id;
+      }
     }
-    return v;
+  }
+
+  /** Per path tile: appeal (0..1) of the animals visible from it. */
+  private viewAppeal(): Float32Array {
+    this.refreshViewGrids();
+    return this.viewAppealGrid;
+  }
+
+  /** Per path tile: the most appealing habitat with animals seen from it (0 = none). */
+  private viewHabitats(): Uint16Array {
+    this.refreshViewGrids();
+    return this.viewHabGrid;
   }
 
   private look(g: GuestSim) {
@@ -1808,10 +2110,10 @@ export class GuestSystem {
         const i = nz * MAP_W + nx;
         if (!sim.world.habitatOf[i]) trash += sim.litterGrid[i];
       }
-    if (trash >= 4) {
+    if (trash >= 5) {
       g.mood -= 0.03;
-      if (!g.leader) sim.progress.complaints.litter++;
-      if (sim.rng.chance(0.3)) this.addThought(g, 'There’s litter everywhere!');
+      if (!g.leader) sim.progress.noteLitter(g.id, t, trash);
+      if (sim.rng.chance(0.3)) this.addThought(g, 'There’s litter all over this path!');
     } else if (s > 0.7 && sim.rng.chance(0.05)) {
       g.mood += 0.03;
       this.addThought(g, 'What a beautiful zoo!');
@@ -1823,11 +2125,7 @@ export class GuestSystem {
       const sp = SPECIES_BY_ID[a.speciesId];
       g.mood -= sp && sp.danger >= 3 ? 0.25 : 0.1;
       this.addThought(g, `Help! There’s a ${singularName(a.speciesId)} on the loose!`);
-      if (sp && sp.danger >= 3 && !g.leader && g.phase !== 3 && !g.hidden) {
-        this.resumeWalking(g);
-        g.phase = 0;
-        this.leave(g, 'I’m not staying here with a dangerous animal loose!');
-      }
+      if (sp && sp.danger >= 3 && !g.leader && g.phase !== 3 && !g.hidden) this.sendHome(g, 'I’m not staying here with a dangerous animal loose!');
       break;
     }
   }

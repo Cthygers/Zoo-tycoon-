@@ -11,16 +11,17 @@ import { OBJECTS_BY_ID, rotatedSize } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
 import { pluralName } from './names';
 
+/** Terrain names as the Habitat paint palette shows them, so advice points at a real swatch. */
 export const TERRAIN_NAMES: Record<number, string> = {
-  [Terrain.Grass]: 'grass',
-  [Terrain.DryGrass]: 'dry grass',
-  [Terrain.Dirt]: 'dirt',
-  [Terrain.Sand]: 'sand',
-  [Terrain.Rock]: 'rock',
-  [Terrain.Snow]: 'snow',
-  [Terrain.Mud]: 'mud',
-  [Terrain.Water]: 'shallow water',
-  [Terrain.DeepWater]: 'deep water',
+  [Terrain.Grass]: 'Lush Grass',
+  [Terrain.DryGrass]: 'Savanna Grass',
+  [Terrain.Dirt]: 'Bare Earth',
+  [Terrain.Sand]: 'Sand',
+  [Terrain.Rock]: 'Rocky Ground',
+  [Terrain.Snow]: 'Snow & Ice',
+  [Terrain.Mud]: 'Mud',
+  [Terrain.Water]: 'Shallow Water',
+  [Terrain.DeepWater]: 'Deep Water',
 };
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
@@ -91,7 +92,11 @@ export function evaluateSpecies(
   keepers: number,
   adding: boolean,
 ): SpeciesEval {
+  // Problems in order of severity (warnings show the first): what endangers the
+  // animals, then space and company, then terrain and scenery.
+  const urgent: string[] = [];
   const issues: string[] = [];
+  const comfort: string[] = [];
   const area = Math.max(1, hab.tiles.length);
 
   // ---- terrain
@@ -107,9 +112,9 @@ export function evaluateSpecies(
   }
   const terrain = Math.max(0, 1 - l1 / 2);
   deficits.sort((a, b) => b.want - b.have - (a.want - a.have));
-  for (const d of deficits.slice(0, 2)) issues.push(`Needs more ${TERRAIN_NAMES[d.t]} (have ${pct(d.have)}, wants ${pct(d.want)})`);
+  for (const d of deficits.slice(0, 2)) comfort.push(`Needs more ${TERRAIN_NAMES[d.t]} (have ${pct(d.have)}, wants ${pct(d.want)})`);
   excess.sort((a, b) => b.have - a.have);
-  for (const e of excess.slice(0, 1)) issues.push(`Too much ${TERRAIN_NAMES[e.t]} (${pct(e.have)})`);
+  for (const e of excess.slice(0, 1)) comfort.push(`Too much ${TERRAIN_NAMES[e.t]} (${pct(e.have)})`);
 
   // ---- liked objects (foliage / rocks / shelters / toys)
   let liked = 0;
@@ -137,7 +142,7 @@ export function evaluateSpecies(
       .filter((id) => OBJECTS_BY_ID[id] && OBJECTS_BY_ID[id].category !== 'feeder')
       .slice(0, 2)
       .map((id) => OBJECTS_BY_ID[id].name);
-    issues.push(`Needs more of the scenery it likes (${Math.floor(liked)} of ${Math.ceil(likedWant)}, e.g. ${examples.join(', ')})`);
+    comfort.push(`Needs more of the scenery it likes (${Math.floor(liked)} of ${Math.ceil(likedWant)}, e.g. ${examples.join(', ')})`);
   }
 
   // ---- space
@@ -152,17 +157,17 @@ export function evaluateSpecies(
 
   // ---- fence
   const fenceOk = hab.minFenceStrength >= sp.danger;
-  if (!fenceOk) issues.push(`Fence too weak (strength ${hab.minFenceStrength}, needs ${sp.danger}: use ${weakestFenceName(sp.danger)})`);
+  if (!fenceOk) urgent.push(`Fence too weak (strength ${hab.minFenceStrength}, needs ${sp.danger}: use ${weakestFenceName(sp.danger)})`);
 
   // ---- water
   const waterTiles = hab.terrainCounts[Terrain.Water] + hab.terrainCounts[Terrain.DeepWater];
   const hasWater = waterTiles > 0 || hasTrough;
-  if (!hasWater) issues.push('No drinking water (paint a pond or add a Water Trough)');
+  if (!hasWater) urgent.push('No drinking water (paint a pond or add a Water Trough)');
 
   // ---- food
   const grazing = (hab.terrainCounts[Terrain.Grass] + hab.terrainCounts[Terrain.DryGrass]) / area;
   const hasFood = keepers > 0 || (sp.diet === 'herbivore' && grazing > 0.3);
-  if (keepers === 0) issues.push('No keeper to bring food (hire a keeper)');
+  if (keepers === 0) urgent.push('No keeper to bring food (hire a keeper)');
   else if (!hasFeeder) issues.push(`No ${OBJECTS_BY_ID[feeders[0]].name} (keepers scatter food on the ground)`);
 
   // ---- social group
@@ -183,14 +188,14 @@ export function evaluateSpecies(
     const otherCarn = o.diet === 'carnivore';
     if (meCarn && !otherCarn) {
       compat *= 0.35;
-      issues.push(`Will hunt the ${pluralName(sid)} — keep predators and prey apart`);
+      urgent.push(`Will hunt the ${pluralName(sid)} — keep predators and prey apart`);
     } else if (!meCarn && otherCarn) {
       compat *= 0.2;
       predators++;
-      issues.push(`Terrified of the ${pluralName(sid)} — keep predators and prey apart`);
+      urgent.push(`Terrified of the ${pluralName(sid)} — keep predators and prey apart`);
     } else if (meCarn && otherCarn) {
       compat *= 0.6;
-      issues.push(`Fights with the ${pluralName(sid)}`);
+      urgent.push(`Fights with the ${pluralName(sid)}`);
     } else if (o.biome !== sp.biome) {
       compat *= 0.92;
       issues.push(`Doesn't mix well with the ${pluralName(sid)} (different habitat)`);
@@ -210,7 +215,7 @@ export function evaluateSpecies(
     fenceOk,
     hasWater,
     hasFood,
-    issues,
+    issues: [...urgent, ...issues, ...comfort],
     social,
     compat,
     predators,

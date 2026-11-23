@@ -7,8 +7,10 @@ Public entry: `createCreatureFactory(quality)` in `index.ts` (implements
 `ICreatureFactory` from `src/core/contracts.ts`).
 
 ```
-index.ts            CreatureFactory (cache per species × sex × detail, preload with progress)
-model.ts            RiggedModel: per-instance bones, action crossfades, growth, highlight
+index.ts            CreatureFactory (cache per species × sex × detail, preload with progress,
+                    juvenile mesh choice, re-applies the detail to live models on setQuality)
+model.ts            RiggedModel: per-instance bones, action crossfades, growth, highlight,
+                    runtime mesh swaps (setAsset)
 assets.ts           design → RigAsset (geometry + rig + materials)
 types.ts            SpeciesModel, CreatureDesign, CoatSample, AnimDriver, AnimCtx …  ← read this
 sdf/prims.ts        primitives + helpers (ellipsoid, cone, capsule, roundBox, sphere, tube,
@@ -55,7 +57,8 @@ extension points. The harness `wire=1` option needs `&standalone=1`.
 import type { SpeciesModel } from '../types';
 const okapi: SpeciesModel = {
   id: 'okapi',                       // = SpeciesDef.id
-  dimorphic: false,                  // true → separate M / F meshes (lion mane)
+  dimorphic: false,                  // true → separate M / F meshes (lion mane); young
+                                     // males use the F mesh below growth maturesAt (0.7)
   design: (ctx) => ({ ... }),        // ctx: { def: SpeciesDef, sex, detail: 0|1|2 }
   instanceScale: (sex, r) => (sex === 'M' ? 1.03 : 0.96) * (0.97 + r * 0.06),
 };
@@ -75,6 +78,7 @@ export default okapi;
 | `eyes` | `[{ bone, pos (left eye), radius, color? }]` — glossy spheres rigidly bound to the bone (mirrored). Use `surfacePoint()` + `seat()` to sit them on the head. |
 | `anim` | `driver(myDriver)` — see Animation. |
 | `babyScale`, `babyHead` | growth 0 → root scale / extra head scale. |
+| `babyBones` | per-bone newborn scale easing to 1 over growth 0.15 … 0.95: tusks / horns that grow in (put them on their own bone at the base, ≈ 0.05–0.1), oversized cub paws (> 1). |
 | `height`, `radius` | optional overrides (selection ring / picking). |
 
 ### Primitives (`sdf/prims.ts`)
@@ -134,6 +138,11 @@ axis parameter), `pw()`, `pd()`. Outputs: `color` (base, **linear** —
 * `look.pattern = 'field'`: colour2 where `s > 0` (signed distance, metres) —
   giraffe patches (`voronoi(...).edge - lineWidth`), spots, rosettes.
 * Helpers: `fbm`, `voronoi`, `mixHex`, `blendHex`, `belly`, `smooth`, `clamp01`.
+* `c.ao(radius)`: ambient occlusion 0 … 1 from the shape itself (SDF steps
+  along the normal). Multiply it into the colour to bake skin folds, horn
+  bases and the gaps between legs and belly — they then read on the low tier
+  too, where there is no micro detail (rhino, elephant). A few field
+  evaluations per vertex: call it once per sample, with one or two radii.
 
 ## Animation
 
@@ -186,6 +195,20 @@ No framework edits are needed: a rig kind is just bones + roles + a driver.
    `reachMuzzle` for pecking / drinking. `anim/biped.ts` is a complete small
    example (birds/penguins); `anim/human.ts` shows arms & gestures.
 3. Wrap with `driver(...)` and return it in the design.
+
+## Juveniles and quality changes
+
+A model draws one cached mesh variant (`RigAsset`) at a time and can switch
+at runtime (`RiggedModel.setAsset`: it leaves its batch and enters the batch
+of the new mesh; poses and driver state carry over between builds of the same
+skeleton). The factory gives every model a picker:
+
+* dimorphic species: males below `maturesAt` use the female mesh (cubs have no
+  mane, calves no bull features) and switch when they grow up;
+* `setQuality` with a new `creatureDetail` moves every live model (batched or
+  standalone) to the new tier's mesh within a small budget per frame (about one
+  mesh build per frame), then frees the previous tier's meshes, LODs and
+  batches. LODs of the new meshes build lazily as usual.
 
 ## Humans
 

@@ -315,6 +315,8 @@ export interface PanelHost {
   toggleFollow(sel: SelectionRef): void;
   isFollowing(sel: SelectionRef): boolean;
   openAnimals(): void;
+  /** Pick the animal / object up and place it elsewhere with the build tool. */
+  startMove(sel: SelectionRef): void;
 }
 
 interface PanelView {
@@ -446,9 +448,10 @@ export class InfoPanel {
     const sell = button('wh-btn-danger', 'tag', 'Sell', async () => {
       const a = sim.animals.get(id);
       if (!a) return;
+      const value = Math.max(0, -sim.sellAnimal(id, true).cost);
       const ok = await showDialog(this.host.uiRoot, {
         title: `Sell ${a.name}?`,
-        text: `${a.name} will be rehomed to another zoo. You get part of the adoption price back.`,
+        text: `${a.name} will be rehomed to another zoo. You get ${fmtMoney(value)} back.`,
         ok: 'Sell',
         danger: true,
       });
@@ -458,7 +461,8 @@ export class InfoPanel {
         else this.host.select(null);
       }
     });
-    s.setFoot([this.makeFollow({ kind: 'animal', id }), sell]);
+    const move = button('wh-btn-ghost', 'move', 'Move', () => this.host.startMove({ kind: 'animal', id }));
+    s.setFoot([this.makeFollow({ kind: 'animal', id }), move, sell]);
     let lastAlert = '';
     return {
       refresh: () => {
@@ -473,6 +477,8 @@ export class InfoPanel {
         const hab = a.habitatId ? sim.world.habitats.get(a.habitatId) : undefined;
         setText(kvHab.v, hab ? hab.name : 'None');
         setText(kvSex.v, a.sex === 'M' ? 'Male' : 'Female');
+        // an escaped animal has to be caught by staff first
+        move.disabled = a.escaped;
         const al: string[] = [];
         if (a.escaped) al.push(`<span class="wh-tag bad">${icon('warn')}Escaped!</span>`);
         if (a.pregnantDays > 0) al.push(`<span class="wh-tag good">Expecting · day ${Math.floor(a.pregnantDays)}</span>`);
@@ -612,6 +618,7 @@ export class InfoPanel {
     ];
     if (o.defId !== 'entrance_gate') {
       foot.push(
+        button('wh-btn-ghost', 'move', 'Move', () => this.host.startMove({ kind: 'object', id })),
         button('wh-btn-danger', 'trash', 'Remove', async () => {
           if (!sim.world.objects.has(id)) return;
           const dry = sim.removeObject(id, true);

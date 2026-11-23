@@ -6,7 +6,8 @@ import { GAME_MINUTES_PER_SECOND, MAP_H, MAP_W, TILE, WATER_LEVEL } from '../cor
 import { Terrain, type SpeciesDef } from '../core/types';
 import { OBJECTS_BY_ID } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
-import { feederFor } from './habitat';
+import type { OpenEnclosure } from './enclosures';
+import { evaluateSpecies, feederFor, type SpeciesEval } from './habitat';
 import { animalName, pluralName, singularName } from './names';
 import { type Passable } from './nav';
 import type { Simulation } from './simulation';
@@ -17,6 +18,13 @@ const BIRTH_GROWTH = 0.3;
 /** Escaped animals are picked up by an outside rescue team after this many seconds (≈ one game day). */
 const RESCUE_AFTER = 300;
 const RESCUE_FEE = 500;
+/** Seconds an opened enclosure may stay open before the player is reminded. */
+const OPEN_REMINDER_AFTER = 20;
+/** Water depth (m) above which a standing animal counts as being in the water. */
+const WET_DEPTH = 0.05;
+/** Seconds without progress before a moving animal re-plans its route, and before it gives up. */
+const STUCK_REPLAN = 1.2;
+const STUCK_GIVE_UP = 3;
 
 function wrapAngle(a: number): number {
   a = (a + Math.PI) % TWO_PI;
@@ -27,6 +35,11 @@ function wrapAngle(a: number): number {
 /** Food units a species eats relative to a medium animal. */
 export function foodScale(sp: SpeciesDef): number {
   return Math.max(0.15, Math.min(5, (sp.height * sp.length) / 3));
+}
+/** Daily food bill ($) for one animal: bulk grows with body size, meat and fish cost more than hay. */
+export function dailyFoodCost(sp: SpeciesDef, growth: number): number {
+  const diet = sp.diet === 'carnivore' ? 2.4 : sp.diet === 'herbivore' ? 1 : 1.6;
+  return Math.round((1.5 + 6 * foodScale(sp) * diet) * (0.4 + 0.6 * Math.min(1, growth)));
 }
 /** Collision radius (m). */
 export function bodyRadius(sp: SpeciesDef, growth: number): number {
@@ -135,6 +148,7 @@ export class AnimalSystem {
       escaped: !hid,
       seed: rng.int(0, 0x7fffffff),
       home: hid,
+      homeTile: hid ? sim.world.idx(t.x, t.z) : -1,
       goal: 'idle',
       goalTime: rng.range(0.5, 2),
       moving: false,
@@ -145,6 +159,7 @@ export class AnimalSystem {
       ref: 0,
       think: 1,
       stuck: 0,
+      bestDist: -1,
       mother: opts.mother ?? 0,
       breedCooldown: adult ? rng.range(1, 4) : sp.maturityDays,
       sick: false,
@@ -295,6 +310,7 @@ export class AnimalSystem {
     a.tgtZ = tz;
     a.moving = true;
     a.stuck = 0;
+    a.bestDist = -1;
     return true;
   }
 
@@ -339,10 +355,26 @@ export class AnimalSystem {
     const t = this.tileOf(a.x, a.z);
     const hid = t >= 0 && t < w.habitatOf.length ? w.habitatOf[t] : 0;
     if (a.crossing) return;
+    if (hid && !a.escaped) a.homeTile = t;
     if (!a.escaped) {
       if (!hid) {
-        // the enclosure was opened (fence removed / bulldozed)
-        this.becomeLoose(a, `${a.name} the ${sp.name} got out — its habitat is no longer fenced in!`);
+        // the fence was opened (removed / bulldozed): the animal stays put in its old
+        // enclosure, and only counts as escaped once it wanders out through the gap
+        const open = a.home && this.sim.enclosures.openOf[t] === a.home ? this.sim.enclosures.find(a.home) : undefined;
+        if (open) {
+          if (a.habitatId !== null) {
+            a.habitatId = null;
+            this.sim.markPopulationDirty();
+          }
+        } else {
+          const from = this.sim.enclosures.find(a.home);
+          this.becomeLoose(
+            a,
+            from
+              ? `${a.name} the ${sp.name} wandered out of ${from.name} through the open fence!`
+              : `${a.name} the ${sp.name} got out — its habitat is no longer fenced in!`,
+          );
+        }
       } else if (hid !== a.habitatId) {
         a.habitatId = hid;
         a.home = hid;
@@ -503,15 +535,34 @@ export class AnimalSystem {
         if (this.returnHome(a)) {
           sim.spend('animalPurchases', RESCUE_FEE);
           sim.notify(null, `An animal rescue team returned ${a.name} the ${sp.name} (fee $${RESCUE_FEE}). Hire a vet or keeper to handle escapes.`, 'warn', { x: a.x, z: a.z });
+        } else {
+          this.warnNoHome(a, sp);
+          // nowhere to take it yet: once there is, staff get a minute before the paid team steps in
+          a.escapeTime = RESCUE_AFTER - 60;
         }
       }
     }
   }
 
+  /** Tell the player why a stray can't be taken back (once in a while per home). */
+  private warnNoHome(a: AnimalSim, sp: SpeciesDef) {
+    const open = this.sim.enclosures.find(a.home);
+    const focus = { x: a.x, z: a.z };
+    if (open) this.sim.notify(`nohome:${open.id}`, `The animals of ${open.name} can’t be taken back until its fence is closed again.`, 'warn', focus, 300);
+    else this.sim.notify(`nohome:${sp.id}`, `${a.name} the ${sp.name} has no habitat to go back to — build one or sell it.`, 'warn', focus, 300);
+  }
+
   private warn(a: AnimalSim, sp: SpeciesDef) {
     const sim = this.sim;
     const hid = a.habitatId;
-    if (a.escaped || !hid) return;
+    if (a.escaped) return;
+    if (!hid) {
+      // a reminder once the fence has been open a while (removing it already warned)
+      const open = sim.enclosures.find(a.home);
+      if (open && sim.time - open.openedAt > OPEN_REMINDER_AFTER)
+        sim.notify(`open:${open.id}`, `${open.name} is still open — close the gap in its fence before the animals wander off.`, 'bad', { x: a.x, z: a.z }, 150);
+      return;
+    }
     const hab = sim.world.habitats.get(hid);
     const where = hab?.name ?? 'their habitat';
     const focus = { x: a.x, z: a.z };
@@ -532,13 +583,24 @@ export class AnimalSystem {
     if (a.needs.thirst < 0.15) {
       const e = sim.evalFor(hid, a.speciesId);
       if (e && !e.hasWater) sim.notify(`thirsty:${hid}`, `The ${pluralName(sp.id)} in ${where} are thirsty — add a pond or water trough.`, 'bad', focus, 150);
-      else if (a.needs.thirst < 0.06) sim.notify(`thirsty:${hid}`, `The ${pluralName(sp.id)} in ${where} can’t reach their water.`, 'bad', focus, 150);
+      // only when no water is reachable at all; otherwise the animal is on its way to drink
+      else if (a.needs.thirst < 0.06 && sim.canNotify(`thirsty:${hid}`, 150) && !this.canReachWater(a, sp, hid))
+        sim.notify(`thirsty:${hid}`, `The ${pluralName(sp.id)} in ${where} can’t reach their water.`, 'bad', focus, 150);
     }
     if (a.happiness < 0.3 && a.growth >= 1) {
-      const e = sim.evalFor(hid, a.speciesId);
-      const why = e?.issues[0];
+      const why = this.unhappyReason(a, sim.evalFor(hid, a.speciesId));
       sim.notify(`unhappy:${hid}:${sp.id}`, `${a.name} the ${sp.name} is unhappy${why ? `: ${why}` : ''}.`, 'warn', focus, 300);
     }
+  }
+
+  /** The most pressing reason an animal is unhappy: its own state first, then the habitat's worst problem. */
+  private unhappyReason(a: AnimalSim, e: SpeciesEval | null): string | undefined {
+    const n = a.needs;
+    if (n.thirst < 0.2) return e && !e.hasWater ? 'it has nothing to drink — paint a pond or add a Water Trough' : 'it is very thirsty';
+    if (n.hunger < 0.2) return this.sim.keeperCount() ? 'it is very hungry' : 'it is very hungry — hire a keeper';
+    if (a.sick) return 'it is sick';
+    if (a.stress > 0.5 && !e?.predators) return 'it is frightened';
+    return e?.issues[0];
   }
 
   /** Every game hour: dung, sickness, breeding and escape attempts. */
@@ -797,7 +859,8 @@ export class AnimalSystem {
     }
     const hid = a.habitatId;
     if (!hid) {
-      this.setGoal(a, 'idle', 3);
+      const open = sim.enclosures.find(a.home);
+      if (!open || !this.chooseLinger(a, sp, open)) this.setGoal(a, 'idle', 3);
       return;
     }
     const tiles = sim.habitatTiles(hid);
@@ -811,12 +874,14 @@ export class AnimalSystem {
         if (this.chooseFlee(a, sp, pred)) return;
       }
     }
-    // babies stay with their mother
+    // babies stay with their mother, but drink and eat on their own when they need to
     if (a.mother && a.growth < 0.75) {
+      if (n.thirst < 0.35 && this.chooseDrink(a, sp, hid)) return;
+      if (n.hunger < 0.35 && this.chooseEat(a, sp, hid)) return;
       const m = sim.animals.get(a.mother);
       if (m && !m.escaped && m.habitatId === hid) {
         if (m.action === 'sleep' && !m.moving) {
-          if (this.goNear(a, sp, m.x, m.z, bodyRadius(SPECIES_BY_ID[m.speciesId], 1) + 0.6)) {
+          if (this.goNear(a, sp, m.x, m.z, bodyRadius(SPECIES_BY_ID[m.speciesId], 1) + 0.6) && this.canBedDown(sp, a.tgtX, a.tgtZ)) {
             this.setGoal(a, 'sleep', 30, true);
             return;
           }
@@ -857,7 +922,8 @@ export class AnimalSystem {
     }
     if (r < lazy) {
       if (n.energy < 0.6 && rng.chance(0.5) && this.chooseSleep(a, sp, hid)) return;
-      this.setGoal(a, 'rest', rng.range(12, 35));
+      // nobody sits down in a pond: stand and rest instead
+      this.setGoal(a, this.inWater(a, sp) ? 'idle' : 'rest', rng.range(12, 35));
       return;
     }
     if (r < lazy + 0.15) {
@@ -974,6 +1040,49 @@ export class AnimalSystem {
     this.setGoal(a, 'idle', 3);
   }
 
+  /**
+   * The fence of the animal's enclosure was opened: it potters about the old
+   * footprint, and now and then (more often when hungry or thirsty, since nobody
+   * feeds an open enclosure) finds the gap and wanders out.
+   */
+  private chooseLinger(a: AnimalSim, sp: SpeciesDef, open: OpenEnclosure): boolean {
+    const rng = this.sim.rng;
+    const n = a.needs;
+    const needy = n.thirst < 0.4 || n.hunger < 0.4;
+    if (rng.chance(needy ? 0.3 : 0.08) && this.chooseWanderOut(a, sp, open)) return true;
+    if (sp.diet === 'herbivore' && n.hunger < 0.8 && this.onGrazing(a) && rng.chance(0.5)) {
+      this.setGoal(a, 'graze', rng.range(8, 20));
+      return true;
+    }
+    if (rng.chance(0.3)) {
+      this.setGoal(a, this.inWater(a, sp) ? 'idle' : 'rest', rng.range(6, 20));
+      return true;
+    }
+    this.setCtx(a, sp);
+    for (let k = 0; k < 3; k++) {
+      const t = this.randomTile(open.tiles);
+      if (t < 0 || !this.enterable(t)) continue;
+      this.tileCentre(t, this.tc);
+      if (this.goTo(a, sp, this.tc.x + rng.range(-0.6, 0.6), this.tc.z + rng.range(-0.6, 0.6))) {
+        this.setGoal(a, 'wander', rng.range(1.5, 5), true);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Head for the nearest tile outside the opened enclosure (through the gap in its fence). */
+  private chooseWanderOut(a: AnimalSim, sp: SpeciesDef, open: OpenEnclosure): boolean {
+    const openOf = this.sim.enclosures.openOf;
+    this.setCtx(a, sp);
+    const out = this.sim.search.nearest(this.tileOf(a.x, a.z), this.pass, (t) => openOf[t] !== open.id, open.tiles.length + 64);
+    if (out < 0) return false; // closed on every side after all (e.g. by the map edge)
+    this.tileCentre(out, this.tc);
+    if (!this.goTo(a, sp, this.tc.x, this.tc.z)) return false;
+    this.setGoal(a, 'roam', 2, true);
+    return true;
+  }
+
   private chooseSleep(a: AnimalSim, sp: SpeciesDef, hid: number): boolean {
     const sim = this.sim;
     const rng = sim.rng;
@@ -982,7 +1091,7 @@ export class AnimalSystem {
     const dur = sim.isNight() ? rng.range(60, 140) : rng.range(25, 60);
     // shelters first
     const shelter = this.nearestObject(a, hab.objects, (id) => OBJECTS_BY_ID[id]?.serves === 'shelter');
-    if (shelter && rng.chance(0.75) && this.approachObject(a, sp, shelter, true)) {
+    if (shelter && rng.chance(0.75) && this.approachObject(a, sp, shelter, true) && this.canBedDown(sp, a.tgtX, a.tgtZ)) {
       this.setGoal(a, 'sleep', dur, true);
       return true;
     }
@@ -990,24 +1099,47 @@ export class AnimalSystem {
     for (const b of sim.animals.values()) {
       if (b === a || b.speciesId !== a.speciesId || b.habitatId !== hid || b.escaped) continue;
       if (b.action === 'sleep' || b.goal === 'sleep') {
-        if (this.goNear(a, sp, b.x, b.z, bodyRadius(sp, 1) * 2.2)) {
+        if (this.goNear(a, sp, b.x, b.z, bodyRadius(sp, 1) * 2.2) && this.canBedDown(sp, a.tgtX, a.tgtZ)) {
           this.setGoal(a, 'sleep', dur, true);
           return true;
         }
         break;
       }
     }
+    this.stopMoving(a);
     const tiles = sim.habitatTiles(hid);
     if (!tiles) return false;
     const pool = tiles.interior.length ? tiles.interior : tiles.land;
-    const t = this.randomTile(pool);
-    if (t < 0) return false;
-    this.tileCentre(t, this.tc);
-    if (this.goTo(a, sp, this.tc.x + rng.range(-0.5, 0.5), this.tc.z + rng.range(-0.5, 0.5))) {
-      this.setGoal(a, 'sleep', dur, true);
-      return true;
+    for (let k = 0, routes = 0; k < 8 && routes < 2; k++) {
+      const t = this.randomTile(pool);
+      if (t < 0) return false;
+      this.tileCentre(t, this.tc);
+      const x = this.tc.x + rng.range(-0.5, 0.5),
+        z = this.tc.z + rng.range(-0.5, 0.5);
+      if (!this.canBedDown(sp, x, z)) continue;
+      routes++;
+      if (this.goTo(a, sp, x, z)) {
+        this.setGoal(a, 'sleep', dur, true);
+        return true;
+      }
     }
     return false;
+  }
+
+  /** A non-swimmer standing in water (more than ankle deep). */
+  private inWater(a: AnimalSim, sp: SpeciesDef): boolean {
+    return !sp.swims && WATER_LEVEL - this.sim.world.heightAt(a.x, a.z) > WET_DEPTH;
+  }
+
+  /** Can the animal sleep at (x, z)? Not in water, except waders: they sleep standing on one leg. */
+  private canBedDown(sp: SpeciesDef, x: number, z: number): boolean {
+    return sp.swims || sp.rig === 'bird' || WATER_LEVEL - this.sim.world.heightAt(x, z) <= WET_DEPTH;
+  }
+
+  private stopMoving(a: AnimalSim) {
+    a.moving = false;
+    a.route.length = 0;
+    a.routeIdx = 0;
   }
 
   private chooseEat(a: AnimalSim, sp: SpeciesDef, hid: number): boolean {
@@ -1220,6 +1352,27 @@ export class AnimalSystem {
     return best;
   }
 
+  /** Is there a drinking spot (water's edge or a trough) the animal can walk to? */
+  private canReachWater(a: AnimalSim, sp: SpeciesDef, hid: number): boolean {
+    const w = this.sim.world;
+    const tiles = this.sim.habitatTiles(hid);
+    const hab = w.habitats.get(hid);
+    if (!tiles || !hab) return false;
+    const spots = new Set(tiles.drink);
+    for (const oid of hab.objects) {
+      const o = w.objects.get(oid);
+      if (!o || o.defId !== 'water_trough') continue;
+      for (const f of w.footprint(o))
+        for (let k = 0; k < 4; k++) {
+          const nx = f.x + (k === 0 ? 1 : k === 1 ? -1 : 0),
+            nz = f.z + (k === 2 ? 1 : k === 3 ? -1 : 0);
+          if (w.inBounds(nx, nz) && !w.fenceBetween(f.x, f.z, nx, nz)) spots.add(w.idx(nx, nz));
+        }
+    }
+    this.setCtx(a, sp);
+    return this.sim.search.nearest(this.tileOf(a.x, a.z), this.pass, (t) => spots.has(t) && this.enterable(t), 4000) >= 0;
+  }
+
   /** Walk up to an object: stand next to a solid one, or on a walk-over one. */
   private approachObject(a: AnimalSim, sp: SpeciesDef, obj: { id: number; cx: number; cz: number }, nearOnly: boolean): boolean {
     const w = this.sim.world;
@@ -1313,18 +1466,74 @@ export class AnimalSystem {
     a.goalTime = 0.1;
   }
 
+  /**
+   * Habitat a stray should be taken back to (0 = none for now): its home; else the
+   * habitat now covering its old home ground (fence rebuilt or moved); nothing while
+   * its home enclosure is merely open (it goes back once that is closed again);
+   * else the best habitat that suits the species and its residents.
+   */
+  homeFor(a: AnimalSim): number {
+    const sim = this.sim;
+    const w = sim.world;
+    if (w.habitats.has(a.home)) return a.home;
+    const covering = a.homeTile >= 0 && a.homeTile < w.habitatOf.length ? w.habitatOf[a.homeTile] : 0;
+    if (covering) return covering;
+    if (sim.enclosures.find(a.home)) return 0;
+    const sp = SPECIES_BY_ID[a.speciesId];
+    if (!sp) return 0;
+    let best = 0,
+      bestScore = -1;
+    for (const hab of w.habitats.values()) {
+      const pop = sim.population(hab.id);
+      const e = evaluateSpecies(w, hab, sp, pop, sim.keeperCount(), true);
+      if (e.compat < 0.9 || !e.fenceOk) continue; // never among predators / prey, nor behind a weak fence
+      // its own kind first, then the best suited
+      const score = e.score + ((pop.count.get(sp.id) ?? 0) > 0 ? 1 : 0);
+      if (score > bestScore) {
+        bestScore = score;
+        best = hab.id;
+      }
+    }
+    return best;
+  }
+
+  /** Put an animal down at a validated spot inside a habitat (the player's Move command). */
+  relocate(a: AnimalSim, wx: number, wz: number) {
+    const w = this.sim.world;
+    const sp = SPECIES_BY_ID[a.speciesId];
+    const t = w.tileOfWorld(wx, wz);
+    const hid = w.habitatAt(t.x, t.z)?.id ?? 0;
+    a.x = a.tgtX = wx;
+    a.z = a.tgtZ = wz;
+    a.habitatId = hid || null;
+    a.home = hid;
+    a.homeTile = hid ? w.idx(t.x, t.z) : -1;
+    a.crossing = false;
+    a.moving = false;
+    a.route.length = 0;
+    a.routeIdx = 0;
+    a.ref = 0;
+    a.stuck = 0;
+    a.bestDist = -1;
+    a.face = NO_FACE;
+    a.goal = 'idle';
+    a.goalTime = 2;
+    // set down in shallows too deep to stand in: step onto the nearest spot it can stand on
+    if (!sp.swims) {
+      this.setCtx(a, sp);
+      const t0 = this.tileOf(wx, wz);
+      if (!this.enterable(t0) || this.depthAt(wx, wz) > this.ctxWade) this.unstick(a, sp, t0);
+    }
+    this.placeY(a, sp);
+    this.sim.markPopulationDirty();
+  }
+
   /** Carry an escaped animal back to its habitat (staff / rescue). Returns success. */
   returnHome(a: AnimalSim): boolean {
     const sim = this.sim;
     const sp = SPECIES_BY_ID[a.speciesId];
-    let hid = sim.world.habitats.has(a.home) ? a.home : 0;
-    if (!hid) {
-      for (const b of sim.animals.values()) if (b !== a && !b.escaped && b.speciesId === a.speciesId && b.habitatId) hid = b.habitatId;
-    }
-    if (!hid) {
-      sim.notify(`nohome:${a.id}`, `${a.name} the ${sp.name} has no habitat to go back to — build one or sell it.`, 'warn', { x: a.x, z: a.z }, 120);
-      return false;
-    }
+    const hid = this.homeFor(a);
+    if (!hid) return false;
     const tiles = sim.habitatTiles(hid);
     if (!tiles) return false;
     const pool = tiles.interior.length ? tiles.interior : tiles.land;
@@ -1377,6 +1586,7 @@ export class AnimalSystem {
         const reach = Math.max(0.8, halfLength(sp, a.growth) * 0.6);
         if (cur === t || d2 < reach * reach) {
           a.routeIdx++;
+          a.bestDist = -1;
           continue;
         }
       } else {
@@ -1393,14 +1603,6 @@ export class AnimalSystem {
     if (final && dist < arrive + 0.02) {
       this.arrive(a);
       return;
-    }
-    // jostling with a herd mate for the same spot: close enough counts as arrived
-    if (final && a.goal !== 'hunt' && a.goal !== 'breakout' && dist < Math.max(0.6, bodyRadius(sp, a.growth) * 1.2)) {
-      a.stuck += dt;
-      if (a.stuck > 1.2) {
-        this.arrive(a);
-        return;
-      }
     }
     const desired = Math.atan2(dx, dz);
     const diff = wrapAngle(desired - a.heading);
@@ -1438,18 +1640,68 @@ export class AnimalSystem {
       return;
     }
     const moved = this.tryMove(a, sp, nx, nz);
-    if (!moved && a.speed > 0.05 && dist >= 0.6) {
-      a.stuck += dt;
-      if (a.stuck > 1.2) {
-        a.speed = 0;
-        if (a.stuck > 3 || !this.goTo(a, sp, a.tgtX, a.tgtZ)) {
-          a.moving = false;
-          a.stuck = 0;
-          a.goalTime = Math.min(a.goalTime, 1);
-        }
-      }
-    } else if (moved && dist >= 0.6) a.stuck = Math.max(0, a.stuck - dt);
+    this.checkProgress(a, sp, dt, dist, final, moved, ad);
     this.placeY(a, sp);
+  }
+
+  /**
+   * Stuck = no progress towards the current waypoint. Sliding along a fence or being
+   * clamped back by a fence / water margin still moves the body a little every
+   * step, so progress is judged by the distance closed (5 cm), not by movement.
+   * After STUCK_REPLAN s the route is planned again; after STUCK_GIVE_UP s the
+   * animal settles where it is if that is close enough, or picks something else.
+   */
+  private checkProgress(a: AnimalSim, sp: SpeciesDef, dt: number, dist: number, final: boolean, moved: boolean, turning: number) {
+    const was = a.stuck;
+    if (a.goal === 'hunt' || a.goal === 'follow') {
+      // chasing a moving target: only a blocked body counts
+      a.stuck = moved ? Math.max(0, a.stuck - dt) : a.stuck + dt;
+    } else if (a.bestDist < 0) a.bestDist = dist;
+    else if (dist < a.bestDist - 0.05) {
+      a.bestDist = dist;
+      a.stuck = 0;
+    } else if (turning < 0.6 || !moved) a.stuck += dt; // (turning round on the spot is not being stuck)
+    if (a.stuck <= STUCK_REPLAN) return;
+    // close enough: jostling with a herd mate for the same spot, or already at the water's edge to drink
+    const settle = final && a.goal !== 'hunt' && a.goal !== 'breakout';
+    const nearSpot = (reach: number) => settle && (dist < reach || (a.goal === 'drink' && this.atWater(a, sp)));
+    const r = bodyRadius(sp, a.growth);
+    if (was <= STUCK_REPLAN) {
+      if (nearSpot(Math.max(0.6, r * 1.2))) {
+        a.stuck = 0;
+        this.arrive(a);
+      } else if (this.goTo(a, sp, a.tgtX, a.tgtZ)) {
+        a.stuck = was + dt; // keep counting: a hopeless target is still given up
+        a.speed = 0;
+      }
+    } else if (a.stuck > STUCK_GIVE_UP) {
+      a.stuck = 0;
+      if (nearSpot(Math.max(1, r + 0.8))) this.arrive(a);
+      else {
+        this.stopMoving(a);
+        this.setGoal(a, 'idle', 1);
+      }
+    }
+  }
+
+  /** Is the animal's head at (or in) water it may drink from? */
+  private atWater(a: AnimalSim, sp: SpeciesDef): boolean {
+    const w = this.sim.world;
+    const x = Math.floor(a.x / TILE),
+      z = Math.floor(a.z / TILE);
+    const reach = halfLength(sp, a.growth) + 0.5;
+    for (let k = 0; k < 5; k++) {
+      const nx = x + (k === 1 ? 1 : k === 2 ? -1 : 0),
+        nz = z + (k === 3 ? 1 : k === 4 ? -1 : 0);
+      if (!w.inBounds(nx, nz) || (k > 0 && w.fenceBetween(x, z, nx, nz))) continue;
+      const t = w.terrain[w.idx(nx, nz)];
+      if (t !== Terrain.Water && t !== Terrain.DeepWater) continue;
+      // distance from the body centre to that water tile
+      const ddx = Math.max(nx * TILE - a.x, 0, a.x - (nx + 1) * TILE),
+        ddz = Math.max(nz * TILE - a.z, 0, a.z - (nz + 1) * TILE);
+      if (ddx * ddx + ddz * ddz < reach * reach) return true;
+    }
+    return false;
   }
 
   /** Move to (nx, nz) if legal, sliding along walls. Returns whether the animal moved. */
@@ -1621,6 +1873,8 @@ export class AnimalSystem {
     else if (a.moving && a.speed > 0.05) act = a.speed > sp.walkSpeed * 1.45 ? 'run' : 'walk';
     else if (a.moving) act = 'idle';
     else act = ANIMAL_ACTION_FOR_GOAL[a.goal];
+    // never sit (nor, except waders, sleep) in water: stand instead
+    if ((act === 'sit' || (act === 'sleep' && sp.rig !== 'bird')) && !sp.swims && WATER_LEVEL - a.y > WET_DEPTH) act = 'idle';
     if (act !== a.action) {
       a.action = act;
       a.actionTime = 0;

@@ -40,8 +40,9 @@ import { World, type EdgeRef, type WorldSave } from '../core/world';
 import { FENCES_BY_ID } from '../data/fences';
 import { OBJECTS_BY_ID } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
-import { AnimalSystem } from './animals';
+import { AnimalSystem, dailyFoodCost } from './animals';
 import { Commands, staffWage, terrainCost } from './commands';
+import { EnclosureMemory, type OpenEnclosureSave } from './enclosures';
 import { buildHabitatTiles, evaluateSpecies, type HabitatPopulation, type HabitatTiles, type SpeciesEval } from './habitat';
 import { GuestSystem } from './guests';
 import { N_TILES, PathNav, TileSearch } from './nav';
@@ -55,6 +56,8 @@ import type { AnimalSim, GuestSim, HabitatRuntime, StaffSim } from './state';
 export const MAX_STEP = 0.1;
 export const MAX_LITTER = 450;
 const SAVE_VERSION = 1;
+/** Guest satisfaction a new zoo starts with (it then follows departing guests' happiness). */
+const START_SATISFACTION = 0.5;
 
 export type IncomeKind = 'admissions' | 'shopIncome' | 'donations' | 'other';
 export type ExpenseKind = 'upkeep' | 'salaries' | 'construction' | 'animalPurchases';
@@ -109,6 +112,12 @@ interface SimSaveData extends SimSave {
   satisfaction: number;
   progress: Record<string, number>;
   debtWarned: boolean;
+  /** Habitats whose fence is open (remembered so re-closing restores them). */
+  openEnclosures?: OpenEnclosureSave[];
+  /** Objects with an id up to this came free with the starter map. */
+  starterObjectMaxId?: number;
+  /** Run-length encoded starterPath mask. */
+  starterPath?: number[];
 }
 
 export class Simulation implements ISimulation {
@@ -141,10 +150,16 @@ export class Simulation implements ISimulation {
   guestsToday = 0;
   totalVisitors = 0;
   /** Smoothed happiness of departing guests (0..1). */
-  satisfaction = 0.6;
+  satisfaction = START_SATISFACTION;
   nextIds = { animal: 1, guest: 1, staff: 1, litter: 1 };
   readonly habRt = new Map<number, HabitatRuntime>();
   debtWarned = false;
+  /**
+   * Scenery the starter map came with is free, so removing it refunds nothing:
+   * objects with an id up to this one, and path tiles marked in `starterPath`.
+   */
+  starterObjectMaxId = 0;
+  readonly starterPath = new Uint8Array(N_TILES);
 
   // ---- subsystems
   readonly nav: PathNav;
@@ -154,6 +169,7 @@ export class Simulation implements ISimulation {
   readonly staffSys: StaffSystem;
   readonly cmd: Commands;
   readonly progress: Progress;
+  readonly enclosures: EnclosureMemory;
 
   // ---- derived caches (never serialized; rebuilt from state on demand)
   private evalCache = new Map<number, Map<string, SpeciesEval>>();
@@ -179,6 +195,8 @@ export class Simulation implements ISimulation {
   private notifyLast = new Map<string, number>();
   private pendingDelta = 0;
   private pendingNewSeed: number | undefined;
+  /** Set while load / newGame replace the world (habitats are not "changed" then, but new). */
+  private replacingWorld = false;
   private offs: (() => void)[] = [];
 
   constructor(events: EventBus, seed?: number) {
@@ -193,6 +211,7 @@ export class Simulation implements ISimulation {
     this.staffSys = new StaffSystem(this);
     this.cmd = new Commands(this);
     this.progress = new Progress(this);
+    this.enclosures = new EnclosureMemory(this);
     const dirtyAll = () => {
       this.evalDirty = true;
       this.tilesDirty = true;
@@ -205,6 +224,9 @@ export class Simulation implements ISimulation {
       events.on('objectRemoved', dirtyAll),
       events.on('fenceChanged', dirtyAll),
       events.on('worldReset', dirtyAll),
+      events.on('habitatsChanged', () => {
+        if (!this.replacingWorld) this.enclosures.onHabitatsChanged();
+      }),
     );
   }
 
@@ -287,6 +309,11 @@ export class Simulation implements ISimulation {
     for (let i = 0; i < this.world.hFence.length; i++) if (this.world.hFence[i]) fenceUpkeep += 0.1 * (FENCES_BY_ID[this.world.hFence[i]]?.strength ?? 1);
     for (let i = 0; i < this.world.vFence.length; i++) if (this.world.vFence[i]) fenceUpkeep += 0.1 * (FENCES_BY_ID[this.world.vFence[i]]?.strength ?? 1);
     upkeep += Math.round(fenceUpkeep);
+    // the animals' food is part of the daily running costs
+    for (const a of this.animals.values()) {
+      const sp = SPECIES_BY_ID[a.speciesId];
+      if (sp) upkeep += dailyFoodCost(sp, a.growth);
+    }
     let salaries = 0;
     for (const s of this.staff.values()) salaries += s.salary;
     if (upkeep) this.spend('upkeep', upkeep);
@@ -343,6 +370,12 @@ export class Simulation implements ISimulation {
   }
 
   // =========================================================== notifications
+  /** Whether a toast with this key would be shown now (not throttled by `cooldown`). */
+  canNotify(key: string, cooldown = 90): boolean {
+    const last = this.notifyLast.get(key);
+    return last === undefined || this.time - last >= cooldown;
+  }
+
   /**
    * Toast for the player. `key` throttles repeats: the same key is not shown
    * again for `cooldown` simulated seconds (null = never throttled).
@@ -407,6 +440,41 @@ export class Simulation implements ISimulation {
   habitatRuntime(id: number): HabitatRuntime | undefined {
     if (this.habSyncDirty) this.syncHabitats();
     return this.habRt.get(id);
+  }
+
+  /**
+   * A habitat vanished: staff stop working on it, and animals forget it as their
+   * home unless the enclosure was only opened (EnclosureMemory keeps it then).
+   */
+  forgetHabitat(id: number, opened: boolean) {
+    for (const s of this.staff.values()) {
+      if ((s.job === 'service' || s.job === 'heal') && s.jobRef === id) {
+        s.job = 'none';
+        s.jobRef = 0;
+        s.goalKey = '';
+        s.next = -1;
+        s.phase = 0;
+        s.timer = 0.5;
+        s.task = 'Looking for work';
+      }
+    }
+    if (!opened) for (const a of this.animals.values()) if (a.home === id) a.home = 0;
+  }
+
+  /** An opened enclosure was closed again as habitat `newId`: its animals live there now. */
+  rehomeHabitat(oldId: number, newId: number) {
+    for (const a of this.animals.values()) if (a.home === oldId) a.home = newId;
+    this.markPopulationDirty();
+  }
+
+  /** After a load: drop references to habitats that no longer exist. */
+  private dropStaleHabitatRefs() {
+    for (const a of this.animals.values()) {
+      if (a.home && !this.world.habitats.has(a.home) && !this.enclosures.find(a.home)) a.home = 0;
+    }
+    for (const s of this.staff.values()) {
+      if ((s.job === 'service' || s.job === 'heal') && !this.world.habitats.has(s.jobRef)) this.forgetHabitat(s.jobRef, true);
+    }
   }
 
   private refreshPopulations() {
@@ -592,8 +660,14 @@ export class Simulation implements ISimulation {
   buyAnimal(speciesId: string, wx: number, wz: number, dryRun = false): CommandResult {
     return this.cmd.buyAnimal(speciesId, wx, wz, dryRun);
   }
-  sellAnimal(animalId: number): CommandResult {
-    return this.cmd.sellAnimal(animalId);
+  sellAnimal(animalId: number, dryRun = false): CommandResult {
+    return this.cmd.sellAnimal(animalId, dryRun);
+  }
+  moveAnimal(animalId: number, wx: number, wz: number, dryRun = false): CommandResult {
+    return this.cmd.moveAnimal(animalId, wx, wz, dryRun);
+  }
+  moveObject(objectId: number, tx: number, tz: number, rot: number, dryRun = false): CommandResult {
+    return this.cmd.moveObject(objectId, tx, tz, rot, dryRun);
   }
   hireStaff(role: StaffRole, wx: number, wz: number, dryRun = false): CommandResult {
     return this.cmd.hireStaff(role, wx, wz, dryRun);
@@ -747,6 +821,9 @@ export class Simulation implements ISimulation {
       satisfaction: this.satisfaction,
       progress: this.progress.serialize(),
       debtWarned: this.debtWarned,
+      openEnclosures: this.enclosures.serialize(),
+      starterObjectMaxId: this.starterObjectMaxId,
+      starterPath: rleEncode(this.starterPath),
     };
     // deep copy (so later simulation never mutates a save that is still being written),
     // with fractional numbers rounded to 1/1000 — positions to the millimetre — which
@@ -772,7 +849,7 @@ export class Simulation implements ISimulation {
     this.guests.clear();
     this.staff.clear();
     this.litter.clear();
-    for (const a of unpackRows<AnimalSim>(s.animals)) this.animals.set(a.id, a);
+    for (const a of unpackRows<AnimalSim>(s.animals)) this.animals.set(a.id, upgradeAnimal(a));
     for (const g of unpackRows<GuestSim>(s.guests)) this.guests.set(g.id, upgradeGuest(g));
     for (const st of unpackRows<StaffSim>(s.staff)) this.staff.set(st.id, st);
     for (const l of unpackRows<Litter>(s.litter)) this.litter.set(l.id, l);
@@ -797,16 +874,26 @@ export class Simulation implements ISimulation {
     this.crowdAcc = s.crowdAcc ?? 0;
     this.guestsToday = s.guestsToday ?? 0;
     this.totalVisitors = s.totalVisitors ?? 0;
-    this.satisfaction = s.satisfaction ?? 0.6;
+    this.satisfaction = s.satisfaction ?? START_SATISFACTION;
     this.progress.load(s.progress ?? {});
     this.debtWarned = s.debtWarned ?? false;
+    // older saves did not track free starter scenery: everything counts as bought
+    this.starterObjectMaxId = s.starterObjectMaxId ?? 0;
+    this.starterPath.set(s.starterPath ? rleDecode(s.starterPath, N_TILES) : new Array<number>(N_TILES).fill(0));
     this.pendingDelta = 0;
     this.resetCaches();
     // Saves written before the world persisted habitat ids carry one sample tile per
     // habitat: seed the labelling with those so World.load keeps the old ids.
     if (!s.world.habitatRle && Array.isArray(s.habitatIds) && s.habitatIds.length) s.world.habitatRle = seedHabitatRle(s.habitatIds);
     // the world last: World.load emits worldReset, by which time every other piece of state is in place
-    this.world.load(s.world);
+    this.replacingWorld = true;
+    try {
+      this.world.load(s.world);
+    } finally {
+      this.replacingWorld = false;
+    }
+    this.enclosures.reset(s.openEnclosures ?? []);
+    this.dropStaleHabitatRefs();
     this.resetCaches();
     this.guestSys.afterLoad();
     this.events.emit('moneyChanged', { money: this.money, delta: 0 });
@@ -869,14 +956,24 @@ export class Simulation implements ISimulation {
     this.crowdAcc = 0;
     this.guestsToday = 0;
     this.totalVisitors = 0;
-    this.satisfaction = 0.6;
+    this.satisfaction = START_SATISFACTION;
     this.nextIds = { animal: 1, guest: 1, staff: 1, litter: 1 };
     this.debtWarned = false;
     this.progress.reset();
     this.pendingDelta = 0;
     this.resetCaches();
-    this.world.load(blank);
-    this.world.generateStarterMap(); // emits worldReset
+    this.replacingWorld = true;
+    try {
+      this.world.load(blank);
+      this.world.generateStarterMap(); // emits worldReset
+    } finally {
+      this.replacingWorld = false;
+    }
+    this.enclosures.reset();
+    let starterMax = 0;
+    for (const id of this.world.objects.keys()) starterMax = Math.max(starterMax, id);
+    this.starterObjectMaxId = starterMax;
+    for (let i = 0; i < N_TILES; i++) this.starterPath[i] = this.world.path[i] ? 1 : 0;
     this.resetCaches();
     this.guestSys.afterLoad();
     this.rating = this.progress.targetRating();
@@ -909,6 +1006,14 @@ function seedHabitatRle(ids: [number, number][]): number[] {
   return out;
 }
 
+/** Fill in animal fields added after a save was written. */
+function upgradeAnimal(a: AnimalSim): AnimalSim {
+  const d = a as Partial<AnimalSim>;
+  d.homeTile ??= a.escaped || !a.habitatId ? -1 : Math.floor(a.z / TILE) * MAP_W + Math.floor(a.x / TILE);
+  d.bestDist ??= -1;
+  return a;
+}
+
 /** Fill in guest fields added after a save was written. */
 function upgradeGuest(g: GuestSim): GuestSim {
   const d = g as Partial<GuestSim>;
@@ -920,6 +1025,8 @@ function upgradeGuest(g: GuestSim): GuestSim {
   d.fstate ??= 0;
   d.avoidObj ??= 0;
   d.avoidUntil ??= 0;
+  d.plan ??= 0;
+  d.ticketValue ??= 0;
   return g;
 }
 

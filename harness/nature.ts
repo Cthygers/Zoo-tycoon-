@@ -21,7 +21,7 @@ import { World } from '../src/core/world';
 import type { QualityLevel, QualitySettings } from '../src/core/contracts';
 import { OBJECTS_BY_ID } from '../src/data/objects';
 import { PROP_SPECS } from '../src/props/registry';
-import { natureResourceStats, setNatureQuality } from '../src/props/nature';
+import { natureResourceStats, withQuality } from '../src/props/nature';
 import { setupWindMesh, updateWind } from '../src/props/wind';
 import { albedoTexture, Img, lin, mix, pfbm, sat } from '../src/props/nature/tex';
 import { atlas, type AtlasKind } from '../src/props/nature/atlases';
@@ -36,7 +36,6 @@ const sunElev = (Number(params.get('sun') ?? '42') * Math.PI) / 180;
 const azOff = (Number(params.get('az') ?? '0') * Math.PI) / 180;
 const useLayer = params.get('layer') === '1';
 const useLod = params.get('lod') === '1';
-setNatureQuality(q);
 const QS: QualitySettings = { level: q, pixelRatio: 1, antialias: true, shadows: true, shadowMapSize: 2048, grassDensity: 0.5, postFX: false, detailDistance: 40, creatureDetail: 1 };
 
 const TREES = ['tree_acacia', 'tree_baobab', 'tree_oak', 'tree_pine', 'tree_birch', 'tree_palm', 'bamboo'];
@@ -221,7 +220,7 @@ const t0 = performance.now();
 let layerInfo = '';
 if (view === 'atlas') {
   // atlas debug: the texture on an unlit quad over a dark backdrop
-  const a = atlas(focusId as AtlasKind);
+  const a = withQuality(q, () => atlas(focusId as AtlasKind));
   const img = a.tex.image as { width: number; height: number };
   const asp = img.width / img.height;
   const mat = new THREE.MeshBasicMaterial({ map: a.tex, alphaTest: 0.5, side: THREE.DoubleSide });

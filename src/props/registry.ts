@@ -10,8 +10,9 @@ import type { QualitySettings } from '../core/contracts';
  *  - material.userData.nightEmissive = number → emissiveIntensity at full night (lamps, windows).
  *      Night glows are absolute (night exposure rises ~20×): the emissive colour already carries
  *      the strength, and nightEmissive ≥ 3 (lamp glass, bulbs) marks a lamp (halo + light pool).
- *  - material.userData.foliage = true       → leaves / fronds / stems: dithered near-camera fade
- *  - material.userData.fadeNear = boolean   → bark etc. also fades near the camera (true) or never (false)
+ *  - material.userData.foliage = true       → leaves / fronds / stems: near-camera fade (see lod/fade.ts)
+ *  - material.userData.fadeNear = true      → solid parts (bark, cactus): fade only while the camera is
+ *      inside / right next to the plant (never cut by the view hole)
  * Mesh userData conventions:
  *  - mesh.userData.noShadow = true          → never cast shadows (tiny details, glass)
  */

@@ -140,9 +140,10 @@ GSample mixSample(GSample a, GSample b, float m) {
   return r;
 }
 
-// Share of the lawn / grassland layers in the final blend (for hue variation and sheen).
+// Share of the lawn / grassland layers in the final blend (for hue variation
+// and sheen), and of the dry-grass layer alone.
 float gGrassy;
-float gLawn;
+float gDry;
 
 GSample sampleGround(vec3 wp, vec4 nzA, vec4 nzB, vec4 nzC, vec4 nzD) {
   gOuterY = wp.y;
@@ -150,18 +151,22 @@ GSample sampleGround(vec3 wp, vec4 nzA, vec4 nzB, vec4 nzC, vec4 nzD) {
   ivec2 here = ivec2(floor(tp));
   float fine = nzC.b * 0.55 + nzD.g * 0.45; // ≈2.4 m + 0.6 m noise
   if (!inMap(here)) {
-    // continuous meadow: dry patches fade in away from the border
+    // continuous meadow: sun-bleached patches fade in away from the border. Only
+    // a partial blend toward the dry layer (the lawn's green and relief stay)
+    // with edges broken up by fine noise and blade heights: straw-green turf,
+    // not flat beige stains.
     vec2 o = max(max(-wp.xz, wp.xz - vec2(MAP_WM, MAP_HM)), 0.0);
     float dOut = length(o);
     int base = outerLayer();
     float v = nzA.r * 0.6 + nzB.r * 0.4 + (fine - 0.5) * 0.12;
-    float dry = base == 0 ? smoothstep(0.52, 0.76, v) * smoothstep(6.0, 26.0, dOut) * 0.75 : 0.0;
+    float dry = base == 0 ? smoothstep(0.52, 0.76, v) * smoothstep(6.0, 26.0, dOut) : 0.0;
     GSample a = sampleLayer(base, wp.xz);
-    gLawn = base == 0 ? 1.0 - dry : 0.0;
     gGrassy = base == 0 ? 1.0 : 0.0;
+    gDry = 0.0;
     if (dry < 0.01) return a;
     GSample b = sampleLayer(1, wp.xz);
-    float m = smoothstep(0.25, 0.75, dry + (b.h - a.h) * 0.3);
+    float m = 0.5 * smoothstep(0.2, 0.6, dry + (b.h - a.h) * 0.4 + (nzD.g - 0.5) * 0.35);
+    gDry = m;
     return mixSample(a, b, m);
   }
   // small organic warp (≈0.7 tile) so borders never follow the tile grid
@@ -175,8 +180,8 @@ GSample sampleGround(vec3 wp, vec4 nzA, vec4 nzB, vec4 nzC, vec4 nzD) {
   int L2 = layerAt(i0 + ivec2(0, 1));
   int L3 = layerAt(i0 + ivec2(1, 1));
   if (L0 == L1 && L0 == L2 && L0 == L3) {
-    gLawn = L0 == 0 ? 1.0 : 0.0;
     gGrassy = L0 <= 1 ? 1.0 : 0.0;
+    gDry = L0 == 1 ? 1.0 : 0.0;
     return sampleLayer(L0, wp.xz);
   }
   // merge equal layers, keep the two strongest
@@ -203,8 +208,8 @@ GSample sampleGround(vec3 wp, vec4 nzA, vec4 nzB, vec4 nzC, vec4 nzD) {
   float nn = (fine - 0.5) * 0.5 + (nzD.b - 0.5) * 0.16;
   float s = t + ((A < B ? nn : -nn) + (b.h - a.h) * 0.3) * smoothstep(0.0, 0.25, t);
   float m = smoothstep(0.06, 0.94, s);
-  gLawn = mix(A == 0 ? 1.0 : 0.0, B == 0 ? 1.0 : 0.0, m);
   gGrassy = mix(A <= 1 ? 1.0 : 0.0, B <= 1 ? 1.0 : 0.0, m);
+  gDry = mix(A == 1 ? 1.0 : 0.0, B == 1 ? 1.0 : 0.0, m);
   return mixSample(a, b, m);
 }
 
@@ -261,6 +266,10 @@ const MAIN = /* glsl */ `
     tint = mix(tint, vec3(0.86, 0.97, 0.9), lush * 0.6);
     tint = mix(tint, vec3(1.08, 1.06, 0.95), smoothstep(0.62, 0.8, nzC.r) * 0.35);
     gAlb *= mix(vec3(1.0), tint, gGrassy);
+    // dry grass: still-living olive patches at ~10 m, so straw areas (and the
+    // dry spots on a lawn) are never one flat beige
+    float olive = smoothstep(0.45, 0.7, nzB.g * 0.6 + nzC.r * 0.4);
+    gAlb *= mix(vec3(1.0), vec3(0.86, 0.97, 0.72), gDry * olive * 0.6);
   }
   vec2 gSlope = gs.slope;
   float gRough = gs.rough;
@@ -320,18 +329,33 @@ const MAIN = /* glsl */ `
   gAlb *= mix(1.0, mix(0.62, 0.82, underwater), wet);
   gRough = mix(gRough, 0.45, wet * 0.8);
   if (underwater > 0.0) {
+    // light path down to the bed and back up to the eye (the down leg is
+    // shorter than the view leg under a high sun)
     float wd = max(-wy, 0.0);
     float vy = max(normalize(cameraPosition - vWPos).y, 0.25);
-    float path = wd / vy + wd * 0.8;
-    gAlb *= mix(vec3(1.0), exp(-path * vec3(0.62, 0.21, 0.3)), underwater);
+    float path = wd / vy + wd * 0.4;
+    gAlb *= mix(vec3(1.0), exp(-path * vec3(0.42, 0.15, 0.2)), underwater);
   }
   diffuseColor.rgb = gAlb;
 `;
 
-export function createGroundMaterial(textures: GroundTextureSet, typeTex: THREE.Texture, opts: GroundMaterialOptions): {
+export interface GroundMaterial {
   material: THREE.MeshStandardMaterial;
   uniforms: GroundUniforms;
-} {
+  /** Switch shader features (quality change); recompiles only when they differ. */
+  setOptions(opts: GroundMaterialOptions): void;
+}
+
+function definesFor(opts: GroundMaterialOptions): Record<string, number> {
+  const defines: Record<string, number> = {};
+  if (opts.antiTile) defines.ANTI_TILE = 1;
+  if (opts.cloudShadows) defines.CLOUD_SHADOWS = 1;
+  if (opts.caustics) defines.CAUSTICS = 1;
+  return defines;
+}
+
+export function createGroundMaterial(textures: GroundTextureSet, typeTex: THREE.Texture, initial: GroundMaterialOptions): GroundMaterial {
+  const opts = { ...initial };
   const layerXf: THREE.Vector4[] = [];
   for (let i = 0; i < GROUND_LAYERS; i++) {
     // natural layers get a unique rotation so their repeats never line up; paths stay tile aligned
@@ -354,11 +378,7 @@ export function createGroundMaterial(textures: GroundTextureSet, typeTex: THREE.
   const material = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, metalness: 0 });
   material.name = 'ground';
   material.envMapIntensity = 1;
-  const defines: Record<string, number> = {};
-  if (opts.antiTile) defines.ANTI_TILE = 1;
-  if (opts.cloudShadows) defines.CLOUD_SHADOWS = 1;
-  if (opts.caustics) defines.CAUSTICS = 1;
-  material.defines = defines;
+  material.defines = definesFor(opts);
   material.customProgramCacheKey = () => `ground2:${opts.antiTile ? 1 : 0}${opts.cloudShadows ? 1 : 0}${opts.caustics ? 1 : 0}`;
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
@@ -394,6 +414,12 @@ export function createGroundMaterial(textures: GroundTextureSet, typeTex: THREE.
 
           float occ = mix(1.0, gAO, 0.85);
           reflectedLight.indirectDiffuse *= occ;
+          // bright ground (snow): light bouncing between it, nearby sunlit snow
+          // and the haze adds a neutral fill the sky-only environment lacks, so
+          // shade on snow is a soft grey-blue instead of saturated sky blue
+          float gBright = smoothstep(0.38, 0.55, gLuma(gAlb));
+          vec3 gInd = reflectedLight.indirectDiffuse;
+          reflectedLight.indirectDiffuse = mix(gInd, vec3(gLuma(gInd)), gBright * 0.45) * (1.0 + 0.8 * gBright);
           // under water there is no air/ground specular interface
           reflectedLight.indirectSpecular *= occ * occ * (1.0 - underwater);
           reflectedLight.directSpecular *= 1.0 - underwater;
@@ -416,5 +442,11 @@ export function createGroundMaterial(textures: GroundTextureSet, typeTex: THREE.
         }`,
       );
   };
-  return { material, uniforms };
+  const setOptions = (next: GroundMaterialOptions) => {
+    if (next.antiTile === opts.antiTile && next.cloudShadows === opts.cloudShadows && next.caustics === opts.caustics) return;
+    Object.assign(opts, next);
+    material.defines = definesFor(opts);
+    material.needsUpdate = true;
+  };
+  return { material, uniforms, setOptions };
 }
