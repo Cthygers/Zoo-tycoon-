@@ -29,6 +29,11 @@ export interface MeshRegion extends Box3Like {
   keep?: (x: number, y: number, z: number, list: Int32Array) => boolean;
   /** Only sample blocks whose candidate list contains a primitive of this region index. */
   ownRegion?: number;
+  /**
+   * Primitives (by index, value 1) left out of this grid entirely, e.g. the
+   * primitives of a `noBase` detail region on the coarse base grid.
+   */
+  skipPrims?: Uint8Array;
 }
 
 export interface RawMesh {
@@ -107,10 +112,11 @@ export function surfaceNets(field: SdfField, region: MeshRegion): RawMesh {
       for (let bx = 0; bx < bnx; bx++) {
         const i0 = bx * BLOCK, j0 = by * BLOCK, k0 = bz * BLOCK;
         const i1 = Math.min(i0 + BLOCK, nx), j1 = Math.min(j0 + BLOCK, ny), k1 = Math.min(k0 + BLOCK, nz);
-        const list = field.cull(
+        let list = field.cull(
           ox + i0 * hx - pad, oy + j0 * hy - pad, oz + k0 * hz - pad,
           ox + (i1 - 1) * hx + pad, oy + (j1 - 1) * hy + pad, oz + (k1 - 1) * hz + pad,
         );
+        if (region.skipPrims && list.length) list = filterList(field, list, region.skipPrims);
         blockLists[bx + bnx * (by + bny * bz)] = list;
         const n = list.length;
         if (n === 0) continue;
@@ -286,6 +292,22 @@ export function surfaceNets(field: SdfField, region: MeshRegion): RawMesh {
   }
 
   return { positions: pos.view(), normals: nrm.view(), indices: idx.view() };
+}
+
+/** Drop skipped primitives from a block list (empty when only carving primitives remain). */
+function filterList(field: SdfField, list: Int32Array, skip: Uint8Array): Int32Array {
+  let n = 0, add = false;
+  for (let q = 0; q < list.length; q++) if (!skip[list[q]]) n++;
+  if (n === list.length) return list;
+  const out = new Int32Array(n);
+  n = 0;
+  for (let q = 0; q < list.length; q++) {
+    const i = list[q];
+    if (skip[i]) continue;
+    out[n++] = i;
+    if (!field.prims[i].sub) add = true;
+  }
+  return add ? out : new Int32Array(0);
 }
 
 function dist2(P: Float32Array, a: number, b: number): number {

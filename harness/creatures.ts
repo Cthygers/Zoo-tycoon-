@@ -15,9 +15,18 @@ import type { CreatureAnim, CreatureModel, QualitySettings } from '../src/core/c
 import type { HumanAppearance, StaffRole } from '../src/core/types';
 import { SPECIES } from '../src/data/species';
 import { CreatureFactory } from '../src/models';
+import { SEAM, setDebugRegions } from '../src/models/build/geometry';
 
 const q = new URLSearchParams(location.search);
 const num = (k: string, d: number) => (q.has(k) ? Number(q.get(k)) : d);
+// seam tuning / A-B: ?legacy=1, ?seamReach=0&seamReachMax=1.5&seamLead=0.1&seamFull=1.2&seamSink=0.35, ?regions=1 (console)
+if (q.get('legacy')) SEAM.legacy = true;
+SEAM.reach = num('seamReach', SEAM.reach);
+SEAM.lead = num('seamLead', SEAM.lead);
+SEAM.full = num('seamFull', SEAM.full);
+SEAM.reachMax = num('seamReachMax', SEAM.reachMax);
+SEAM.sink = num('seamSink', SEAM.sink);
+if (q.get('regions')) setDebugRegions(true);
 const detail = Math.max(0, Math.min(2, num('detail', 1))) as 0 | 1 | 2;
 const quality: QualitySettings = {
   level: (['low', 'medium', 'high'] as const)[detail],
@@ -171,7 +180,7 @@ async function build(): Promise<THREE.Vector3> {
           build: 0.9 + ((i * 3) % 4) * 0.08, child, female,
         },
         roles[i],
-        i * 17 + 3,
+        i * 17 + 3 + num('hseed', 0),
       );
       const col = i % 6, row = Math.floor(i / 6);
       m.object.position.set((col - 2.5) * 1.1, 0, row * -1.6);
@@ -224,11 +233,11 @@ async function build(): Promise<THREE.Vector3> {
     return target;
   }
   if (q.get('person')) {
-    const h = human({ female: q.get('sex') === 'F', child: !!q.get('child'), hairStyle: Number(q.get('hair') ?? 0) as 0, shirt: 0x8a3b2e }, (q.get('role') as StaffRole) ?? 'guest', num('seed', 4));
+    const h = human({ female: q.get('sex') === 'F', child: !!q.get('child'), hairStyle: Number(q.get('hair') ?? 0) as 0, shirt: 0x8a3b2e, skin: num('skin', 0xc68e6a) }, (q.get('role') as StaffRole) ?? 'guest', num('seed', 4));
     scene.add(h.object);
     const action = q.get('action') ?? 'idle';
     entries.push({ model: h, anim: { action, speed: num('speed', action === 'walk' ? 1.3 : 0), holding: q.get('hold') ?? 'none' } });
-    target.set(0, 0.9, 0);
+    target.set(0, num('ty', 0.9), num('tz', 0));
     return target;
   }
   const id = q.get('species') ?? 'zebra';

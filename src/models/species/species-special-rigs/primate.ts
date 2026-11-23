@@ -471,6 +471,7 @@ export function apeDriver(p: ApeParams): AnimDriver<ApeState> {
     aliases: { run: 'walk', leave: 'walk', rest: 'sit', swim: 'walk' },
     fade: 0.45,
     fades: { sleep: 1.3, sit: 0.9, eat: 0.9, social: 0.9, call: 0.35, drink: 0.8 },
+    transitions: { 'sleep>*': 1.5, 'sit>*': 0.9, 'eat>*': 0.8, 'drink>*': 0.8, 'sleep>sit': 1.1 },
   };
 }
 

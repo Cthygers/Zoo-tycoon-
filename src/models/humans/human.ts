@@ -40,7 +40,10 @@ export interface HumanAsset extends RigAsset {
   human: HumanDesign;
 }
 
-const GIRTH: Record<string, number> = { torso: 1, pelvis: 0.85, arm: 0.3, leg: 0.55, neck: 0.25, hand: 0, shoe: 0, head: 0.05, ear: 0, hair: 0.05, hat: 0 };
+const GIRTH: Record<string, number> = { torso: 1, pelvis: 0.85, skirt: 0.7, arm: 0.3, leg: 0.55, neck: 0.25, hand: 0, shoe: 0, head: 0.05, ear: 0, hair: 0.05, hat: 0 };
+
+/** Hand region cell (m) per detail level: low keeps the coarse arm grid. */
+const HAND_CELL: readonly number[] = [0, 0.02, 0.014];
 
 function humanBaker(d: HumanDesign): VertexBaker {
   const sh = d.marks.shoulderL;
@@ -85,6 +88,8 @@ function buildHumanAsset(key: HumanBodyKey, detail: 0 | 1 | 2): HumanAsset {
         brim: { scale: 0.3, aniso: [2, 1, 2] },
         armL: { scale: 0.45, aniso: [1, 2, 1] },
         armR: { scale: 0.45, aniso: [1, 2, 1] },
+        handL: detail > 0 ? { scale: 0.45, cell: HAND_CELL[detail] } : { scale: 0.45, aniso: [1, 2, 1] },
+        handR: detail > 0 ? { scale: 0.45, cell: HAND_CELL[detail] } : { scale: 0.45, aniso: [1, 2, 1] },
         legL: { aniso: [1, 2.4, 1] },
         legR: { aniso: [1, 2.4, 1] },
       },
@@ -109,7 +114,7 @@ function buildHumanAsset(key: HumanBodyKey, detail: 0 | 1 | 2): HumanAsset {
   const dummy = new THREE.MeshBasicMaterial();
   const sphere = new THREE.Sphere(center, Math.max(size.y, size.x, size.z) * 0.6 + 0.2);
   const asset: HumanAsset = {
-    key: `human:${key.female ? 'F' : 'M'}:${key.child ? 'c' : 'a'}:${key.hair}:${detail}`,
+    key: `human:${key.female ? 'F' : 'M'}:${key.child ? 'c' : 'a'}:${key.hair}${key.skirt ? ':skirt' : ''}:${detail}`,
     geometry: built.geometry,
     rig: built.rig,
     roles: resolveRoles(built.rig, hd.roles),
@@ -210,6 +215,12 @@ export class HumanModel extends RiggedModel implements BatchedModel {
       coat: -1,
       inflate: (app.build - 1) * 0.09,
     };
+    if ((asset.human.prims as { part?: string }[]).some((p) => p.part === 'skirt')) {
+      // skirt / dress: legs bare below the hem (thighs that poke through the
+      // skirt when striding take its colour); a dress when top and skirt match
+      cut.pants = 0.3;
+      if (r(8) < 0.45) colors.pants = colors.shirt;
+    }
     if (role !== 'guest') {
       Object.assign(colors, STAFF_COLORS[role]);
       cut = { sleeve: role === 'vet' ? 0.56 : 0.15, pants: 1.1, coat: role === 'vet' ? 0.42 : -1, inflate: cut.inflate };
@@ -431,7 +442,7 @@ export class HumanFactory {
 
   asset(key: HumanBodyKey): HumanAsset {
     const detail = this.quality.creatureDetail;
-    const k = `${key.female ? 'F' : 'M'}:${key.child ? 'c' : 'a'}:${key.hair}:${detail}`;
+    const k = `${key.female ? 'F' : 'M'}:${key.child ? 'c' : 'a'}:${key.hair}${key.skirt ? ':skirt' : ''}:${detail}`;
     let a = this.assets.get(k);
     if (!a) {
       a = buildHumanAsset(key, detail);
@@ -441,7 +452,9 @@ export class HumanFactory {
   }
 
   create(app: HumanAppearance, role: 'guest' | StaffRole, seed: number): HumanModel {
-    const key: HumanBodyKey = { female: app.female, child: app.child, hair: hairKind(app, role) };
+    // about a third of female guests wear a skirt or dress
+    const skirt = role === 'guest' && app.female && hash1(seed, 6) < 0.34;
+    const key: HumanBodyKey = { female: app.female, child: app.child, hair: hairKind(app, role), skirt };
     return new HumanModel(this.asset(key), app, role, seed, this.quality.creatureDetail, this.crowd);
   }
 

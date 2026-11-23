@@ -377,6 +377,7 @@ export function waderDriver(p: WaderParams): AnimDriver<WaderState> {
     aliases: { run: 'walk', leave: 'walk', rest: 'sit', swim: 'walk' },
     fade: 0.45,
     fades: { sleep: 1.4, sit: 1.1, eat: 0.8, drink: 0.8 },
+    transitions: { 'sleep>*': 1.2, 'sit>*': 1.2, 'eat>*': 0.7, 'drink>*': 0.7 },
   };
 }
 

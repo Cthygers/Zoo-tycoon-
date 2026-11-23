@@ -140,6 +140,15 @@ interface Plan {
   ri: number;
   /** largest cell dimension */
   h: number;
+  /** The region's primitives are left out of coarser grids. */
+  noBase: boolean;
+  /**
+   * How far (in dominance metres) this plan's mesh reaches into territory
+   * owned by other primitives: its own cell plus half a cell of the coarsest
+   * overlapping grid, so the coarse mesh is already sunk where the fine one
+   * ends (no coincident surfaces at the seam).
+   */
+  reach: number;
 }
 
 function overlapsBox(a: Box3Like, b: Box3Like): boolean {
@@ -168,11 +177,26 @@ function dominance(field: SdfField, ri: number, x: number, y: number, z: number,
 }
 
 /**
+ * Seam tuning (exported for the harness): `reach` = extra coverage of a fine
+ * mesh into territory owned by coarser grids (in coarse cells, at most
+ * `reachMax` of its own cells so tiny regions stay cheap), `lead` = how
+ * far (coarse cells) before the fine mesh ends the coarse sink starts, `full`
+ * = dominance (coarse cells, 0 = the junction itself) where the sink is
+ * complete, `sink` = full sink depth (coarse cells).
+ * `legacy` restores the first-pass behaviour for A/B comparisons.
+ */
+export const SEAM = { reach: 0, reachMax: 1.5, lead: 0.1, full: 1.2, sink: 0.35, legacy: false };
+
+/**
  * Mesh the design on a multi-resolution grid: a base grid over everything
  * plus finer grids for detail regions. Surface cells are partitioned by
  * ownership (which region's primitives are closest) with an overlap band; the
- * coarser mesh sinks slightly inside the band so the finer mesh always wins
- * the depth test (no z-fighting, no cracks).
+ * coarser mesh sinks inside the band so the finer mesh always wins the depth
+ * test (no z-fighting, no cracks). The sink ramp starts a little before the
+ * fine mesh ends and reaches ≈ half a coarse cell at the junction itself, so
+ * coarse chords that bridge concave creases (leg into body, head into neck)
+ * stay under the fine surface. Regions with `noBase` are left out of coarser
+ * grids altogether (no bridging sheets between thin parts and the body).
  */
 export function meshDesign(input: MeshInput, detail: 0 | 1 | 2, field: SdfField, regions: string[]): { raw: RawMesh; bounds: THREE.Box3 } {
   const bounds = new THREE.Box3();
@@ -197,6 +221,8 @@ export function meshDesign(input: MeshInput, detail: 0 | 1 | 2, field: SdfField,
       },
       ri: -1,
       h: h * Math.max(an[0], an[1], an[2]),
+      noBase: false,
+      reach: 0,
     },
   ];
   regions.forEach((name, ri) => {
@@ -214,24 +240,45 @@ export function meshDesign(input: MeshInput, detail: 0 | 1 | 2, field: SdfField,
     }
     if (!isFinite(minR)) return;
     let fine = opts.scale !== undefined ? h * opts.scale : Math.max(h * 0.18, minR / REGION_K[detail]);
+    if (opts.cell !== undefined && opts.cell > 0) fine = Math.min(fine, opts.cell);
     fine = Math.min(fine, h);
     const a = opts.aniso ?? [1, 1, 1];
     const cell: Vec3 = [fine * a[0], fine * a[1], fine * a[2]];
-    const m = Math.max(cell[0], cell[1], cell[2]) * 2.5;
+    const cm = Math.max(cell[0], cell[1], cell[2]);
+    // room for the seam reach (see below) on top of the usual 2.5 cells
+    const m = Math.max(cm * 2.5, (cm * 1.2 + Math.min(SEAM.reach * h, SEAM.reachMax * cm)) * 1.3 + cm);
     plans.push({
       region: { min: [rb.min.x - m, rb.min.y - m, rb.min.z - m], max: [rb.max.x + m, rb.max.y + m, rb.max.z + m], cell },
       ri,
       h: Math.max(cell[0], cell[1], cell[2]),
+      noBase: !!opts.noBase,
+      reach: 0,
     });
   });
-  // ownership tests
+  // finer / coarser overlapping plans
+  const finerOf = new Map<Plan, Plan[]>();
+  for (const P of plans) finerOf.set(P, plans.filter((R) => R !== P && R.h < P.h && overlapsBox(P.region, R.region)));
   for (const P of plans) {
-    const finer = plans.filter((R) => R !== P && R.h < P.h && overlapsBox(P.region, R.region));
-    const ownBand = P.h * 1.2;
+    let coarse = 0;
+    for (const Q of plans) if (Q !== P && Q.h > P.h && overlapsBox(P.region, Q.region)) coarse = Math.max(coarse, Q.h);
+    P.reach = P.h * 1.2 + (SEAM.legacy ? 0 : Math.min(coarse * SEAM.reach, P.h * SEAM.reachMax));
+  }
+  // ownership tests + primitives left out of coarser grids
+  for (const P of plans) {
+    const finer = finerOf.get(P)!;
     if (P.ri >= 0) P.region.ownRegion = P.ri;
+    const skipRegions = finer.filter((R) => R.noBase).map((R) => R.ri);
+    if (skipRegions.length) {
+      const skip = new Uint8Array(field.prims.length);
+      field.prims.forEach((p, i) => {
+        if (skipRegions.includes(p.region)) skip[i] = 1;
+      });
+      P.region.skipPrims = skip;
+    }
+    const keepFiner = finer.filter((R) => !R.noBase);
     P.region.keep = (x, y, z, list) => {
-      if (P.ri >= 0 && dominance(field, P.ri, x, y, z, list) < -ownBand) return false;
-      for (const R of finer) {
+      if (P.ri >= 0 && dominance(field, P.ri, x, y, z, list) < -P.reach) return false;
+      for (const R of keepFiner) {
         const b = R.region;
         if (x < b.min[0] || x > b.max[0] || y < b.min[1] || y > b.max[1] || z < b.min[2] || z > b.max[2]) continue;
         if (dominance(field, R.ri, x, y, z, list) > P.h * 1.5) return false;
@@ -243,23 +290,46 @@ export function meshDesign(input: MeshInput, detail: 0 | 1 | 2, field: SdfField,
   for (const P of plans) {
     const mesh = surfaceNets(field, P.region);
     // sink vertices where a finer region takes over (ramped across the overlap band)
-    const finer = plans.filter((R) => R !== P && R.h < P.h && overlapsBox(P.region, R.region));
+    const finer = finerOf.get(P)!;
     if (finer.length) {
       mesh.surface = mesh.positions.slice();
       const pos = mesh.positions, nrm = mesh.normals;
       const lists = finer.map((R) => field.cull(R.region.min[0], R.region.min[1], R.region.min[2], R.region.max[0], R.region.max[1], R.region.max[2]));
+      // sink relative to the smallest cell dimension (anisotropic grids would
+      // otherwise push vertices through thin limbs)
+      const minCell = Math.min(P.region.cell[0], P.region.cell[1], P.region.cell[2]);
+      const maxSink = SEAM.legacy ? 0.3 * P.h : SEAM.sink * minCell;
       for (let v = 0; v < pos.length; v += 3) {
         let ramp = 0;
         const x = pos[v], y = pos[v + 1], z = pos[v + 2];
+        let li = -1;
         for (let ri = 0; ri < finer.length; ri++) {
           const R = finer[ri];
           if (x < R.region.min[0] || x > R.region.max[0] || y < R.region.min[1] || y > R.region.max[1] || z < R.region.min[2] || z > R.region.max[2]) continue;
           const dom = dominance(field, R.ri, x, y, z, lists[ri]);
-          const lo = -R.h * 1.2, hi = P.h * 1.5;
-          if (dom > lo) ramp = Math.max(ramp, Math.min(1, (dom - lo) / (hi - lo)));
+          li = ri;
+          // fade out toward the faces of the finer region's box: past them the fine
+          // mesh does not exist, and a sudden step in sink would tear the coarse mesh
+          const b = R.region;
+          const edge = Math.min(x - b.min[0], b.max[0] - x, y - b.min[1], b.max[1] - y, z - b.min[2], b.max[2] - z);
+          const boxFade = SEAM.legacy ? 1 : Math.min(1, edge / Math.max(1e-6, P.h));
+          // starts just before the fine mesh ends, complete at the junction itself
+          const lo = SEAM.legacy ? -R.h * 1.2 : -R.reach - SEAM.lead * P.h;
+          const hi = SEAM.legacy ? P.h * 1.5 : SEAM.full * P.h;
+          if (dom > lo) ramp = Math.max(ramp, Math.min(1, (dom - lo) / (hi - lo)) * boxFade);
         }
         if (ramp > 0) {
-          const sink = ramp * ramp * (3 - 2 * ramp) * 0.3 * P.h;
+          let sink = ramp * ramp * (3 - 2 * ramp) * maxSink;
+          // never sink past the middle of a thin part (the vertex would come out
+          // on the far side as a flap): halve until the sunk point is still deep inside
+          if (!SEAM.legacy && li >= 0) {
+            const L = lists[li];
+            for (let k = 0; k < 3; k++) {
+              const d = field.evalList(x - nrm[v] * sink, y - nrm[v + 1] * sink, z - nrm[v + 2] * sink, L, L.length);
+              if (d < -0.45 * sink) break;
+              sink *= 0.5;
+            }
+          }
           pos[v] -= nrm[v] * sink;
           pos[v + 1] -= nrm[v + 1] * sink;
           pos[v + 2] -= nrm[v + 2] * sink;
@@ -269,7 +339,7 @@ export function meshDesign(input: MeshInput, detail: 0 | 1 | 2, field: SdfField,
     parts.push(mesh);
   }
   if (DEBUG_REGIONS) {
-    plans.forEach((P, i) => console.log(i === 0 ? 'base' : '  region ' + regions[P.ri], P.region.cell.map((v) => v.toFixed(3)).join(','), 'tris', parts[i].indices.length / 3));
+    plans.forEach((P, i) => console.log(i === 0 ? 'base' : '  region ' + regions[P.ri], P.region.cell.map((v) => v.toFixed(3)).join(','), 'tris', parts[i].indices.length / 3, P.noBase ? '(noBase)' : ''));
   }
   return { raw: mergeRaw(parts), bounds };
 }
@@ -372,6 +442,12 @@ export function buildGeometry(input: MeshInput, detail: 0 | 1 | 2, baker: Vertex
       allowed[a * nb + b] = 1;
     }
   }
+  // carving primitives with an explicit part tag are measured by pd(part)
+  // (mouth lines, nostrils, eye sockets) but never contribute skin / part weights
+  const measureSub = new Uint8Array(prims.length);
+  input.prims.forEach((p, i) => {
+    if (p.sub && p.part !== undefined) measureSub[i] = 1;
+  });
   // coarse spatial grid of candidate primitives (skin influence reaches ≈ 5σ)
   const GN = 8;
   const bmin = meshed.bounds.min, bsize = meshed.bounds.getSize(new THREE.Vector3());
@@ -384,7 +460,7 @@ export function buildGeometry(input: MeshInput, detail: 0 | 1 | 2, baker: Vertex
         const l: number[] = [];
         for (let pi = 0; pi < prims.length; pi++) {
           const p = prims[pi];
-          if (p.sub) continue;
+          if (p.sub && !measureSub[pi]) continue;
           const m = Math.min(5 * p.skinSigma, 0.3) + 0.02;
           if (!(x0 + gs[0] < p.minX - m || x0 > p.maxX + m || y0 + gs[1] < p.minY - m || y0 > p.maxY + m || z0 + gs[2] < p.minZ - m || z0 > p.maxZ + m)) l.push(pi);
         }

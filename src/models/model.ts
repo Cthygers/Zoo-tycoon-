@@ -59,11 +59,26 @@ interface Slot {
   action: string;
   w: number;
   pose: Pose;
+  /** Crossfade time (s) of the transition into this slot. */
+  fade: number;
 }
 
 const MAX_SLOTS = 3;
 const _weights: number[] = [0, 0, 0];
 const _poses: Pose[] = [];
+
+/**
+ * Crossfade time into `to` coming from `from`: driver.transitions
+ * ('from>to', 'from>*', '*>to'), then driver.fades[to], then driver.fade.
+ */
+export function transitionFade(d: AnimDriver<unknown>, from: string, to: string): number {
+  const t = d.transitions;
+  if (t && from) {
+    const v = t[from + '>' + to] ?? t[from + '>*'] ?? t['*>' + to];
+    if (v !== undefined) return v;
+  } else if (t && t['*>' + to] !== undefined) return t['*>' + to];
+  return d.fades?.[to] ?? d.fade ?? 0.4;
+}
 
 // ---------------------------------------------------------------------------
 // Skin matrices (allocation-free FK)
@@ -326,10 +341,10 @@ export class RiggedModel implements CreatureModel {
         this.spare.push(this.slots[wi].pose);
         this.slots.splice(wi, 1);
       }
-      this.slots.push({ action, w: this.slots.length ? 0 : 1, pose: this.spare.pop() ?? new Pose(this.asset.rig.count) });
+      const fade = transitionFade(d, top ? top.action : '', action);
+      this.slots.push({ action, w: this.slots.length ? 0 : 1, pose: this.spare.pop() ?? new Pose(this.asset.rig.count), fade });
     }
-    const fade = d.fades?.[action] ?? d.fade ?? 0.4;
-    const step = dt / Math.max(0.05, fade);
+    const step = dt / Math.max(0.05, this.slots[this.slots.length - 1].fade);
     for (let i = this.slots.length - 1; i >= 0; i--) {
       const s = this.slots[i];
       if (i === this.slots.length - 1) s.w = Math.min(1, s.w + step);

@@ -21,8 +21,8 @@ import type { CoatSample, CreatureDesign, DesignContext, RigRoles, SpeciesModel 
 const v3 = (x: number, y: number, z: number): Vec3 => [x, y, z];
 
 /**
- * Skeleton. `fx` pushes the flipper blades further from the flanks (used on
- * the low tier, whose coarse grid would otherwise web the narrow gap).
+ * Skeleton. `fx` pushes the flipper blades further from the flanks (no longer
+ * needed since the flipper regions opt out of the base grid; kept at 0).
  */
 const bones = (fx: number): BoneSpec[] => [
   { name: 'hips', parent: null, pos: v3(0, 0.2, -0.015) },
@@ -224,7 +224,9 @@ function penguinCoat(eye: Vec3, eyeR: number) {
 }
 
 function design(ctx: DesignContext): CreatureDesign {
-  const fx = ctx.detail === 0 ? 0.016 : 0;
+  // flippers are meshed only on their own fine grids (noBase), so even the
+  // coarse low tier never webs the narrow gap to the flank: no offset needed
+  const fx = 0;
   const head = withRegion(headPrims(), 'head');
   const prims: Prim[] = [
     ...bodyPrims(),
@@ -258,14 +260,24 @@ function design(ctx: DesignContext): CreatureDesign {
     resolution: ctx.detail === 0 ? 0.74 : 0.66,
     regions: {
       head: { scale: 0.44 },
-      'flip.L': { scale: 0.44, aniso: [1, 2.4, 1.5] },
-      'flip.R': { scale: 0.44, aniso: [1, 2.4, 1.5] },
+      'flip.L': { scale: 0.44, cell: 0.009, aniso: [1, 2.4, 1.5], noBase: true },
+      'flip.R': { scale: 0.44, cell: 0.009, aniso: [1, 2.4, 1.5], noBase: true },
       HL: { scale: 0.44 },
       HR: { scale: 0.44 },
       tail: { scale: 0.55 },
     },
     coat: penguinCoat(eye, eyeR),
-    look: { skin: 'feather', pattern: 'field', roughness: 0.62, sheen: 0.12, grain: 0.0035, bump: 0.22, mottle: 0.035 },
+    look: {
+      skin: 'feather',
+      pattern: 'field',
+      roughness: 0.62,
+      sheen: 0.12,
+      grain: 0.0035,
+      bump: 0.22,
+      mottle: 0.035,
+      // chicks: fluffy grey down on the back, paler front, until about two-thirds grown
+      juvenile: { color: 0x7d7b78, amount: 0.9, until: 0.7, keep: 0.45 },
+    },
     eyes: [{ bone: 'head', pos: eye, radius: eyeR, color: 0x2a1610 }],
     anim: driver(anim),
     babyScale: 0.45,

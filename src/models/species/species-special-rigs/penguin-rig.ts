@@ -394,6 +394,7 @@ export function penguinDriver(p: PenguinParams): AnimDriver<PenguinState> {
     aliases: { run: 'walk', leave: 'walk', rest: 'sit' },
     fade: 0.3,
     fades: { sleep: 1.0, sit: 0.7, swim: 0.6 },
+    transitions: { 'sleep>*': 1.0, 'sit>*': 0.7, 'swim>*': 0.6 },
   };
 }
 

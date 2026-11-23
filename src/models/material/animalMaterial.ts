@@ -3,13 +3,19 @@
 //   * a per-pixel coat pattern (stripes / patches) driven by a baked scalar,
 //   * object-space procedural micro-normals (fur strands, wrinkled / cracked hide),
 //   * albedo mottling and a soft fur sheen / rim term,
-//   * glossy patches (eyes, nose leather) from a baked gloss value.
+//   * glossy patches (eyes, nose leather) from a baked gloss value,
+//   * 'wrinkled' skin: a network of fine creases (grooves darkened in the
+//     albedo) for elephants, rhinos and hippos instead of the cell plates of
+//     'hide', which read as reptile scales up close,
+//   * an optional growth-dependent juvenile tint (chick down). Growth comes
+//     from the instance's look texel in the batched renderer (`USE_BATCHING`)
+//     and is 1 (adult) for standalone meshes.
 
 import * as THREE from 'three';
 import type { LookSpec } from '../types';
 import { NOISE_GLSL } from './shaderChunks';
 
-const SKIN_IDS: Record<LookSpec['skin'], number> = { fur: 0, hide: 1, smooth: 2, feather: 3 };
+const SKIN_IDS: Record<LookSpec['skin'], number> = { fur: 0, hide: 1, smooth: 2, feather: 3, wrinkled: 4 };
 const PATTERN_IDS = { none: 0, stripes: 1, field: 2 } as const;
 
 export interface AnimalMaterialOptions {
@@ -24,10 +30,12 @@ export function createAnimalMaterial(o: AnimalMaterialOptions): THREE.MeshStanda
   const skin = SKIN_IDS[look.skin];
   const pattern = PATTERN_IDS[look.pattern ?? 'none'];
   const micro = o.detail > 0 ? 1 : 0;
+  const juv = look.juvenile ? 1 : 0;
+  const thick = look.skin === 'hide' || look.skin === 'wrinkled';
   const mat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     vertexColors: true,
-    roughness: look.roughness ?? (look.skin === 'smooth' ? 0.55 : look.skin === 'hide' ? 0.8 : 0.88),
+    roughness: look.roughness ?? (look.skin === 'smooth' ? 0.55 : thick ? 0.8 : 0.88),
     metalness: 0,
   });
   if (o.highlight) {
@@ -35,10 +43,14 @@ export function createAnimalMaterial(o: AnimalMaterialOptions): THREE.MeshStanda
     mat.emissiveIntensity = 0.25;
   }
   const uniforms = {
-    uGrain: { value: look.grain ?? (look.skin === 'hide' ? 0.035 : 0.006) },
+    uGrain: { value: look.grain ?? (look.skin === 'hide' ? 0.035 : look.skin === 'wrinkled' ? 0.014 : 0.006) },
     uBump: { value: look.bump ?? 0.5 },
     uSheen: { value: look.sheen ?? (look.skin === 'fur' ? 0.3 : look.skin === 'feather' ? 0.2 : 0.05) },
     uMottle: { value: look.mottle ?? 0.12 },
+    uJuvColor: { value: new THREE.Color(look.juvenile?.color ?? 0x808080) },
+    uJuvAmount: { value: look.juvenile?.amount ?? 0.85 },
+    uJuvUntil: { value: Math.max(0.05, look.juvenile?.until ?? 0.65) },
+    uJuvKeep: { value: look.juvenile?.keep ?? 0.35 },
   };
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
@@ -51,7 +63,10 @@ attribute vec4 pattern;
 varying vec3 vColor2;
 varying vec4 vPattern;
 varying vec3 vRestPos;
-varying vec3 vRestNormal;`,
+varying vec3 vRestNormal;
+#if ${juv} == 1
+varying float vCrGrowth;
+#endif`,
       )
       .replace(
         '#include <begin_vertex>',
@@ -59,7 +74,14 @@ varying vec3 vRestNormal;`,
 vRestPos = position;
 vRestNormal = normal;
 vColor2 = color2;
-vPattern = pattern;`,
+vPattern = pattern;
+#if ${juv} == 1
+#ifdef USE_BATCHING
+vCrGrowth = crTexel(crBase).y;
+#else
+vCrGrowth = 1.0;
+#endif
+#endif`,
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
@@ -68,6 +90,7 @@ vPattern = pattern;`,
 #define CR_SKIN ${skin}
 #define CR_PATTERN ${pattern}
 #define CR_MICRO ${micro}
+#define CR_JUV ${juv}
 uniform float uGrain;
 uniform float uBump;
 uniform float uSheen;
@@ -77,7 +100,26 @@ varying vec3 vColor2;
 varying vec4 vPattern;
 varying vec3 vRestPos;
 varying vec3 vRestNormal;
-${NOISE_GLSL}`,
+#if CR_JUV == 1
+uniform vec3 uJuvColor;
+uniform float uJuvAmount;
+uniform float uJuvUntil;
+uniform float uJuvKeep;
+varying float vCrGrowth;
+#endif
+${NOISE_GLSL}
+#if CR_SKIN == 4
+// Crease network: iso-lines of three value-noise fields at different scales
+// (wiggly grooves that cross into irregular, elongated plates; the coarse set
+// runs mostly horizontally like the folds on legs and trunks). 1 on the
+// plates, dipping to 0 in the grooves.
+float cr_crease(vec3 q) {
+  float a = abs(cr_vnoise(q * vec3(0.42, 1.25, 0.42)) - 0.5);
+  float b = abs(cr_vnoise(q * vec3(0.95, 0.8, 0.95) + 11.7) - 0.5);
+  float c = abs(cr_vnoise(q * 2.3 + 3.3) - 0.5);
+  return smoothstep(0.0, 0.11, a) * 0.5 + smoothstep(0.0, 0.085, b) * 0.32 + smoothstep(0.0, 0.07, c) * 0.18;
+}
+#endif`,
       )
       .replace(
         '#include <color_fragment>',
@@ -109,7 +151,28 @@ float crFade = 1.0 - smoothstep(crGrain * 0.35, crGrain * 1.6, crPix);
   // clumpy albedo variation (independent of the micro fade so distance views keep texture)
   float mo = cr_vnoise(vRestPos * 9.0) * 0.6 + cr_vnoise(vRestPos * 31.0) * 0.4;
   diffuseColor.rgb *= 1.0 + uMottle * (mo - 0.5) * 2.0 * (1.0 - vPattern.z);
-}`,
+}
+#if CR_SKIN == 4
+// grooves are darker (dirt + occlusion); fades to the average a bit beyond the micro-normal range
+float crCreaseH = 1.0;
+{
+  float fa = 1.0 - smoothstep(crGrain * 0.6, crGrain * 3.2, crPix);
+  if (fa > 0.001) crCreaseH = cr_crease(vRestPos / crGrain);
+  float groove = 1.0 - crCreaseH;
+  float gd = clamp(uBump * 1.2, 0.12, 0.6);
+  diffuseColor.rgb *= mix(1.0 - gd * 0.14, 1.0 - gd * groove * groove, fa) * (1.0 - vPattern.z) + vPattern.z;
+}
+#endif
+#if CR_JUV == 1
+{
+  // juvenile down / coat: tint toward the juvenile colour, keeping some of the adult light/dark pattern
+  float k = uJuvAmount * (1.0 - smoothstep(0.0, uJuvUntil, vCrGrowth)) * (1.0 - vPattern.z);
+  float l = dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+  float lj = max(dot(uJuvColor, vec3(0.2126, 0.7152, 0.0722)), 1e-3);
+  vec3 juv = uJuvColor * mix(1.0, clamp(l / lj, 0.3, 2.5), uJuvKeep);
+  diffuseColor.rgb = mix(diffuseColor.rgb, juv, k);
+}
+#endif`,
       )
       .replace(
         '#include <roughnessmap_fragment>',
@@ -136,6 +199,8 @@ if (crFade > 0.001 && vPattern.z < 0.5) {
     #define CR_H(q) (smoothstep(0.0, 0.18, cr_cells((q) * 0.9)) * 0.7 + cr_vnoise((q) * 3.1) * 0.3)
   #elif CR_SKIN == 3
     #define CR_H(q) cr_vnoise((q) * vec3(1.0, 1.0, 0.3))
+  #elif CR_SKIN == 4
+    #define CR_H(q) (cr_crease(q) + cr_vnoise((q) * 0.9) * 0.25)
   #else
     #define CR_H(q) (cr_vnoise((q) * 0.5) * 0.3)
   #endif
@@ -160,7 +225,7 @@ if (crFade > 0.001 && vPattern.z < 0.5) {
 #include <opaque_fragment>`,
       );
   };
-  mat.customProgramCacheKey = () => `creature-animal-${skin}-${pattern}-${micro}`;
+  mat.customProgramCacheKey = () => `creature-animal-${skin}-${pattern}-${micro}-${juv}`;
   mat.userData.creatureUniforms = uniforms;
   return mat;
 }

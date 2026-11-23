@@ -347,6 +347,7 @@ function bearDriver(p: QuadParams, b: BearAnim): AnimDriver<PRState> {
     aliases: { run: 'walk', leave: 'walk' },
     fade: 0.45,
     fades: { sleep: 1.3, rest: 1.1, sit: 1.1, play: 0.8, call: 0.35, drink: 0.7 },
+    transitions: { 'sleep>*': 1.5, 'rest>*': 1.2, 'sit>*': 1.1, 'sleep>rest': 1.0, 'rest>sleep': 1.0 },
   };
 }
 

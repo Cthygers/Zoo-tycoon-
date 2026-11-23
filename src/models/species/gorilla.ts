@@ -169,10 +169,10 @@ function headPrims(male: boolean): Prim[] {
 // ---------------------------------------------------------------------------
 // Coat
 
-const FUR = 0x221f1d;
-const FUR_BROWN = 0x3b3029;
+const FUR = 0x2e2a27;
+const FUR_BROWN = 0x4a3b31;
 const CROWN = 0x4a3022;
-const SILVER = 0x77746f;
+const SILVER = 0x85817b;
 const SKIN = 0x121110;
 const CHESTSKIN = 0x232121;
 

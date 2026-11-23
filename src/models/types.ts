@@ -103,9 +103,29 @@ export type CoatFn = (c: CoatSample) => void;
 // ---------------------------------------------------------------------------
 // Look (material)
 
+/**
+ * Juvenile colouring (penguin chicks' grey down, grey flamingo chicks): the
+ * albedo is tinted toward `color` by `amount` at growth 0, fading out by
+ * growth `until`. Works per instance in the batched / LOD renderer.
+ */
+export interface JuvenileTint {
+  /** sRGB hex of the juvenile down / coat. */
+  color: number;
+  /** Tint strength at growth 0 (default 0.85). */
+  amount?: number;
+  /** Growth (0..1) at which the tint is gone (default 0.65). */
+  until?: number;
+  /** How much of the adult light/dark pattern survives under the tint 0..1 (default 0.35). */
+  keep?: number;
+}
+
 export interface LookSpec {
-  /** Micro-surface: fur strands, cracked hide, smooth skin or feathers. */
-  skin: 'fur' | 'hide' | 'smooth' | 'feather';
+  /**
+   * Micro-surface: fur strands, cracked hide (cells), smooth skin, feathers,
+   * or 'wrinkled' — a crease network of fine grooves for thick-skinned
+   * species (elephant, rhino, hippo), darkened in the grooves.
+   */
+  skin: 'fur' | 'hide' | 'smooth' | 'feather' | 'wrinkled';
   /** Per-pixel pattern mode (see CoatSample.s). Default 'none'. */
   pattern?: 'none' | 'stripes' | 'field';
   /** Base roughness (default 0.86). */
@@ -118,6 +138,8 @@ export interface LookSpec {
   bump?: number;
   /** Albedo clump variation 0..1 (default 0.12). */
   mottle?: number;
+  /** Growth-dependent juvenile tint (see JuvenileTint). */
+  juvenile?: JuvenileTint;
 }
 
 export interface EyeSpec {
@@ -132,8 +154,23 @@ export interface EyeSpec {
 export interface RegionOpts {
   /** Cell size relative to the base cell (default: auto from the thinnest primitive). */
   scale?: number;
+  /**
+   * Upper bound of the fine cell size in metres (before `aniso`), on every
+   * tier. Use it for thin parts (flippers, bills, ears) that need ≥ 2–3 cells
+   * across even where the base cell of the low tier is coarse.
+   */
+  cell?: number;
   /** Per-axis multiplier applied on top (e.g. [1, 2.2, 1] for long vertical legs). */
   aniso?: Vec3;
+  /**
+   * Exclude this region's primitives from the coarser grids (base grid and
+   * other coarser regions). Use it for thin parts that lie within about one
+   * base cell of another surface (penguin flippers against the flank, a
+   * flamingo's lower bill under the throat): the coarse grid would otherwise
+   * bridge the gap with a flat sheet. The region's own fine grid still
+   * meshes the junction with the rest of the body.
+   */
+  noBase?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +251,12 @@ export interface AnimDriver<S> {
   fade?: number;
   /** Per-action crossfade times (e.g. { sleep: 1.2 } for slow lying down). */
   fades?: Record<string, number>;
+  /**
+   * Per-transition crossfade times keyed 'from>to' (also 'from>*' and
+   * '*>to'), checked before `fades` — e.g. { 'sleep>*': 1.6 } for a slow
+   * get-up so the body never passes through the ground.
+   */
+  transitions?: Record<string, number>;
 }
 
 /** Type-erased driver stored in a design (use `driver()` to create one). */

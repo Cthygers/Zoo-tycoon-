@@ -789,6 +789,8 @@ function makeDriver(height: number, walkSpeed: number, run: number, P: Prof) {
     post,
     fade: 0.5,
     fades: { sleep: 0.35, rest: 1.2, sit: 1.2, call: 0.35, swim: 0.8 },
+    // lying down / getting up is a posture sequence (riseOverlay): no slow get-up crossfade on top
+    transitions: {},
   };
   return d;
 }
@@ -854,7 +856,7 @@ function design(ctx: DesignContext): CreatureDesign {
       tail: { scale: 0.3, aniso: [1, 2.2, 1] },
     },
     coat: elephantCoat(male, eye, tusk.pts),
-    look: { skin: 'hide', pattern: 'stripes', roughness: 0.9, sheen: 0.06, grain: 0.012, bump: 0.38, mottle: 0.14 },
+    look: { skin: 'wrinkled', pattern: 'stripes', roughness: 0.9, sheen: 0.06, grain: 0.013, bump: 0.42, mottle: 0.14 },
     eyes: [{ bone: 'head', pos: eye, radius: 0.03, color: 0x24170d }],
     anim: driver(d),
     babyScale: 0.3,

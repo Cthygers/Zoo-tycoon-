@@ -436,6 +436,7 @@ function makeDriver(height: number, walkSpeed: number, runSpeed: number) {
     post,
     fade: 0.45,
     fades: { sleep: 1.6, rest: 1.4, sit: 1.4, swim: 1.0 },
+    transitions: { 'sleep>*': 1.7, 'rest>*': 1.5, 'sit>*': 1.5, 'swim>*': 1.0, 'sleep>rest': 1.2, 'rest>sleep': 1.2 },
     init: (ctx: AnimCtx): QuadState => initQuad(ctx, p),
     pre: advanceGait,
   };
@@ -479,7 +480,7 @@ function design(ctx: DesignContext): CreatureDesign {
       tail: { scale: 0.3, aniso: [1, 1.5, 1] },
     },
     coat: hippoCoat(eye),
-    look: { skin: 'hide', pattern: 'stripes', roughness: 0.62, sheen: 0.05, grain: 0.007, bump: 0.22, mottle: 0.1 },
+    look: { skin: 'wrinkled', pattern: 'stripes', roughness: 0.62, sheen: 0.05, grain: 0.012, bump: 0.12, mottle: 0.1 },
     eyes: [{ bone: 'head', pos: eye, radius: 0.026, color: 0x2a1609 }],
     anim: driver(makeDriver(ctx.def.height, ctx.def.walkSpeed, ctx.def.runSpeed)),
     babyScale: 0.25,

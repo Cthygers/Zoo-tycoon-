@@ -251,9 +251,11 @@ function rhinoCoat(eye: Vec3) {
       if (d < best) best = d;
     }
     const legK = clamp01((c.pw('leg') + c.pw('foot')) * 1.3);
-    if (best < 0.12) {
-      c.s = best / 0.09 + n * 0.3;
-      c.w = 0.22 * smooth(0.12, 0.05, best);
+    if (best < 0.07) {
+      // a single soft crease line along each skin fold (no parallel echoes)
+      c.s = best / 0.09 + n * 0.12;
+      c.w = 0.13 * smooth(0.07, 0.025, best);
+      c.color2.copy(c.color).multiplyScalar(0.68);
     } else if (legK > 0.3 && y < 0.75) {
       c.s = y / 0.09 + n * 0.9 + fbm(x * 7, y * 7, z * 7, 2, 92) * 0.4;
       c.w = 0.08 * smooth(0.3, 0.7, legK);
@@ -436,9 +438,12 @@ function makeDriver(height: number, walkSpeed: number, runSpeed: number) {
     reachMuzzle(ctx, pose, 0.12, 0.1, 0.15 * Math.sin(ctx.seed));
     swivel(ctx, pose, 0.3);
   };
+  // resting awake: head low but the chin clear of the ground and the nose
+  // level, so the long front horn points forward instead of into the ground
   const rest = (ctx: AnimCtx, st: QuadState, pose: Pose): void => {
     lie(ctx, st, pose, 'up');
-    neckHead(ctx, pose, 0.35, 0, 0.1, 0);
+    ctx.rig.fk(pose);
+    reachMuzzle(ctx, pose, 0.3, -0.3, 0.12 * Math.sin(ctx.time * 0.21 + ctx.seed));
     swivel(ctx, pose);
   };
 
@@ -454,6 +459,7 @@ function makeDriver(height: number, walkSpeed: number, runSpeed: number) {
     actions: { ...base.actions, idle, walk: run, eat, drink, call, play, social, sleep, rest, sit: rest },
     fade: 0.45,
     fades: { sleep: 1.6, rest: 1.4, sit: 1.4 },
+    transitions: { 'sleep>*': 1.7, 'rest>*': 1.5, 'sit>*': 1.5, 'sleep>rest': 1.2, 'rest>sleep': 1.2 },
   };
 }
 
@@ -492,7 +498,7 @@ function design(ctx: DesignContext): CreatureDesign {
       tail: { scale: 0.34, aniso: [1, 2, 1] },
     },
     coat: rhinoCoat(eye),
-    look: { skin: 'hide', pattern: 'stripes', roughness: 0.9, sheen: 0.05, grain: 0.014, bump: 0.5, mottle: 0.18 },
+    look: { skin: 'wrinkled', pattern: 'stripes', roughness: 0.9, sheen: 0.05, grain: 0.014, bump: 0.5, mottle: 0.18 },
     eyes: [{ bone: 'head', pos: eye, radius: 0.018, color: 0x1e140c }],
     anim: driver(makeDriver(ctx.def.height, ctx.def.walkSpeed, ctx.def.runSpeed)),
     babyScale: 0.3,

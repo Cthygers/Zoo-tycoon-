@@ -566,6 +566,7 @@ function tigerDriver(p: QuadParams): AnimDriver<PRState> {
     aliases: { run: 'walk', leave: 'walk' },
     fade: 0.4,
     fades: { sleep: 1.2, rest: 1.0, sit: 1.0, eat: 0.9, drink: 0.7, play: 0.5 },
+    transitions: { 'sleep>*': 1.4, 'rest>*': 1.1, 'sit>*': 1.0, 'sleep>rest': 1.0, 'rest>sleep': 1.0 },
   };
 }
 

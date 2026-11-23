@@ -54,51 +54,96 @@ function joints(headScale: number): QuadJoints {
   };
 }
 
-const HROT = 0.23; // head axis slightly below horizontal
+/** Head point relative to the poll (authored at head scale 1). */
+const hp = (dx: number, dy: number, dz: number): Vec3 => [POLL[0] + dx, POLL[1] + dy, POLL[2] + dz];
+const HROT = 0.2; // head axis slightly below horizontal
 
 function headPrims(male: boolean): Prim[] {
   const P: Prim[] = [
-    // round, domed skull and wide zygomatic arches
-    ellipsoid('head', [0, 1.05, 0.905], [0.125, 0.12, 0.13], { rot: [HROT, 0, 0], blend: 0.05, part: 'head' }),
-    ellipsoid('head', [0, 0.955, 0.95], [0.15, 0.085, 0.08], { blend: 0.06, part: 'head' }),
-    // broad frontal plate carrying the forward-facing eyes
-    ellipsoid('head', [0, 1.02, 1.0], [0.105, 0.07, 0.055], { blend: 0.05, part: 'head' }),
-    // short, broad muzzle; nasal bridge with a stop below the brow
-    ellipsoid('head', [0, 0.94, 1.075], [0.088, 0.077, 0.078], { rot: [HROT, 0, 0], blend: 0.05, part: 'muzzle' }),
-    cone('head', [0, 1.05, 1.0], [0, 0.985, 1.12], 0.064, 0.05, { blend: 0.045, part: 'head' }),
-    // puffy whisker pads
-    ...symmetric([ellipsoid('head', [0.043, 0.918, 1.108], [0.05, 0.046, 0.05], { blend: 0.03, part: 'muzzle' })]),
-    // broad nose leather
-    ellipsoid('head', [0, 0.963, 1.158], [0.034, 0.023, 0.02], { rot: [0.5, 0, 0], blend: 0.014, part: 'nose' }),
-    // lower jaw and a small recessed chin
-    ellipsoid('jaw', [0, 0.878, 1.035], [0.068, 0.038, 0.08], { rot: [HROT, 0, 0], blend: 0.035, part: 'chin' }),
-    ellipsoid('jaw', [0, 0.873, 1.085], [0.04, 0.028, 0.03], { blend: 0.025, part: 'chin' }),
-    // brow ridges
-    ...symmetric([ellipsoid('head', [0.058, 1.075, 1.0], [0.045, 0.033, 0.038], { blend: 0.035, part: 'head' })]),
-    // ears (rounded, cupped forward)
+    // braincase: long, low and broad, flat crown
+    ellipsoid('head', hp(0, 0.03, 0.075), [0.118, 0.1, 0.135], { rot: [HROT, 0, 0], blend: 0.05, part: 'head' }),
+    // wide zygomatic arches
+    ellipsoid('head', hp(0, -0.035, 0.12), [0.146, 0.08, 0.085], { blend: 0.06, part: 'head' }),
+    // broad, flat forehead plate carrying the forward-facing eyes
+    ellipsoid('head', hp(0, 0.02, 0.163), [0.098, 0.062, 0.058], { blend: 0.05, part: 'head' }),
+    // long nasal bridge with the lion's slightly convex (Roman) profile
+    cone('head', hp(0, 0.034, 0.158), hp(0, -0.014, 0.298), 0.058, 0.043, { blend: 0.045, part: 'head' }),
+    ellipsoid('head', hp(0, 0.012, 0.232), [0.046, 0.03, 0.058], { blend: 0.03, part: 'head' }),
+    // deep, square muzzle
+    ellipsoid('head', hp(0, -0.054, 0.238), [0.084, 0.062, 0.08], { rot: [HROT, 0, 0], blend: 0.045, part: 'muzzle' }),
+    // whisker pads: a broad 'W' under the nose, ending at the lip line
+    ...symmetric([ellipsoid('head', hp(0.042, -0.081, 0.268), [0.049, 0.036, 0.046], { blend: 0.024, part: 'muzzle' })]),
+    // broad nose leather overhanging the pads
+    ellipsoid('head', hp(0, -0.027, 0.314), [0.033, 0.022, 0.02], { rot: [0.45, 0, 0], blend: 0.014, part: 'nose' }),
+    // lower jaw and chin, kept below the lip line so the jaw bone owns this
+    // surface and the roar really opens the mouth
+    ellipsoid('jaw', hp(0, -0.128, 0.178), [0.066, 0.033, 0.1], { rot: [HROT, 0, 0], blend: 0.03, part: 'chin', skinWeight: 2.5, skin: 0.7 }),
+    ellipsoid('jaw', hp(0, -0.131, 0.248), [0.041, 0.026, 0.032], { blend: 0.022, part: 'chin', skinWeight: 2.5, skin: 0.7 }),
+    // brow ridges over slightly sunken eyes
+    ...symmetric([ellipsoid('head', hp(0.056, 0.05, 0.168), [0.045, 0.03, 0.04], { blend: 0.035, part: 'head' })]),
+    // full cheeks behind the whisker pads (lions have no cheek ruffs)
+    ...symmetric([ellipsoid('head', hp(0.1, -0.07, 0.085), [0.052, 0.07, 0.075], { rot: [0.35, 0.2, -0.3], blend: 0.06, part: 'head' })]),
+    // rounded ears, cupped forward (half hidden in the mane of males)
     ...symmetric([
-      ellipsoid('ear.L', [0.115, 1.17, 0.868], [0.046, 0.044, 0.019], { rot: [-0.15, 0.5, -0.55], blend: 0.03, part: 'ear', region: 'ears' }),
-      ellipsoid('ear.L', [0.12, 1.176, 0.88], [0.032, 0.031, 0.01], { rot: [-0.15, 0.5, -0.55], sub: true, blend: 0.006, part: 'ear', region: 'ears' }),
+      ellipsoid('ear.L', hp(0.11, 0.128, 0.04), [0.046, 0.044, 0.02], { rot: [-0.15, 0.5, -0.55], blend: 0.03, part: 'ear', region: 'ears' }),
+      ellipsoid('ear.L', hp(0.115, 0.134, 0.053), [0.031, 0.03, 0.01], { rot: [-0.15, 0.5, -0.55], sub: true, blend: 0.006, part: 'ear', region: 'ears' }),
     ]),
   ];
+  void male;
   return P;
 }
 
+/** One lock of mane hair: a tapered cone with stringy ridged noise. */
+function lock(bone: string, a: Vec3, b: Vec3, ra: number, rb: number, seed: number): Prim {
+  return cone(bone, a, b, ra, rb, {
+    blend: 0.045,
+    part: 'mane',
+    region: 'mane',
+    noise: { amp: 0.009, freq: 14, stretch: [1.5, 0.5, 1.5], octaves: 2, seed },
+  });
+}
+
 function manePrims(): Prim[] {
-  // locks: ridged noise stretched vertically (thin hanging tufts)
-  const tuft = (seed: number, amp: number) => ({ amp: amp * 1.3, freq: 9, stretch: [1.8, 0.32, 1.4] as Vec3, octaves: 3, ridged: false, seed });
-  return [
-    // neck & shoulder mass
-    ellipsoid('neck_1', [0, 0.96, 0.53], [0.26, 0.3, 0.24], { blend: 0.08, part: 'mane', region: 'mane', noise: tuft(31, 0.035) }),
-    // ruff framing the face
-    ellipsoid('neck_2', [0, 1.0, 0.77], [0.25, 0.28, 0.12], { blend: 0.08, part: 'mane', region: 'mane', noise: tuft(32, 0.03) }),
-    // crown between the ears
-    ellipsoid('head', [0, 1.13, 0.79], [0.15, 0.09, 0.13], { blend: 0.07, part: 'mane', region: 'mane', noise: tuft(33, 0.022) }),
-    // over the withers
-    ellipsoid('chest', [0, 0.96, 0.33], [0.19, 0.17, 0.19], { blend: 0.14, part: 'mane', region: 'mane', noise: tuft(34, 0.025) }),
-    // chest bib between the forelegs
-    ellipsoid('chest', [0, 0.63, 0.49], [0.14, 0.24, 0.13], { blend: 0.08, part: 'mane', region: 'mane', noise: tuft(35, 0.03) }),
+  // soft core volumes (low, rounded noise) carrying layered locks that break the
+  // silhouette: a ruff of locks radiating around the face, long locks falling
+  // over the shoulders from the crest of the neck, and a fringe under the throat
+  const soft = (seed: number, amp: number) => ({ amp, freq: 7, stretch: [1.6, 0.45, 1.3] as Vec3, octaves: 2, seed });
+  const P: Prim[] = [
+    ellipsoid('neck_1', [0, 0.97, 0.53], [0.235, 0.27, 0.22], { blend: 0.08, part: 'mane', region: 'mane', noise: soft(31, 0.018) }),
+    ellipsoid('neck_2', [0, 1.0, 0.76], [0.225, 0.25, 0.11], { blend: 0.08, part: 'mane', region: 'mane', noise: soft(32, 0.016) }),
+    ellipsoid('head', [0, 1.13, 0.79], [0.14, 0.085, 0.12], { blend: 0.07, part: 'mane', region: 'mane', noise: soft(33, 0.012) }),
+    ellipsoid('chest', [0, 0.97, 0.34], [0.175, 0.155, 0.18], { blend: 0.14, part: 'mane', region: 'mane', noise: soft(34, 0.014) }),
+    ellipsoid('chest', [0, 0.66, 0.49], [0.125, 0.21, 0.12], { blend: 0.08, part: 'mane', region: 'mane', noise: soft(35, 0.016) }),
   ];
+  // ruff: locks radiating outward around the face (not under the chin)
+  const C: Vec3 = [0, 1.0, 0.79];
+  const ruffAngles = [-128, -95, -62, -30, 0, 30, 62, 95, 128];
+  ruffAngles.forEach((deg, i) => {
+    const t = (deg * Math.PI) / 180;
+    const sx = Math.sin(t), cy = Math.cos(t);
+    const r0 = 0.15, r1 = 0.28 + 0.025 * Math.cos(i * 2.3);
+    const a: Vec3 = [C[0] + sx * r0, C[1] + cy * r0 * 1.05, C[2] - 0.01];
+    const b: Vec3 = [C[0] + sx * r1, C[1] + cy * r1 * 1.02 - 0.05, C[2] - 0.085];
+    P.push(lock(Math.abs(deg) < 70 ? 'head' : 'neck_2', a, b, 0.075, 0.034, 40 + i));
+  });
+  // long locks falling over the shoulders from the crest of the neck
+  for (const side of [1, -1]) {
+    [
+      [[0.08, 1.16, 0.62], [0.25, 0.86, 0.5]],
+      [[0.1, 1.13, 0.48], [0.27, 0.8, 0.36]],
+      [[0.07, 1.1, 0.36], [0.22, 0.86, 0.22]],
+    ].forEach(([a, b], i) => {
+      P.push(lock('neck_1', [a[0] * side, a[1], a[2]], [b[0] * side, b[1], b[2]], 0.07, 0.028, 60 + i + (side > 0 ? 0 : 5)));
+    });
+  }
+  // fringe hanging under the throat onto the chest
+  const fringe: [Vec3, Vec3][] = [
+    [[0, 0.82, 0.68], [0, 0.6, 0.6]],
+    [[0.07, 0.83, 0.64], [0.1, 0.58, 0.55]],
+    [[-0.07, 0.83, 0.64], [-0.1, 0.58, 0.55]],
+  ];
+  fringe.forEach(([a, b], i) => P.push(lock('chest', a, b, 0.07, 0.03, 80 + i)));
+  return P;
 }
 
 function bodyPrims(male: boolean): Prim[] {
@@ -177,9 +222,11 @@ const TUFT = 0x1c1511;
 
 const fract2 = (v: number) => v - Math.floor(v);
 
-function lionCoat(male: boolean, eye: Vec3, eyeR: number) {
+function lionCoat(male: boolean, hs: number, eye: Vec3, eyeR: number) {
   return (c: CoatSample): void => {
     const { x, y, z } = c;
+    // head-local coordinates (authored at head scale 1, relative to the poll)
+    const hx = x / hs, hy = (y - POLL[1]) / hs, hz = (z - POLL[2]) / hs;
     const n = fbm(x * 3, y * 3, z * 3, 3, 4);
     // countershading: darker along the spine, cream belly / inner legs
     const back = smooth(0.2, 0.9, c.ny) * smooth(0.7, 0.95, y);
@@ -191,39 +238,51 @@ function lionCoat(male: boolean, eye: Vec3, eyeR: number) {
     const leg = clamp01((c.pw('leg') + c.pw('paw')) * 1.5);
     const inner = leg * smooth(0.2, -0.6, Math.sign(x) * c.nx);
     blendHex(c.color, CREAM, inner * 0.35);
-    // muzzle / chin white, nose leather, black lips
-    const mz = c.pw('muzzle') + c.pw('chin');
-    blendHex(c.color, WHITE, smooth(0.3, 0.7, mz) * (0.35 + 0.55 * smooth(0.0, -0.6, c.ny)));
-    const nose = c.pw('nose');
-    if (nose > 0.25) {
-      blendHex(c.color, NOSE, smooth(0.25, 0.6, nose));
-      c.gloss = 0.35 * smooth(0.3, 0.7, nose);
+    const hw = clamp01(c.pw('head') + c.pw('muzzle') + c.pw('chin') + c.pw('nose') + c.pw('ear'));
+    if (hw > 0.1) {
+      const mz = c.pw('muzzle') + c.pw('chin');
+      // face a little darker / richer than the body, ochre on the nasal bridge
+      blendHex(c.color, 0xa4783f, smooth(0.15, 0.5, c.pw('head')) * smooth(0.0, 0.6, c.ny + c.nz * 0.4) * 0.45);
+      // cream whisker pads (lower half), paler lips and chin — not the whole muzzle
+      blendHex(c.color, CREAM, smooth(0.3, 0.7, mz) * smooth(0.45, -0.3, c.ny) * 0.8);
+      blendHex(c.color, CREAM, smooth(0.3, 0.7, c.pw('chin')) * 0.75);
+      // nose: rosy-brown leather with a dark rim
+      const nx0 = hx / 0.036, ny0 = (hy + 0.027) / 0.025, nz0 = (hz - 0.314) / 0.026;
+      const nd = Math.sqrt(nx0 * nx0 + ny0 * ny0 + nz0 * nz0);
+      if (nd < 1.3 && c.nz > -0.2) {
+        const k = smooth(1.3, 0.95, nd);
+        blendHex(c.color, NOSE, k);
+        blendHex(c.color, 0x2b1a15, k * smooth(0.7, 1.05, nd) * 0.85);
+        c.gloss = 0.35 * k;
+      }
+      // black lips; the band between upper and lower lip is the mouth interior,
+      // seen when the jaw opens
+      const lipY = -0.11 + (hz - 0.27) * 0.22;
+      const lipD = Math.abs(hy - lipY);
+      if (mz > 0.25 && lipD < 0.022 && hz > 0.13) {
+        blendHex(c.color, LIP, smooth(0.022, 0.011, lipD) * 0.92);
+        blendHex(c.color, 0x4a1c1a, smooth(0.011, 0.004, lipD) * 0.85);
+      }
+      // whisker-spot rows on the pads
+      if (c.pw('muzzle') > 0.4 && hy < -0.05 && hy > -0.1 && hz > 0.235) {
+        const row = Math.abs(fract2((hy + 0.05) / 0.014) - 0.5);
+        const col = Math.abs(fract2((hz - 0.235) / 0.016) - 0.5);
+        if (row < 0.18 && col < 0.18) blendHex(c.color, 0x3a2a20, 0.65);
+      }
+      // eyes: black rim, pale patches above and below, a dark tear line
+      const ex = Math.abs(x) - eye[0], ey = y - eye[1], ez = z - eye[2];
+      const ed = Math.sqrt(ex * ex + ey * ey + ez * ez);
+      if (ed < eyeR + 0.03) {
+        blendHex(c.color, CREAM, smooth(eyeR + 0.024, eyeR + 0.01, ed) * (ey < 0 ? 0.6 : 0.3));
+        blendHex(c.color, LIP, smooth(eyeR + 0.008, eyeR + 0.002, ed));
+        if (ey < 0 && ex < 0.004 && Math.abs(ex + 0.004 + ey * 0.3) < 0.0045) blendHex(c.color, 0x3a2418, 0.7);
+      }
     }
-    // lip line
-    const lipD = Math.abs(y - 0.888 - (z - 1.12) * 0.15);
-    if (mz > 0.3 && lipD < 0.012 && z > 1.02) blendHex(c.color, LIP, smooth(0.012, 0.004, lipD) * 0.9);
-    // eyes: black lid line, pale patches above and below
-    const ex = Math.abs(x) - eye[0], ey = y - eye[1], ez = z - eye[2];
-    const ed = Math.sqrt(ex * ex + ey * ey + ez * ez);
-    const er = eyeR;
-    if (ed < er + 0.02) {
-      const pale = smooth(er + 0.02, er + 0.008, ed) * (ey < 0 ? 0.6 : 0.35);
-      blendHex(c.color, WHITE, pale);
-      blendHex(c.color, LIP, smooth(er + 0.009, er + 0.003, ed));
-      // tear line running down from the inner corner
-      if (ey < 0 && ex < 0.0 && Math.abs(ex + 0.006 + ey * 0.25) < 0.004) blendHex(c.color, LIP, 0.7);
-    }
-    // whisker-spot rows on the pads
-    if (c.pw('muzzle') > 0.4 && y < 0.95 && y > 0.895 && z > 1.06) {
-      const row = Math.abs(fract2((y - 0.9) / 0.014) - 0.5);
-      const col = Math.abs(fract2((z - 1.06) / 0.016) - 0.5);
-      if (row < 0.18 && col < 0.18) blendHex(c.color, 0x4a3a2e, 0.6);
-    }
-    // ear backs black
+    // ear backs black, cream fur inside
     if (c.part === 'ear') {
       const backside = smooth(0.1, -0.4, c.nz);
       blendHex(c.color, EARBACK, backside * 0.85);
-      blendHex(c.color, CREAM, (1 - backside) * 0.3);
+      blendHex(c.color, male ? 0x6b4a2c : CREAM, (1 - backside) * (male ? 0.6 : 0.3));
     }
     // tail tuft
     blendHex(c.color, TUFT, smooth(0.15, 0.5, c.pw('tuft')));
@@ -231,21 +290,23 @@ function lionCoat(male: boolean, eye: Vec3, eyeR: number) {
     c.color.multiplyScalar(1 - 0.12 * clamp01((c.pw('leg') + c.pw('paw')) * 1.5));
     // paws: slightly darker, dusty
     blendHex(c.color, 0x8a6c46, smooth(0.12, 0.0, y) * 0.4);
-    // mane: dark brown outer locks, golden around the face
+    // mane: golden around the face, darkening to brown-black behind and below,
+    // with paler lock tips and streaks along the locks
     if (male) {
       const m = c.pw('mane');
       if (m > 0.05) {
-        const faceRing = smooth(0.6, 0.86, z) * smooth(1.3, 0.95, y);
-        const outer = clamp01(smooth(0.5, 0.2, z) * 0.6 + smooth(0.85, 0.6, y) * 0.5);
-        // streaks along the locks (vertical / radial strands)
-        const streak = fbm(x * 38, y * 5, z * 30, 3, 17) * 0.5 + 0.5;
-        const lock = fbm(x * 12, y * 3.2, z * 9, 2, 23);
-        const mane = c.color.clone().setHex(0x75512e);
-        blendHex(mane, 0x2e1f15, clamp01(outer * 0.75 + (streak - 0.5) * 1.1 - lock * 0.35));
-        blendHex(mane, 0xc29a62, clamp01(faceRing * 0.8 + lock * 0.3 - (streak - 0.5) * 0.5));
-        const k = smooth(0.08, 0.6, m);
+        const faceRing = smooth(0.62, 0.84, z) * smooth(1.32, 0.9, y);
+        const outer = clamp01(smooth(0.52, 0.22, z) * 0.55 + smooth(0.86, 0.62, y) * 0.55);
+        const streak = fbm(x * 34, y * 6, z * 28, 3, 17) * 0.5 + 0.5;
+        const lockN = fbm(x * 11, y * 3.5, z * 9, 2, 23);
+        // tips: the outermost surface of the locks is sun-bleached
+        const tip = smooth(-0.2, 0.6, lockN);
+        const mane = c.color.clone().setHex(0x8f6638);
+        blendHex(mane, 0x3a271b, clamp01(outer * 0.7 + (streak - 0.5) * 0.8 - lockN * 0.3));
+        blendHex(mane, 0xc8a066, clamp01(faceRing * 0.85 + tip * 0.25 - (streak - 0.5) * 0.4));
+        const k = smooth(0.1, 0.55, m);
         c.color.lerp(mane, k);
-        c.fur = 1 + 3 * k;
+        c.fur = 1 + 3.2 * k;
       }
     }
   };
@@ -267,7 +328,7 @@ function roar(ctx: AnimCtx, st: QuadState, pose: Pose): void {
 
 function design(ctx: DesignContext): CreatureDesign {
   const male = ctx.sex === 'M';
-  const headScale = male ? 1.15 : 1.04;
+  const headScale = male ? 1.1 : 1.02;
   const J = joints(headScale);
   const sk = quadSkeleton(J);
   const headT = { scale: headScale, about: POLL };
@@ -281,8 +342,11 @@ function design(ctx: DesignContext): CreatureDesign {
     ...tailPrims(J.tail),
   ];
   const eyeDir: Vec3 = [-0.12, 0, -1];
-  const hit = surfacePoint(head, transformPoint([0.06 + 0.036, 1.03, 1.3], headT), eyeDir, 0.4);
-  const eye = seat(hit, eyeDir, 0.009);
+  const hit = surfacePoint(head, transformPoint(hp(0.062 + 0.036, 0.022, 0.42), headT), eyeDir, 0.4);
+  const eye = seat(hit, eyeDir, 0.0105 * headScale);
+  const eyeR = 0.0175 * headScale;
+  // round dark pupil in front of the amber iris
+  const pupil: Vec3 = [eye[0] + 0.12 * eyeR * 0.62, eye[1], eye[2] + eyeR * 0.62];
   const p = quadParams(ctx.def.height, ctx.def.walkSpeed, ctx.def.runSpeed, {
     walk: {
       stride: 1.25, refSpeed: ctx.def.walkSpeed, duty: 0.66, offsets: [0.25, 0.75, 0, 0.5], stepHeight: 0.09,
@@ -325,11 +389,14 @@ function design(ctx: DesignContext): CreatureDesign {
       HR: { aniso: [1, 1.8, 1] },
       tail: { scale: 0.3, aniso: [1, 1.6, 1.6] },
       ears: { scale: 0.15, aniso: [1.4, 1.4, 1] },
-      mane: { scale: 0.62 },
+      mane: { scale: 0.6 },
     },
-    coat: lionCoat(male, eye, 0.017 * headScale),
+    coat: lionCoat(male, headScale, eye, eyeR),
     look: { skin: 'fur', pattern: 'none', roughness: 0.9, sheen: 0.4, grain: male ? 0.009 : 0.007, bump: 0.35, mottle: 0.1 },
-    eyes: [{ bone: 'head', pos: eye, radius: 0.017 * headScale, color: 0x2a1a0c }],
+    eyes: [
+      { bone: 'head', pos: eye, radius: eyeR, color: 0x8a5a1c },
+      { bone: 'head', pos: pupil, radius: eyeR * 0.5, color: 0x0c0806 },
+    ],
     anim: driver({ ...base, actions: { ...base.actions, call: roar } }),
     babyScale: 0.3,
     babyHead: 1.35,

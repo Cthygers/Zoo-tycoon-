@@ -67,7 +67,7 @@ export default okapi;
 | `regions` | detail regions keyed by `Prim.region` (`{ scale?, aniso? }`). |
 | `resolution` | base grid multiplier (bulky animals ≈ 0.7). |
 | `coat` | `(c: CoatSample) => void` — baked per vertex. |
-| `look` | `{ skin: 'fur'|'hide'|'smooth'|'feather', pattern: 'none'|'stripes'|'field', roughness, sheen, grain, bump, mottle }` |
+| `look` | `{ skin: 'fur'|'hide'|'wrinkled'|'smooth'|'feather', pattern: 'none'|'stripes'|'field', roughness, sheen, grain, bump, mottle, juvenile? }` — `'wrinkled'` = crease network for thick skins (elephant, rhino, hippo; `'hide'` = cell plates); `juvenile: { color, amount?, until?, keep? }` tints young animals (penguin chicks' grey down) per instance from their growth |
 | `eyes` | `[{ bone, pos (left eye), radius, color? }]` — glossy spheres rigidly bound to the bone (mirrored). Use `surfacePoint()` + `seat()` to sit them on the head. |
 | `anim` | `driver(myDriver)` — see Animation. |
 | `babyScale`, `babyHead` | growth 0 → root scale / extra head scale. |
@@ -104,6 +104,16 @@ transformPrims(prims, { scale, about, offset }) · transformPoint(p, t)   // mov
   numbers printed in the harness overlay; lower `regions.*.scale`/`aniso` or
   `resolution` if needed. Thin plates (ears) need ≥ 3 cells across their
   thickness or they break up.
+  Seams: the coarse mesh sinks under the fine one from just before the fine
+  mesh ends to the junction itself (`SEAM` in build/geometry.ts; harness
+  `?legacy=1` / `?seamSink=` for A/B), never past the middle of a thin part.
+  `RegionOpts.cell` caps the fine cell in metres on every tier (thin bills,
+  flippers); `RegionOpts.noBase` leaves the region's primitives out of the
+  coarse grids entirely — use it when a thin part sits within ~1 base cell of
+  another surface (penguin flippers, flamingo neck/legs), otherwise the
+  coarse grid bridges the gap with a flat sheet.
+* Carving primitives (`sub`) with an explicit `part` are measured by
+  `c.pd(part)` (mouth lines, nostrils), but never weight or own a vertex.
 
 ### Coat (`CoatSample`)
 
@@ -126,7 +136,9 @@ axis parameter), `pw()`, `pd()`. Outputs: `color` (base, **linear** —
 A driver (`AnimDriver<S>` in `types.ts`) has per-instance state `init(ctx)`,
 `pre(ctx, s)` once per frame, one `ActionFn` per action
 `(ctx, s, pose) => void`, optional `post(ctx, s, pose)` (additive layers),
-`aliases` (e.g. `{ run: 'walk', sit: 'rest' }`), `fade` / `fades` (crossfade
+`aliases` (e.g. `{ run: 'walk', sit: 'rest' }`), `fade` / `fades` / `transitions`
+(per-transition crossfade keyed `'from>to'`, `'from>*'`, `'*>to'` — e.g. a slow
+`'sleep>*'` get-up; the default quadruped driver ships with one) (crossfade
 seconds). Action functions start from the rest pose and write local
 rotations (`rotLocal(pose, bone, 'x'|'y'|'z', rad)`, `rotParent`) and offsets
 (`pose.p[bone]`). The framework crossfades between actions, sets
@@ -150,7 +162,9 @@ anim: driver({ ...base, actions: { ...base.actions, call: trumpet }, post: swing
 
 Building blocks for custom actions (all exported from `anim/quadruped.ts`):
 `standingBase` (body bob + planted legs), `body`, `legs`, `plantLeg`,
-`placeLeg`, `reachMuzzle` (neck down until the muzzle hits a height — e.g.
+`placeLeg`, `reachMuzzle` (neck down until the muzzle hits a height; scans
+the pitch range and falls back to the lowest reachable muzzle instead of
+curling the head under the chest — e.g.
 giraffe browsing high: target y = 4.5), `neckHead`, `lookAround`, `tail`,
 `ears`, `jaw`, `lie`, `act*` defaults. `post` is ideal for extra chains
 (trunk sway, ear flaps) because it runs on top of every action.
@@ -172,12 +186,15 @@ No framework edits are needed: a rig kind is just bones + roles + a driver.
 ## Humans
 
 `createHuman(appearance, role, seed)`: geometry cached per (female, child,
-hair/hat variant: short, long, bald, cap, bushhat); height = root scale; build
+hair/hat variant: short, long, bald, cap, bushhat, + an A-line skirt variant
+worn by about a third of female guests — a dress when top and skirt share
+the shirt colour, bare legs or leggings below); hands have a palm, cupped
+fingers and a thumb on their own grid (medium / high); height = root scale; build
 = shader inflation along normals; clothing colours / sleeve & trouser length /
 lab coat are per-instance uniforms of a per-instance material (shared
 program). Staff: keeper (khaki + bush hat), groundskeeper (dark green + cap,
 broom while working), vet (white coat). Held items (`anim.holding`) attach to
-the right hand; balloons float on a string. ≈ 2.3–2.7k triangles at medium.
+the right hand; balloons float on a string. ≈ 2.6–3.1k triangles at medium.
 
 ## Preview
 
@@ -187,7 +204,8 @@ http://localhost:5302/harness/creatures.html?species=okapi&action=walk&speed=1.4
   params: species, sex=M|F, action, speed, t (freeze time), yaw, pitch, dist, ty/tz (look-at),
           detail=0|1|2, growth, seed, wire=1 (wireframe), live=1, noshadow=1
 ?grid=1     all species side by side (+ 1.8 m human)       ?humans=1  crowd with actions / items
-?person=1&action=sit&hold=icecream&sex=F&hair=1&role=vet   single human
+?person=1&action=sit&hold=icecream&sex=F&hair=1&role=vet   single human   (?humans=1&hseed=5 varies outfits)
+?legacy=1 | ?seamSink=0.35&seamFull=1.2 …   region seam A/B (see SEAM in build/geometry.ts)
 node scripts/shot.cjs "<url>" out.png --wait=8000 --size=1280x720
 ```
 

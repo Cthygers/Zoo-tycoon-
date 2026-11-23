@@ -421,8 +421,13 @@ export function jaw(ctx: AnimCtx, pose: Pose, open: number): void {
 
 /**
  * Bend the neck (and head) down so the muzzle reaches height `y` (model space).
- * Bisection on a distributed pitch; rig.fk must be current for the chest.
- * Returns the pitch used.
+ * rig.fk must be current for the chest. Returns the pitch used.
+ *
+ * The pitch range is scanned coarsely for the first pitch that reaches `y`,
+ * then refined by bisection inside that bracket — robust when the muzzle
+ * height is not monotonic in the pitch (past some angle a short neck curls
+ * the head back under the chest). When `y` is out of reach the pitch of the
+ * lowest muzzle position is used (best reach), never the curled extreme.
  */
 export function reachMuzzle(ctx: AnimCtx, pose: Pose, y: number, headExtra = 0, yaw = 0, maxPitch = 2.2): number {
   const R = ctx.roles;
@@ -430,10 +435,43 @@ export function reachMuzzle(ctx: AnimCtx, pose: Pose, y: number, headExtra = 0, 
   const n = R.neck.length;
   for (let i = 0; i < n; i++) _saved[i].copy(pose.q[R.neck[i]]);
   _saved[n].copy(pose.q[R.head]);
-  let lo = -0.6, hi = maxPitch;
-  if (reachApply(ctx, pose, hi, headExtra, yaw) > y) return hi;
-  // muzzle height decreases monotonically with pitch for typical necks → bisection
-  for (let it = 0; it < 14; it++) {
+  const lo0 = -0.6;
+  const STEPS = 10;
+  let prev = lo0;
+  let prevY = reachApply(ctx, pose, lo0, headExtra, yaw);
+  if (prevY <= y) return lo0;
+  let best = lo0, bestY = prevY;
+  let hit = -1;
+  for (let k = 1; k <= STEPS; k++) {
+    const th = lo0 + ((maxPitch - lo0) * k) / STEPS;
+    const my = reachApply(ctx, pose, th, headExtra, yaw);
+    if (my <= y) {
+      hit = th;
+      break;
+    }
+    if (my < bestY) {
+      bestY = my;
+      best = th;
+    }
+    prev = th;
+    prevY = my;
+  }
+  if (hit < 0) {
+    // out of reach: refine around the lowest sample (golden-section style shrink)
+    const step = (maxPitch - lo0) / STEPS;
+    let a = Math.max(lo0, best - step), b = Math.min(maxPitch, best + step);
+    for (let it = 0; it < 6; it++) {
+      const m1 = a + (b - a) * 0.382, m2 = a + (b - a) * 0.618;
+      if (reachApply(ctx, pose, m1, headExtra, yaw) < reachApply(ctx, pose, m2, headExtra, yaw)) b = m2;
+      else a = m1;
+    }
+    const th = (a + b) * 0.5;
+    reachApply(ctx, pose, th, headExtra, yaw);
+    return th;
+  }
+  let lo = prev, hi = hit;
+  void prevY;
+  for (let it = 0; it < 9; it++) {
     const mid = (lo + hi) * 0.5;
     if (reachApply(ctx, pose, mid, headExtra, yaw) > y) lo = mid;
     else hi = mid;
@@ -685,5 +723,8 @@ export function quadrupedDriver(p: QuadParams): AnimDriver<QuadState> {
     aliases: { run: 'walk', leave: 'walk' },
     fade: 0.4,
     fades: { sleep: 1.1, rest: 1.0, sit: 0.8 },
+    // getting up is slower than the default 0.4 s so the folded legs never
+    // sweep through the ground while the body rises
+    transitions: { 'sleep>*': 1.3, 'rest>*': 1.1, 'sit>*': 0.8, 'sleep>rest': 0.9, 'rest>sleep': 0.9 },
   };
 }

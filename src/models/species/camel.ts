@@ -493,6 +493,8 @@ function makeDriver(height: number, walkSpeed: number, runSpeed: number) {
     actions: { ...base.actions, idle, walk, eat, drink, call, play, social, sleep, rest, sit: rest },
     fade: 0.45,
     fades: { sleep: 0.3, rest: 0.3, sit: 0.3 },
+    // lying down / getting up is a posture sequence (riseOverlay): no slow get-up crossfade on top
+    transitions: {},
   };
 }
 

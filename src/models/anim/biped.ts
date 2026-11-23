@@ -170,5 +170,6 @@ export function bipedDriver(p: Partial<BipedParams> = {}): AnimDriver<BipedState
     aliases: { run: 'walk' },
     fade: 0.35,
     fades: { sleep: 0.9, sit: 0.8 },
+    transitions: { 'sleep>*': 1.0, 'sit>*': 0.8 },
   };
 }

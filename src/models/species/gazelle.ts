@@ -507,6 +507,7 @@ function gazelleDriver(p: QuadParams): AnimDriver<PRState> {
     aliases: { run: 'walk', leave: 'walk', sit: 'rest' },
     fade: 0.3,
     fades: { sleep: 1.0, rest: 0.9, play: 0.25, call: 0.25 },
+    transitions: { 'sleep>*': 1.0, 'rest>*': 0.9, 'sleep>rest': 0.8, 'rest>sleep': 0.8 },
   };
 }
 

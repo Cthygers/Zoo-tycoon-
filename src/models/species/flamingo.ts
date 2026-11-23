@@ -15,7 +15,6 @@ import { seat, surfacePoint, withRegion } from '../kit/quadruped';
 import { driver } from '../anim/util';
 import { blendHex, clamp01, fbm, smooth } from '../coat/coat';
 import { waderDriver } from './species-special-rigs/wader-rig';
-import { BASE_CELLS } from '../build/geometry';
 import type { BoneSpec } from '../rig/rig';
 import type { CoatSample, CreatureDesign, DesignContext, RigRoles, SpeciesModel } from '../types';
 import * as THREE from 'three';
@@ -212,9 +211,6 @@ function elevations(pts: readonly Vec3[]): number[] {
 const RES = 0.86;
 
 function design(ctx: DesignContext): CreatureDesign {
-  // base cell ≈ longest extent / (cells × resolution); region scales are relative to it
-  const hBase = 1.38 / (BASE_CELLS[ctx.detail] * RES);
-  const cell = (m: number): number => Math.min(1, m / hBase);
   const head = withRegion(headPrims(), 'neck');
   const prims: Prim[] = [...bodyPrims(), ...neckPrims(), ...head, ...legPrimsLeft(), ...mirrorX(legPrimsLeft())];
   const eyeDir: Vec3 = [-1, 0, -0.1];
@@ -245,15 +241,27 @@ function design(ctx: DesignContext): CreatureDesign {
     // flock species (up to 30 per habitat): a lean base grid, fine grids
     // sized in metres for the thin parts so they never break up on any tier
     resolution: RES,
+    // (`cell` caps the fine cell in metres; `noBase` keeps the thin parts off the
+    // coarse grid, which would otherwise bridge jaw and throat / blob the legs)
     regions: {
-      neck: { scale: cell([0.012, 0.0105, 0.0085][ctx.detail]) },
-      HL: { scale: cell([0.0095, 0.0085, 0.007][ctx.detail]), aniso: [1, 4, 1] },
-      HR: { scale: cell([0.0095, 0.0085, 0.007][ctx.detail]), aniso: [1, 4, 1] },
-      'foot.L': { scale: cell([0.0068, 0.006, 0.0045][ctx.detail]) },
-      'foot.R': { scale: cell([0.0068, 0.006, 0.0045][ctx.detail]) },
+      neck: { scale: 1, cell: [0.012, 0.0105, 0.0085][ctx.detail], noBase: true },
+      HL: { scale: 1, cell: [0.0095, 0.0085, 0.007][ctx.detail], aniso: [1, 4, 1], noBase: true },
+      HR: { scale: 1, cell: [0.0095, 0.0085, 0.007][ctx.detail], aniso: [1, 4, 1], noBase: true },
+      'foot.L': { scale: 1, cell: [0.0068, 0.006, 0.0045][ctx.detail] },
+      'foot.R': { scale: 1, cell: [0.0068, 0.006, 0.0045][ctx.detail] },
     },
     coat: flamingoCoat(eye),
-    look: { skin: 'feather', pattern: 'field', roughness: 0.82, sheen: 0.22, grain: 0.0042, bump: 0.38, mottle: 0.06 },
+    look: {
+      skin: 'feather',
+      pattern: 'field',
+      roughness: 0.82,
+      sheen: 0.22,
+      grain: 0.0042,
+      bump: 0.38,
+      mottle: 0.06,
+      // chicks: grey-white down and grey legs; the pink comes with age
+      juvenile: { color: 0xb3aea8, amount: 0.95, until: 0.8, keep: 0.3 },
+    },
     eyes: [
       { bone: 'head', pos: eye, radius: 0.0044, color: 0xd8c25a },
       { bone: 'head', pos: pupil, radius: 0.0021, color: 0x0c0a08 },

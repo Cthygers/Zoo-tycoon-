@@ -11,7 +11,10 @@ import { SPECIES, SPECIES_BY_ID } from '../src/data/species';
 import { CreatureFactory } from '../src/models';
 import type { QualitySettings } from '../src/core/contracts';
 import type { HumanAppearance } from '../src/core/types';
-import { skinMatrices } from '../src/models/model';
+import { skinMatrices, transitionFade } from '../src/models/model';
+import { assetFromDesign } from '../src/models/assets';
+import { reachMuzzle } from '../src/models/anim/quadruped';
+import type { AnimCtx, AnimDriver } from '../src/models/types';
 import { SimplifyJob, simplifyGeometry } from '../src/models/lod/simplify';
 import { LOD_RATIOS, lodPolicy, pickLod } from '../src/models/lod/lod';
 import { FilteredBatch, SkinnedBatch } from '../src/models/crowd/batch';
@@ -499,5 +502,88 @@ describe('crowd renderer', () => {
     t.dispose();
     expect(f.crowd.looseCount).toBe(0);
     f.dispose();
+  });
+});
+
+describe('framework polish: regions, carving tags, crossfades, muzzle reach', () => {
+  it('noBase keeps a thin plate off the coarse grid (no sheet bridging the gap)', () => {
+    const bones = [{ name: 'root', parent: null, pos: [0, 0.5, 0] as const }];
+    // a body and a thin plate 4 cm away: well under one coarse cell (≈ 3.6 cm at detail 0)
+    const prims = (noBase: boolean) => ({
+      bones,
+      prims: [sphere('root', [0, 0.5, 0], 0.4), ellipsoid('root', [0.452, 0.5, 0], [0.008, 0.25, 0.2], { blend: 0.002, region: 'plate' })],
+      regions: { plate: { cell: 0.006, noBase } },
+    });
+    const inGap = (noBase: boolean): number => {
+      const r = buildGeometry(prims(noBase), 0, coatBaker(() => undefined));
+      const p = r.geometry.getAttribute('position');
+      let n = 0;
+      for (let i = 0; i < p.count; i++) {
+        const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+        const rr = Math.hypot(x, y - 0.5, z);
+        // strictly between the sphere surface and the plate, near the plate centre
+        if (x > 0.412 && x < 0.438 && rr > 0.41 && Math.abs(y - 0.5) < 0.12 && Math.abs(z) < 0.1) n++;
+      }
+      return n;
+    };
+    expect(inGap(true)).toBe(0);
+  });
+
+  it('RegionOpts.cell caps the fine cell in metres', () => {
+    const bones = [{ name: 'root', parent: null, pos: [0, 0.5, 0] as const }];
+    const base = { bones, prims: [sphere('root', [0, 0.5, 0], 0.4), capsule('root', [0.3, 0.5, 0], [0.8, 0.5, 0], 0.02, { region: 'rod' })] };
+    const coarse = buildGeometry({ ...base, regions: { rod: { scale: 1 } } }, 0, coatBaker(() => undefined));
+    const fine = buildGeometry({ ...base, regions: { rod: { scale: 1, cell: 0.008 } } }, 0, coatBaker(() => undefined));
+    expect(fine.triangles).toBeGreaterThan(coarse.triangles + 200);
+  });
+
+  it('pd() measures carving primitives that carry a part tag', () => {
+    const bones = [{ name: 'root', parent: null, pos: [0, 0.5, 0] as const }];
+    let near = 0;
+    buildGeometry(
+      { bones, prims: [sphere('root', [0, 0.5, 0], 0.3), sphere('root', [0, 0.5, 0.32], 0.08, { sub: true, part: 'dimple' })] },
+      0,
+      coatBaker((c) => {
+        if (c.pd('dimple') < 0.01) near++;
+      }),
+    );
+    expect(near).toBeGreaterThan(3);
+  });
+
+  it('per-transition crossfade times', () => {
+    const d = { init: () => 0, actions: {}, fade: 0.4, fades: { sleep: 1.1 }, transitions: { 'sleep>*': 1.5, 'idle>walk': 0.2, '*>call': 0.3 } } as unknown as AnimDriver<unknown>;
+    expect(transitionFade(d, 'sleep', 'idle')).toBe(1.5);
+    expect(transitionFade(d, 'idle', 'walk')).toBe(0.2);
+    expect(transitionFade(d, 'walk', 'call')).toBe(0.3);
+    expect(transitionFade(d, 'idle', 'sleep')).toBe(1.1);
+    expect(transitionFade(d, 'idle', 'eat')).toBe(0.4);
+    expect(transitionFade(d, '', 'call')).toBe(0.3);
+  });
+
+  it('reachMuzzle falls back to the best reach instead of curling the head under', () => {
+    const def = SPECIES_BY_ID.zebra;
+    const design = SPECIES_MODELS.zebra.design({ def, sex: 'F', detail: 0 });
+    const asset = assetFromDesign('zebra-test', design, 0);
+    const rt = new RigRuntime(asset.rig);
+    const ctx = { rig: rt, def: asset.rig, roles: asset.roles, design } as unknown as AnimCtx;
+    const pose = new Pose(asset.rig.count);
+    rt.fk(pose);
+    const muzzleY = (th: number): number => {
+      const p = new Pose(asset.rig.count);
+      rt.fk(p);
+      reachMuzzle(ctx, p, -100, 0, 0, th);
+      return rt.pointOn(asset.roles.head, asset.roles.muzzle!, new THREE.Vector3()).y;
+    };
+    // unreachable target: the chosen pitch gives (about) the lowest muzzle of the range
+    const th = reachMuzzle(ctx, pose, -100);
+    const best = rt.pointOn(asset.roles.head, asset.roles.muzzle!, new THREE.Vector3()).y;
+    expect(th).toBeLessThanOrEqual(2.2);
+    for (const t of [0.5, 1, 1.5, 2.2]) expect(best).toBeLessThanOrEqual(muzzleY(t) + 0.02);
+    // reachable target: lands on it
+    const p2 = new Pose(asset.rig.count);
+    rt.fk(p2);
+    reachMuzzle(ctx, p2, 0.4);
+    expect(Math.abs(rt.pointOn(asset.roles.head, asset.roles.muzzle!, new THREE.Vector3()).y - 0.4)).toBeLessThan(0.02);
+    asset.geometry.dispose();
   });
 });

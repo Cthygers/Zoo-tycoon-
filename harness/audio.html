@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Wildhaven audio harness</title>
+    <style>
+      html, body { margin: 0; padding: 0; background: #12150f; color: #d9dccf; font: 12px/1.35 system-ui, sans-serif; }
+      #bar { padding: 8px 10px; display: flex; flex-wrap: wrap; gap: 4px; }
+      #bar button { background: #2b3324; color: #e8ead8; border: 1px solid #44503a; border-radius: 4px; padding: 3px 7px; font-size: 11px; cursor: pointer; }
+      #bar button:hover { background: #3a4630; }
+      #status { padding: 0 10px 6px; color: #a9b38f; }
+      canvas { display: block; }
+      pre { margin: 0; padding: 8px 10px; white-space: pre-wrap; font: 11px/1.3 ui-monospace, monospace; color: #c8cdb8; }
+    </style>
+  </head>
+  <body>
+    <div id="bar"></div>
+    <div id="status">rendering…</div>
+    <canvas id="c" width="1280" height="200"></canvas>
+    <pre id="out"></pre>
+    <script type="module" src="./audio.ts"></script>
+  </body>
+</html>

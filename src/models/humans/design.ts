@@ -12,6 +12,8 @@ export interface HumanBodyKey {
   female: boolean;
   child: boolean;
   hair: HairKind;
+  /** Knee-length A-line skirt / dress over the thighs (coloured like the trousers). */
+  skirt?: boolean;
 }
 
 export interface HumanDesign {
@@ -109,10 +111,15 @@ export function humanDesign(key: HumanBodyKey): HumanDesign {
   if (f) {
     torso.push(...symmetric([ellipsoid('chest', [0.055, 1.27, 0.07], [0.058, 0.055, 0.045], { blend: 0.05, part: 'torso' })]));
   }
+  // hand (A-pose: hanging along the forearm line, palm toward the thigh, thumb forward):
+  // a palm, slightly cupped tapering fingers and a thumb, instead of a paddle
+  const hx = 0.185 * shW + 0.215, hr = 0.4;
   const armL: Prim[] = [
     cone('upperArm.L', J.shoulder, J.elbow, 0.048, 0.038, { blend: 0.03, part: 'arm', region: 'armL' }),
     cone('foreArm.L', J.elbow, J.wrist, 0.038, 0.027, { blend: 0.02, part: 'arm', region: 'armL' }),
-    ellipsoid('hand.L', [0.185 * shW + 0.237, 0.856, 0.0], [0.02, 0.05, 0.038], { rot: [0, 0, 0.4], blend: 0.015, part: 'hand', region: 'armL' }),
+    ellipsoid('hand.L', [hx + 0.016, 0.868, -0.004], [0.019, 0.04, 0.04], { rot: [0, 0, hr], blend: 0.014, part: 'hand', region: 'handL' }),
+    ellipsoid('hand.L', [hx + 0.031, 0.826, -0.002], [0.0135, 0.034, 0.034], { rot: [0.12, 0, hr + 0.08], blend: 0.012, part: 'hand', region: 'handL' }),
+    cone('hand.L', [hx + 0.006, 0.884, 0.026], [hx + 0.022, 0.846, 0.047], 0.0105, 0.0075, { blend: 0.01, part: 'hand', region: 'handL' }),
   ];
   const legL: Prim[] = [
     cone('thigh.L', [J.hip[0], 0.92, -0.005], J.knee, 0.088, 0.058, { blend: 0.05, part: 'leg' }),
@@ -120,14 +127,33 @@ export function humanDesign(key: HumanBodyKey): HumanDesign {
     // shoe
     roundBox('foot.L', [J.ankle[0], 0.045, 0.045], [0.045, 0.045, 0.125], 0.04, { blend: 0.025, part: 'shoe', region: 'legL' }),
   ];
-  const mirrorSide = (n: string) => n.replace('.L', '.R').replace('armL', 'armR').replace('legL', 'legR');
-  const body: Prim[] = [...torso, ...symmetric(armL, mirrorSide), ...symmetric(legL, mirrorSide)];
+  const mirrorSide = (n: string) => n.replace('.L', '.R').replace('armL', 'armR').replace('legL', 'legR').replace('handL', 'handR');
+  // skirt / dress: an A-line from the hips to just above the knee — a wide,
+  // flat hem disc smooth-unioned into the hips (the large blend fills the cone
+  // between them), covering the thighs
+  const skirt: Prim[] = key.skirt
+    ? [
+        ellipsoid('hips', [0, 0.8, -0.012], [0.158 * hipW, 0.13, 0.125], { blend: 0.05, part: 'skirt', skin: 1.3 }),
+        // the hem rides on the thighs (left / right halves) so it follows the
+        // legs when walking and lies over the lap when sitting
+        ...symmetric([ellipsoid('thigh.L', [0.07 * hipW, 0.62, -0.012], [0.11 * hipW, 0.075, 0.155], { blend: 0.12, part: 'skirt', skin: 1.6 })]),
+      ]
+    : [];
+  const body: Prim[] = [...torso, ...skirt, ...symmetric(armL, mirrorSide), ...symmetric(legL, mirrorSide)];
 
   // ---- head (scaled about the neck for children)
   const head: Prim[] = [
     ellipsoid('head', [0, 1.645, 0.0], [0.074, 0.105, 0.094], { blend: 0.03, part: 'head' }),
     ellipsoid('head', [0, 1.575, 0.028], [0.058, 0.05, 0.062], { blend: 0.035, part: 'head' }),
-    ellipsoid('head', [0, 1.625, 0.096], [0.011, 0.022, 0.014], { rot: [0.25, 0, 0], blend: 0.012, part: 'head' }),
+    // face relief: brow ridge, nose (bridge + tip), cheekbones, lips, chin and
+    // shallow eye sockets so the face reads in side light
+    ellipsoid('head', [0, 1.668, 0.078], [0.052, 0.011, 0.016], { blend: 0.02, part: 'head' }),
+    cone('head', [0, 1.652, 0.09], [0, 1.622, 0.105], 0.008, 0.0105, { blend: 0.012, part: 'head' }),
+    ellipsoid('head', [0, 1.621, 0.099], [0.0125, 0.012, 0.012], { blend: 0.01, part: 'head' }),
+    ...symmetric([ellipsoid('head', [0.042, 1.616, 0.061], [0.02, 0.016, 0.02], { blend: 0.025, part: 'head' })]),
+    ellipsoid('head', [0, 1.586, 0.083], [0.019, 0.0075, 0.011], { blend: 0.012, part: 'head' }),
+    ellipsoid('head', [0, 1.55, 0.07], [0.022, 0.017, 0.017], { blend: 0.02, part: 'head' }),
+    ...symmetric([ellipsoid('head', [0.031, 1.651, 0.098], [0.017, 0.01, 0.011], { sub: true, blend: 0.012, part: 'head' })]),
     ...symmetric([ellipsoid('head', [0.074, 1.632, -0.005], [0.012, 0.026, 0.017], { blend: 0.01, part: 'ear' })]),
   ];
   const hair: Prim[] = [];
