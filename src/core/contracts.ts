@@ -67,6 +67,8 @@ export interface ZooStats {
   avgGuestHappiness: number; // 0..1
   staffCount: number;
   litterCount: number;
+  /** Ticket price guests currently think is fair for this zoo. */
+  fairAdmission: number;
 }
 
 export type SimSpeed = 0 | 1 | 2 | 3; // paused, 1x, 2x, 4x
@@ -297,8 +299,7 @@ export interface IPropsLayer {
   /** Apply a new quality tier (detail distances, shadows, LOD, light count). */
   setQuality(quality: QualitySettings): void;
   /**
-   * Generate textures / templates for every prop type ahead of time so the
-   * first placement of each type does not hitch. Called during the loading screen.
+   * Build what the current world draws ahead of time — foliage atlases (painted in a worker), the templates of the object types in use and the fence styles in use — in short main-thread tasks, then add the world's objects. Other types are built on first use (thumbnail / ghost / placement). Called during the loading screen; without it the world is added on the first update().
    */
   prewarm(onProgress?: (fraction: number) => void): Promise<void>;
   dispose(): void;

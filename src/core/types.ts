@@ -301,6 +301,8 @@ export interface LedgerEntry {
   shopIncome: number;
   donations: number;
   upkeep: number;
+  /** Animal food (daily, scaled by each animal's size and growth). */
+  food: number;
   salaries: number;
   construction: number;
   animalPurchases: number;

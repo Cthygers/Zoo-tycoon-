@@ -325,6 +325,17 @@ export function buildDemoZoo(sim: ISimulation, seed = 4242): DemoReport {
     sim.placeObject('lamp', 62, z, 0);
   }
   for (let x = 12; x < 60; x += 9) sim.placeObject('flower_bed', x, avenueZ + 2, 0);
+  // litter bins beside the kiosks on the plaza and the central walk, where guests finish their snacks
+  for (const [x, z] of [
+    [ex + 1, avenueZ + 1],
+    [ex - 2, avenueZ + 9],
+    [ex + 1, avenueZ + 10],
+    [37, 16],
+    [37, 20],
+    [37, 26],
+    [37, 30],
+  ])
+    sim.placeObject('bin', x, z, 0);
 
   // ------------------------------------------------------------------ staff
   const staffSpots: [Parameters<ISimulation['hireStaff']>[0], number, number][] = [

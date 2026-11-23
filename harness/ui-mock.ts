@@ -49,13 +49,13 @@ import { SPECIES_BY_ID } from '../src/data/species';
 import { TERRAIN_INFO } from '../src/ui/catalog';
 
 const money = (v: number) => `$${Math.round(v).toLocaleString('en-US')}`;
-const SALARY: Record<StaffRole, number> = { keeper: 90, groundskeeper: 70, vet: 140 };
+const SALARY: Record<StaffRole, number> = { keeper: 120, groundskeeper: 90, vet: 160 };
 const NAMES = ['Kibo', 'Amara', 'Juno', 'Tala', 'Rafi', 'Nia', 'Zuri', 'Bodhi', 'Imani', 'Sefu', 'Laila', 'Otto', 'Mosi', 'Kesi'];
 const GUEST_NAMES = ['Maya Ortiz', 'Ben Hollis', 'Priya Shah', 'Tom Reed', 'Lena Vogel', 'Sam Okafor', 'Ivy Chen', 'Leo Marsh', 'Ada Novak', 'Kai Brooks'];
 const THOUGHTS = ['The giraffes are so tall!', 'I could use a drink.', 'This path is lovely.', 'Those zebras look happy.', 'I wish there were more benches.', 'What a beautiful zoo!'];
 
 function emptyLedger(day: number): LedgerEntry {
-  return { day, income: 0, expenses: 0, admissions: 0, shopIncome: 0, donations: 0, upkeep: 0, salaries: 0, construction: 0, animalPurchases: 0 };
+  return { day, income: 0, expenses: 0, admissions: 0, shopIncome: 0, donations: 0, upkeep: 0, food: 0, salaries: 0, construction: 0, animalPurchases: 0 };
 }
 
 // ===========================================================================
@@ -302,6 +302,7 @@ export class MockSim implements ISimulation {
       avgGuestHappiness: this.guests.size ? gh / this.guests.size : 0,
       staffCount: this.staff.size,
       litterCount: this.litter.size,
+      fairAdmission: 24,
     };
   }
 

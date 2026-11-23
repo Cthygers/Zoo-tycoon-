@@ -703,8 +703,8 @@ export class World {
     for (let z = 0; z < MAP_H; z++)
       for (let x = 0; x < MAP_W; x++) {
         const v = n.fbm2(x * 0.08, z * 0.08, 3);
-        if (v > 0.38) this.terrain[this.idx(x, z)] = Terrain.DryGrass;
-        else if (v < -0.45) this.terrain[this.idx(x, z)] = Terrain.Dirt;
+        if (v > 0.46) this.terrain[this.idx(x, z)] = Terrain.DryGrass;
+        else if (v < -0.52) this.terrain[this.idx(x, z)] = Terrain.Dirt;
       }
     // a natural pond in the north-west
     const pcx = 14 + rng.int(0, 4),

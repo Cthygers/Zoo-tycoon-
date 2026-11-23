@@ -60,7 +60,7 @@ const SAVE_VERSION = 1;
 const START_SATISFACTION = 0.5;
 
 export type IncomeKind = 'admissions' | 'shopIncome' | 'donations' | 'other';
-export type ExpenseKind = 'upkeep' | 'salaries' | 'construction' | 'animalPurchases';
+export type ExpenseKind = 'upkeep' | 'food' | 'salaries' | 'construction' | 'animalPurchases';
 
 export function emptyLedger(day: number): LedgerEntry {
   return {
@@ -71,6 +71,7 @@ export function emptyLedger(day: number): LedgerEntry {
     shopIncome: 0,
     donations: 0,
     upkeep: 0,
+    food: 0,
     salaries: 0,
     construction: 0,
     animalPurchases: 0,
@@ -309,14 +310,16 @@ export class Simulation implements ISimulation {
     for (let i = 0; i < this.world.hFence.length; i++) if (this.world.hFence[i]) fenceUpkeep += 0.1 * (FENCES_BY_ID[this.world.hFence[i]]?.strength ?? 1);
     for (let i = 0; i < this.world.vFence.length; i++) if (this.world.vFence[i]) fenceUpkeep += 0.1 * (FENCES_BY_ID[this.world.vFence[i]]?.strength ?? 1);
     upkeep += Math.round(fenceUpkeep);
-    // the animals' food is part of the daily running costs
+    // the animals' food is a daily running cost of its own
+    let food = 0;
     for (const a of this.animals.values()) {
       const sp = SPECIES_BY_ID[a.speciesId];
-      if (sp) upkeep += dailyFoodCost(sp, a.growth);
+      if (sp) food += dailyFoodCost(sp, a.growth);
     }
     let salaries = 0;
     for (const s of this.staff.values()) salaries += s.salary;
     if (upkeep) this.spend('upkeep', upkeep);
+    if (food) this.spend('food', food);
     if (salaries) this.spend('salaries', salaries);
     const done = this.today;
     this.ledger.push(done);
@@ -713,6 +716,7 @@ export class Simulation implements ISimulation {
       avgGuestHappiness: this.guests.size ? gh / this.guests.size : this.satisfaction,
       staffCount: this.staff.size,
       litterCount: this.litter.size,
+      fairAdmission: Math.round(this.guestSys.fairPrice),
     };
     this.statsCache = out;
     this.statsTime = this.time;
@@ -861,8 +865,9 @@ export class Simulation implements ISimulation {
     this.speed = s.speed;
     this.rating = s.rating;
     this.objectives = mergeObjectives(s.objectives ?? []);
-    this.ledger = s.ledger ?? [];
-    this.today = s.today ?? emptyLedger(this.day);
+    // older saves have no 'food' field (food was booked under upkeep)
+    this.ledger = (s.ledger ?? []).map((e) => ({ ...emptyLedger(e.day), ...e }));
+    this.today = { ...emptyLedger(this.day), ...(s.today ?? {}) };
     this.habRt.clear();
     for (const h of s.habitats ?? []) this.habRt.set(h.id, h);
     this.nextIds = s.nextIds;

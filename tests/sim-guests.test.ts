@@ -146,7 +146,24 @@ describe('ticket price and running costs (GAME-3)', () => {
     }
     const food = 5 * dailyFoodCost(SPECIES_BY_ID.zebra, 1);
     expect(food).toBeGreaterThan(20);
-    expect(fed.ledger[0].upkeep - plain.ledger[0].upkeep).toBe(food);
+    expect(fed.ledger[0].food - plain.ledger[0].food).toBe(food);
+    expect(fed.ledger[0].upkeep).toBe(plain.ledger[0].upkeep); // food has its own ledger row
+  }, 30_000);
+
+  it('loads saves from before animal food had its own ledger row', () => {
+    const { sim } = newSim(5);
+    buildZoo(sim);
+    buyHerd(sim, 'zebra', 3);
+    sim.setSpeed(3);
+    runUntil(sim, 24 * 60);
+    const save = JSON.parse(JSON.stringify(sim.serialize()));
+    delete save.today.food;
+    for (const e of save.ledger) delete e.food;
+    const { sim: sim2 } = newSim(5);
+    sim2.load(save);
+    expect(sim2.today.food).toBe(0);
+    expect(sim2.ledger.every((e) => e.food === 0)).toBe(true);
+    expect(sim2.stats().fairAdmission).toBeGreaterThan(0);
   }, 30_000);
 
   it('a starter zoo makes a steady but modest profit', () => {
@@ -160,7 +177,7 @@ describe('ticket price and running costs (GAME-3)', () => {
     // day-to-day trading only (goal rewards are a one-off)
     for (const d of sim.ledger.slice(1)) {
       const income = d.admissions + d.shopIncome + d.donations;
-      const costs = d.upkeep + d.salaries;
+      const costs = d.upkeep + d.food + d.salaries;
       expect(income - costs).toBeGreaterThan(0);
       expect(income - costs).toBeLessThan(1500);
       expect(costs / income).toBeGreaterThan(0.25); // wages, upkeep and food matter
@@ -172,7 +189,7 @@ describe('ticket price and running costs (GAME-3)', () => {
     runUntil(big, 24 * 60);
     runUntil(big, 24 * 60);
     const d = big.ledger[1];
-    expect(d.admissions + d.shopIncome + d.donations - d.upkeep - d.salaries).toBeGreaterThan(300);
+    expect(d.admissions + d.shopIncome + d.donations - d.upkeep - d.food - d.salaries).toBeGreaterThan(300);
   }, 30_000);
 });
 

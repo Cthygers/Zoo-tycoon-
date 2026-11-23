@@ -147,10 +147,13 @@ export class ZooPanel {
       sim.setAdmission(v);
       setSlider(v);
     });
+    const fair = el('div', 'wh-note wh-fair');
+    let lastFair = '';
     const admission = el('div', 'wh-sect', [
       el('div', { class: 'wh-sect-h', text: 'Admission price' }),
       el('div', 'wh-slider-row', [slider, sval]),
       el('div', { class: 'wh-note', text: 'Higher prices earn more per visitor, but fewer guests come if your zoo’s rating can’t justify it.' }),
+      fair,
     ]);
     const chartWrap = el('div');
     const legend = el('div', {
@@ -203,6 +206,7 @@ export class ZooPanel {
         ['Construction', -t.construction],
         ['Animals', -t.animalPurchases],
         ['Wages', -t.salaries],
+        ['Animal food', -(t.food ?? 0)],
         ['Upkeep', -t.upkeep],
       ];
       table.innerHTML =
@@ -217,6 +221,14 @@ export class ZooPanel {
         chartWrap.append(barChart(days, sim.day, tip));
       }
       if (document.activeElement !== slider) setSlider(Math.round(sim.admissionPrice));
+      const fairPrice = sim.stats().fairAdmission;
+      const price = Math.round(sim.admissionPrice);
+      const verdict = price > fairPrice * 1.05 ? ' — your price is above that, so some visitors turn away' : price < fairPrice * 0.85 ? ' — you could charge more' : ' — your price is about right';
+      const fairText = `Guests think about ${fmtMoney(fairPrice)} is fair${verdict}.`;
+      if (fairText !== lastFair) {
+        lastFair = fairText;
+        setText(fair, fairText);
+      }
     };
   }
 
@@ -344,7 +356,7 @@ export class ZooPanel {
     const row = (title: string, sub: string, ctrl: HTMLElement) =>
       el('div', 'wh-setting', [el('div', { class: 'wh-setting-t', html: `<b>${escapeHtml(title)}</b><span>${escapeHtml(sub)}</span>` }), ctrl]);
     this.body.append(
-      row('Graphics quality', 'Lower settings save battery and run smoother on older phones.', seg),
+      row('Graphics quality', 'Lower settings save battery and run smoother on older phones. Edge smoothing changes after a restart.', seg),
       row('Sound', 'Ambient sounds and effects.', sw),
       row(
         'Save game',

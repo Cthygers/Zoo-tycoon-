@@ -42,7 +42,7 @@ Modules communicate only through `src/core/contracts.ts`, the shared types in
   animals use `world.heightAt`. Swimming animals have their origin at `WATER_LEVEL`.
 * Models from `IPropsLayer.createObjectModel` / `createFenceSegmentModel` share geometry with
   the layer: callers dispose only `object.userData.ownedMaterials`.
-* `CommandResult.cost` is negative for refunds; `reason` on a successful result is a warning.
+* `CommandResult.cost` is negative for refunds (booked as income); `warning` on a successful or dry-run result flags an outcome the player probably doesn't want (e.g. fences that won't make a habitat, removing a fence that opens a habitat); `reason` on a successful result is an informational note (`buyAnimal` and `moveAnimal` still put their 'Warning: …' text there).
 * Per frame order (main.ts): sim.update → ctx.setTimeOfDay → ui.update → views.update →
   creatures.update(camera) → props.update → audio.update → ctx.update → ctx.render.
 
