@@ -691,7 +691,7 @@ export class AnimalSystem {
     const where = hab?.name ?? 'their habitat';
     const focus = { x: a.x, z: a.z };
     if (this.treadingWater(a, sp)) {
-      sim.notify(`dryland:${hid}`, `${where} has no dry land for the ${pluralName(sp.id)} — paint some ground they can stand on.`, 'bad', focus, 150);
+      sim.remind(`dryland:${hid}`, `${where} has no dry land for the ${pluralName(sp.id)} — paint some ground they can stand on.`, 'bad', focus, 150);
       return;
     }
     if (a.needs.hunger < 0.15) {
@@ -859,7 +859,7 @@ export class AnimalSystem {
     const sim = this.sim;
     const hab = sim.world.habitats.get(hid);
     const e = sim.evalFor(hid, sp.id);
-    if (!hab || !e || e.space >= 0.95) return;
+    if (!hab || !e || e.crowded === 'no') return;
     const crowded = e.issues.find((i) => i.startsWith('Too crowded'));
     const need = crowded?.match(/\(([^)]*)\)/)?.[1];
     sim.notify(

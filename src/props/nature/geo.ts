@@ -402,3 +402,65 @@ export function groupOf(parts: [MeshData, THREE.Material, string?][]): THREE.Gro
   }
   return g;
 }
+
+/**
+ * Near-camera crown dissolve data (props/lod/fade.ts) on the 'leaves' mesh of
+ * a tree group: every vertex carries the crown ellipsoid (centre, horizontal
+ * and vertical radius, cm) and a dissolve rank shared by its whole card or
+ * frond (one connected piece of the mesh), so a crown on the camera's view
+ * line drops out card by card, never as a half-transparent sheet. Every
+ * geometry drawn with the shared tree foliage material needs it (BatchedMesh
+ * wants one attribute layout per batch).
+ */
+export function addCrownFade(group: THREE.Object3D, crown: Ellipsoid): void {
+  const mesh = group.getObjectByName('leaves') as THREE.Mesh | undefined;
+  if (!mesh) return;
+  const g = mesh.geometry;
+  const n = g.getAttribute('position').count;
+  const piece = connectedPieces(g);
+  const cm = (v: number) => Math.round(v * 100);
+  const centre = [cm(crown.c.x), cm(crown.c.y), cm(crown.c.z)];
+  const rh = cm(Math.max(crown.r.x, crown.r.z));
+  const ry = cm(crown.r.y);
+  const c = new Int16Array(n * 4);
+  const r = new Int16Array(n * 2);
+  for (let i = 0; i < n; i++) {
+    c[i * 4] = centre[0];
+    c[i * 4 + 1] = centre[1];
+    c[i * 4 + 2] = centre[2];
+    // multiplicative hash: neighbouring cards get unrelated ranks
+    c[i * 4 + 3] = Math.imul(piece[i] + 1, 0x9e3779b1) >>> 24;
+    r[i * 2] = rh;
+    r[i * 2 + 1] = ry;
+  }
+  g.setAttribute('aCrown', new THREE.BufferAttribute(c, 4));
+  g.setAttribute('aCrownR', new THREE.BufferAttribute(r, 2));
+}
+
+/** Id of the connected piece (shared vertices) each vertex belongs to (its lowest vertex index). */
+export function connectedPieces(g: THREE.BufferGeometry): Int32Array {
+  const n = g.getAttribute('position').count;
+  const parent = new Int32Array(n);
+  for (let i = 0; i < n; i++) parent[i] = i;
+  const find = (i: number): number => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]];
+      i = parent[i];
+    }
+    return i;
+  };
+  const join = (a: number, b: number) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb);
+  };
+  const idx = g.index;
+  if (idx)
+    for (let t = 0; t + 2 < idx.count; t += 3) {
+      join(idx.getX(t), idx.getX(t + 1));
+      join(idx.getX(t), idx.getX(t + 2));
+    }
+  const out = new Int32Array(n);
+  for (let i = 0; i < n; i++) out[i] = find(i);
+  return out;
+}

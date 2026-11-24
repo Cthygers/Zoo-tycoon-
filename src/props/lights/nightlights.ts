@@ -20,14 +20,18 @@
 //  - halos: one camera-facing soft sprite per lamp head (ONE instanced draw)
 //    so lamps read as glowing even without bloom, sized to stay under the
 //    bloom threshold.
+//  - lamp light on animals and people: the pool grid's light is also written
+//    to a map-wide texture that creature and human materials sample once per
+//    vertex (lampField.ts), so anyone standing in a pool is lit warm.
 //  - real point lights: at most a couple (high tier only) on the lamps
-//    nearest the camera focus, so nearby guests / benches are lit too.
+//    nearest the camera focus, so nearby benches / kiosk walls are lit too.
 // Everything is invisible (0 draw calls) during the day.
 
 import * as THREE from 'three';
 import { TILE, WATER_LEVEL } from '../../core/constants';
 import { PathType, Terrain } from '../../core/types';
 import type { World } from '../../core/world';
+import { resetLampField, setLampLight, writeLampField } from './lampField';
 
 /** Warm ≈2700 K lamp colour (linear-ish, as used by the shaders). */
 const WARM = new THREE.Color(0xffc68a);
@@ -52,8 +56,12 @@ const WARM_LDR = new THREE.Color(1.0, 0.6, 0.0);
  */
 const POOL_GAIN_HDR = 3.0;
 const POOL_GAIN_LDR = 1.0;
-/** Additive warm fill of LDR tiers at saturated light (display units). */
-const FILL_GAIN = 0.12;
+/**
+ * Additive warm fill of LDR tiers at saturated light (display units): amber,
+ * so the multiply that follows turns moonlit paving ≈ 2700 K, not white.
+ */
+const FILL_GAIN = 0.32;
+const FILL_COLOR = new THREE.Color(1.0, 0.62, 0.3);
 /**
  * Point lights (high tier) light what stands near a lamp: guests, benches,
  * kiosk walls. Their range ends just past the ground under the lamp, which the
@@ -62,6 +70,12 @@ const FILL_GAIN = 0.12;
  */
 const POINT_INTENSITY = 0.6;
 const POINT_RANGE = 3.8;
+/**
+ * Lamp irradiance on animals and people at full pool light (lampField.ts):
+ * ≈ 5× full moonlight, enough to show a guest's clothes in colour, about as
+ * bright as the lit paving around them.
+ */
+const CREATURE_LAMP = WARM.clone().multiplyScalar(0.45);
 /** Reference lamp height for the falloff normalisation (m). */
 const H0 = 3.2;
 /** Pool mesh height above the walk surface (m); small, so walls standing in a pool show no lit seam. */
@@ -414,7 +428,7 @@ export class NightLights {
     this.fillMat.name = 'props/lightPoolFill';
     this.fillMat.blendSrc = THREE.OneFactor;
     this.fillMat.blendDst = THREE.OneFactor;
-    this.fillMat.uniforms.uColor.value.copy(WARM);
+    this.fillMat.uniforms.uColor.value.copy(FILL_COLOR);
     this.fillMat.uniforms.uSkipBright.value = 1;
     this.fill = new THREE.Mesh(this.pools.geometry, this.fillMat);
     this.fill.name = 'lamp-light-fill';
@@ -548,6 +562,7 @@ export class NightLights {
     this.pools.geometry = g;
     this.fill.geometry = g;
     old.dispose();
+    writeLampField(grid.position, grid.light);
 
     // halos: one per lamp head
     if (lamps > this.haloCap) {
@@ -579,6 +594,7 @@ export class NightLights {
     this.pools.visible = on && this.pools.geometry.index !== null;
     this.fill.visible = this.pools.visible && this.warmFill;
     this.halos.visible = on && this.halos.count > 0;
+    setLampLight(CREATURE_LAMP, on ? night : 0);
     this.updatePoints(dt, night, focus);
   }
 
@@ -645,5 +661,6 @@ export class NightLights {
     this.points = [];
     this.entries.clear();
     this.group.removeFromParent();
+    resetLampField();
   }
 }

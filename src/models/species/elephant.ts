@@ -251,9 +251,9 @@ function tailPrims(): Prim[] {
 // tusks stained near the lip, pale nails, black tail bristles.
 
 const SKIN = 0x5f5852;
-const DUSTY = 0x7b7065;
+const DUSTY = 0x847461;
 const SHADOW = 0x4c4743;
-const MUD = 0x6e5440;
+const MUD = 0x7a5b40;
 const EAR_FRONT = 0x87726b;
 const IVORY = 0xa8946f;
 const IVORY_BASE = 0x6e5a40;
@@ -279,6 +279,8 @@ function elephantCoat(male: boolean, eye: Vec3, tusk: Vec3[]) {
     c.w = 0;
 
     const legK = clamp01((c.pw('leg') + c.pw('foot')) * 1.3);
+    // deep skin folds across legs, trunk and throat; a faint network on the body, none on the ears
+    c.fold = Math.max(0.3 * (1 - clamp01(c.pw('ear') * 2)), legK * smooth(1.9, 1.4, y), clamp01((c.pw('trunk') + c.pw('trunkTip')) * 1.5), c.pw('neck') * smooth(2.4, 1.9, y));
     if (legK > 0.05 && y < 1.9) {
       // horizontal creases, denser around the wrist / ankle
       const wrist = Math.exp(-Math.pow((y - 0.55) / 0.18, 2));
@@ -331,6 +333,7 @@ function elephantCoat(male: boolean, eye: Vec3, tusk: Vec3[]) {
       blendHex(c.color, 0xc8b893, clamp01(0.3 + n2 * 0.4) * smooth(0.35, 0.9, pa.s) * 0.35);
       c.w = 0;
       c.gloss = 0.32;
+      c.fold = 0;
       return;
     }
     // dark line where the tusks leave their sheaths

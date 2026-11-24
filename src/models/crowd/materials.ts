@@ -22,7 +22,9 @@
 // dimmed sky light, and along the view ray the murk of its water column fading
 // it into the lit lake bed the shallows show, all absorbed per channel like
 // the bed (WATER_ABSORPTION, render/groundMaterial.ts); the water surface's
-// veil (render/water.ts) then lies over legs and bed alike. The waterline is
+// veil (render/water.ts) then lies over legs and bed alike, and its murk layers
+// hide whatever stands deeper than ~20 cm (legs fade out instead of showing as
+// dark shapes). The waterline is
 // blended over a few cm under a darker wet band.
 //
 // The selection highlight (look texel x) is a warm Fresnel rim scaled to the
@@ -151,7 +153,7 @@ ${
 void main() {`;
     shader.fragmentShader = fs
       .replace('void main() {', pre)
-      .replace('#include <opaque_fragment>', `outgoingLight = crHighlightOf(outgoingLight, vCrLook0.x);\n${UNDERWATER_GLSL}\n#include <opaque_fragment>`);
+      .replace('#include <opaque_fragment>', `outgoingLight = crHighlightFurOf(outgoingLight, vCrLook0.x, vPattern.w);\n${UNDERWATER_GLSL}\n#include <opaque_fragment>`);
   };
   mat.customProgramCacheKey = () => `${baseKey()}|crowd-v2`;
   return { material: mat, depth: crowdDepthMaterial(u), uniforms: [u] };

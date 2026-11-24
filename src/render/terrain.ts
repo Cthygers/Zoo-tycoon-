@@ -25,6 +25,70 @@ const SKIRT_DEPTH = 2.5;
 /** |h00 + h11 − h10 − h01| above which a tile gets a centre vertex (error at centre = twist / 4). */
 const TWIST_FAN = 0.04;
 
+/** How far (tiles) the shore's ground type reaches into a lake bed. */
+const BED_R = 4;
+
+/** Lake bed look (tile index texture alpha): silt, grey gravel (snow / rock shores), pale sand. */
+export enum LakeBed {
+  Silt = 0,
+  Gravel = 1,
+  Sand = 2,
+}
+
+function bedOfLand(t: Terrain): LakeBed {
+  return t === Terrain.Snow || t === Terrain.Rock ? LakeBed.Gravel : t === Terrain.Sand ? LakeBed.Sand : LakeBed.Silt;
+}
+
+/**
+ * Bed of a tile: land tiles by their own type; water tiles by the land
+ * around them (nearer tiles count more), silt where no land is in reach.
+ */
+export function lakeBedKind(world: World, x: number, z: number): LakeBed {
+  const t = world.terrain[world.idx(x, z)] as Terrain;
+  if (t !== Terrain.Water && t !== Terrain.DeepWater) return bedOfLand(t);
+  const score = [0, 0, 0];
+  for (let dz = -BED_R; dz <= BED_R; dz++)
+    for (let dx = -BED_R; dx <= BED_R; dx++) {
+      const tx = x + dx,
+        tz = z + dz;
+      if (!world.inBounds(tx, tz)) continue;
+      const u = world.terrain[world.idx(tx, tz)] as Terrain;
+      if (u === Terrain.Water || u === Terrain.DeepWater) continue;
+      score[bedOfLand(u)] += 1 / (1 + dx * dx + dz * dz);
+    }
+  let best = LakeBed.Silt;
+  if (score[LakeBed.Gravel] > score[best]) best = LakeBed.Gravel;
+  if (score[LakeBed.Sand] > score[best]) best = LakeBed.Sand;
+  return best;
+}
+
+/** Radius (tiles) of the lawn around a dry-grass / dirt tile that softens it (lawnShare). */
+const LAWN_R = 3;
+
+/**
+ * Share of lawn tiles around a dry-grass or dirt tile (0 for other types):
+ * a small dry patch inside a lawn is drawn as worn, yellowing turf rather
+ * than a beige stain, while a painted savanna keeps its full look.
+ */
+export function lawnShare(world: World, x: number, z: number): number {
+  const t = world.terrain[world.idx(x, z)] as Terrain;
+  if (t !== Terrain.DryGrass && t !== Terrain.Dirt) return 0;
+  let lawn = 0;
+  let n = 0;
+  for (let dz = -LAWN_R; dz <= LAWN_R; dz++)
+    for (let dx = -LAWN_R; dx <= LAWN_R; dx++) {
+      if ((dx === 0 && dz === 0) || !world.inBounds(x + dx, z + dz)) continue;
+      n++;
+      if (world.terrain[world.idx(x + dx, z + dz)] === Terrain.Grass) lawn++;
+    }
+  return n ? lawn / n : 0;
+}
+
+/**
+ * Per-tile data for the ground shader (RGBA8, nearest): r = terrain type,
+ * g = path type, b = 255 under objects, a = lake bed look (LakeBed, bits 0–1)
+ * | lawn share × 63 (lawnShare, bits 2–7).
+ */
 export class TileIndexTexture {
   readonly texture: THREE.DataTexture;
   private data = new Uint8Array(MAP_W * MAP_H * 4);
@@ -50,8 +114,11 @@ export class TileIndexTexture {
         this.data[i * 4] = w.terrain[i];
         this.data[i * 4 + 1] = w.path[i];
         this.data[i * 4 + 2] = w.objectGrid[i] ? 255 : 0;
-        this.data[i * 4 + 3] = 255;
       }
+    // both depend on tiles up to BED_R away
+    for (let z = Math.max(0, z0 - BED_R); z <= Math.min(MAP_H - 1, z1 + BED_R); z++)
+      for (let x = Math.max(0, x0 - BED_R); x <= Math.min(MAP_W - 1, x1 + BED_R); x++)
+        this.data[(z * MAP_W + x) * 4 + 3] = lakeBedKind(w, x, z) | (Math.round(lawnShare(w, x, z) * 63) << 2);
     this.texture.needsUpdate = true;
   }
 
@@ -129,6 +196,8 @@ export class TerrainMesh {
     this.geo.boundingSphere = this.geo.boundingBox.getBoundingSphere(new THREE.Sphere());
     this.mesh = new THREE.Mesh(this.geo, material);
     this.mesh.name = 'terrain';
+    // before the water's murk layers (water.ts), which hide what stands deep in a pond
+    this.mesh.renderOrder = -2;
     this.mesh.receiveShadow = true;
     this.mesh.castShadow = false;
     this.mesh.matrixAutoUpdate = false;

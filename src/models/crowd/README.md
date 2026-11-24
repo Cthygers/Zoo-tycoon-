@@ -85,7 +85,16 @@ Look texels:
   the lit colour), applied at `#include
   <opaque_fragment>` by the batched animal and human materials and the
   standalone animal highlight material. Never an emissive: absolute radiance
-  washes the coat out under the bright day exposure.
+  washes the coat out under the bright day exposure. Animal materials call it
+  as `crHighlightFurOf(light, h, vPattern.w)`: the rim fades on long hair
+  (manes), whose deep folds face away from the camera and would otherwise
+  light up as bright streaks inside the silhouette.
+* **Lamp light**: animal and human materials call `applyLampField(shader)`
+  (props/lights/lampField.ts) last in onBeforeCompile: one R8 field fetch per
+  vertex (`vLampLight`) adds warm lamp irradiance before `<aomap_fragment>` and
+  marks lamp-lit pixels for the night grade (`whLampLit`, or HDR alpha on the
+  post-FX tier). Keep the hooks `<project_vertex>`, `<aomap_fragment>`,
+  `<tonemapping_fragment>`, `<opaque_fragment>` in place.
 * **New per-vertex attribute** (coat baker): nothing to do. LOD meshes copy
   every attribute of level 0 (`lod/simplify.ts`), BatchedMesh requires all
   levels of a variant to share the attribute set — they do.

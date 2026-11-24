@@ -56,14 +56,16 @@ vec3 cr_bump(vec3 surfPos, vec3 n, float h) {
  * level ground, so shaded sides at a low sun don't wash out). Scaled to the
  * scene light it reads on dark and pale coats in full sun, at dusk and at night
  * alike, while the coat's own colour (the inner surface) stays within a few
- * per cent.
+ * per cent. `crHighlightFurOf(light, h, fur)` dims the rim on long hair (fur =
+ * extra strand length, manes ≈ 2.6): the deep folds of a mane face away from
+ * the camera and would light up as bright streaks inside the silhouette.
  */
 export const HIGHLIGHT_FN_GLSL = /* glsl */ `
-vec3 crHighlight(vec3 light, float h, vec3 sceneIrradiance, vec3 n, vec3 v) {
+vec3 crHighlight(vec3 light, float h, vec3 sceneIrradiance, vec3 n, vec3 v, float rimK) {
   float k = clamp(h * 3.2, 0.0, 1.0);
   float rim = 1.0 - saturate(dot(n, v));
   rim *= rim;
-  rim *= rim;
+  rim *= rim * rimK;
   float white = dot(sceneIrradiance * RECIPROCAL_PI, vec3(0.2126, 0.7152, 0.0722));
   return light * (1.0 + 0.04 * k) + vec3(1.0, 0.8, 0.42) * (0.5 * rim * k * white);
 }
@@ -74,5 +76,6 @@ vec3 crHighlight(vec3 light, float h, vec3 sceneIrradiance, vec3 n, vec3 v) {
 #define crKeyLevel() vec3(0.0)
 #endif
 // the rim follows the surface's own normal: fur / hide micro-normals would speckle it
-#define crHighlightOf(light, h) crHighlight(light, h, irradiance + iblIrradiance + 0.6 * crKeyLevel(), nonPerturbedNormal, geometryViewDir)
+#define crHighlightOf(light, h) crHighlight(light, h, irradiance + iblIrradiance + 0.6 * crKeyLevel(), nonPerturbedNormal, geometryViewDir, 1.0)
+#define crHighlightFurOf(light, h, fur) crHighlight(light, h, irradiance + iblIrradiance + 0.6 * crKeyLevel(), nonPerturbedNormal, geometryViewDir, 1.0 / (1.0 + 2.5 * max(fur, 0.0)))
 `;

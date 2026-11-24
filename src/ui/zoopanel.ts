@@ -291,11 +291,10 @@ export class ZooPanel {
       for (const o of obj) {
         const p = o.done ? null : sim.objectiveProgress(o.id);
         if (!p) continue;
-        const best = /single day|one day|for a day/.test(o.text) ? ' · best day' : '';
-        progress.set(
-          o.id,
-          `<div class="wh-obj-prog"><span class="wh-obj-bar"><i style="width:${(goalFraction(p) * 100).toFixed(1)}%"></i></span><span>${escapeHtml(goalProgressText(o, p))}${best}</span></div>`,
-        );
+        const best = !p.waiting && /single day|one day|for a day/.test(o.text) ? ' · best day' : '';
+        // no bar before there is anything to measure, only the sim's note
+        const track = p.waiting ? '' : `<span class="wh-obj-bar"><i style="width:${(goalFraction(p) * 100).toFixed(1)}%"></i></span>`;
+        progress.set(o.id, `<div class="wh-obj-prog">${track}<span>${escapeHtml(goalProgressText(o, p))}${best}</span></div>`);
       }
       const key = obj.map((o) => `${o.id}:${o.done}:${progress.get(o.id) ?? ''}`).join(',');
       if (key !== last) {

@@ -111,6 +111,7 @@ export class MockSim implements ISimulation {
       { id: 'o4', text: 'Hire a keeper', done: true, reward: 500 },
       { id: 'o5', text: 'Keep 3 species happy', done: false, reward: 5000 },
       { id: 'o6', text: 'Reach a 75 zoo rating', done: false, reward: 8000 },
+      { id: 'o7', text: 'Reach 75% guest happiness for a day', done: false, reward: 6000 },
     ];
     this.ledger = [];
     const r = new Rng(5);
@@ -309,6 +310,7 @@ export class MockSim implements ISimulation {
       litterCount: this.litter.size,
       fairAdmission: 24,
       guestCapacity: 141,
+      full: this.guests.size + 4 > 141,
       turnedAwayToday: 12,
       gateClosed: null,
     };
@@ -316,7 +318,9 @@ export class MockSim implements ISimulation {
 
   objectiveProgress(objectiveId: string): GoalProgress | null {
     const o = this.objectives.find((x) => x.id === objectiveId);
-    return o && !o.done ? { current: 141, target: 150 } : null;
+    if (!o || o.done) return null;
+    // a one-day goal no day has been measured for yet
+    return o.id === 'o7' ? { current: 0, target: 75, waiting: 'No full day yet' } : { current: 141, target: 150 };
   }
 
   runningCosts(): RunningCostEstimate {
@@ -734,7 +738,7 @@ export class MockSim implements ISimulation {
   suitability(speciesId: string, habitatId: number): SpeciesSuitability {
     const sp = SPECIES_BY_ID[speciesId];
     const h = this.world.habitats.get(habitatId);
-    if (!sp || !h) return { speciesId, score: 0, terrain: 0, foliage: 0, space: 0, fenceOk: false, hasWater: false, hasFood: false, issues: ['Unknown habitat'] };
+    if (!sp || !h) return { speciesId, score: 0, terrain: 0, foliage: 0, space: 0, crowded: 'no', fenceOk: false, hasWater: false, hasFood: false, issues: ['Unknown habitat'] };
     const tot = Math.max(1, h.tiles.length);
     let diff = 0;
     for (let t = 0; t < TERRAIN_COUNT; t++) diff += Math.abs((sp.terrain[t as Terrain] ?? 0) - h.terrainCounts[t] / tot);
@@ -765,7 +769,8 @@ export class MockSim implements ISimulation {
     if (!fenceOk) issues.push('Fence is too weak');
     if (!hasFood) issues.push('No feeder in the habitat');
     const score = Math.max(0, Math.min(1, terrain * 0.4 + foliage * 0.25 + space * 0.2 + (hasWater ? 0.08 : 0) + (hasFood ? 0.07 : 0) - (fenceOk ? 0 : 0.2)));
-    return { speciesId, score, terrain, foliage, space, fenceOk, hasWater, hasFood, issues };
+    const crowded = space < 0.7 ? 'severe' : space < 0.95 ? 'mild' : 'no';
+    return { speciesId, score, terrain, foliage, space, crowded, fenceOk, hasWater, hasFood, issues };
   }
 
   serialize(): SimSave {

@@ -9,19 +9,24 @@
 //  - outside the map a continuous meadow mix (no tile lookups) that turns
 //    into mud / lake bed near the water line;
 //  - macro variation at 50 m / 11 m / 2.4 m: gentle brightness changes plus
-//    lawn hue shifts (lusher, yellowing, sun-bleached patches);
+//    lawn hue shifts (lusher, yellowing, sun-bleached patches); small dry /
+//    dirt patches inside a lawn (tile lawn share) stay mostly turf, and the
+//    wear goes where it belongs: trampled verges along paths;
 //  - path overlay (paved / gravel / boardwalk) with crisp irregular edges;
-//  - wet shore band, per-channel underwater absorption of the lake bed,
-//    caustics and drifting cloud shadows;
+//  - noisy waterline (shared with water.ts) with a wet, glossy bank above it,
+//    a lake bed that takes after its shore (gravel, sand, silt), per-channel
+//    underwater absorption, caustics and drifting cloud shadows;
 //  - low-sun "sheen" on grass (blades catch grazing light that a flat
 //    ground normal would miss), respecting shadows.
 //
-// Texture fetches per pixel (typical lawn pixel, low tier): 4 tile texels +
-// 4 noise + 2 layer (albedo, detail); transitions add 2.
+// Texture fetches per pixel (typical lawn pixel, low tier): 9 tile texels
+// (layers, path, verges) + 4 noise + 2 layer (albedo, detail); transitions add
+// 2, dry patches in a lawn 4 tile texels + 1 noise + 2.
 
 import * as THREE from 'three';
 import { DECK_Y, MAP_H, MAP_W, TILE, WATER_ABSORPTION, WATER_LEVEL } from '../core/constants';
 import { GROUND_LAYERS, LAYER_SIZE_M, type GroundTextureSet } from './textures';
+import { SHORE_OFFSET_GLSL } from './water';
 
 export interface GroundMaterialOptions {
   /** Second texture sample at another scale for anti-tiling (high quality). */
@@ -93,6 +98,16 @@ int pathAt(ivec2 c) {
   return int(texelFetch(uTypeTex, c, 0).g * 255.0 + 0.5);
 }
 bool isPathAt(ivec2 c) { return pathAt(c) > 0; }
+// tile alpha (terrain.ts TileIndexTexture): lake bed look in bits 0–1, lawn share in bits 2–7
+int tileExtra(ivec2 c) { return inMap(c) ? int(texelFetch(uTypeTex, c, 0).a * 255.0 + 0.5) : 0; }
+// lake bed look of a tile (LakeBed) as (gravel, sand) weights
+vec2 bedCode(ivec2 c) {
+  int b = tileExtra(c) & 3;
+  return vec2(b == 1 ? 1.0 : 0.0, b == 2 ? 1.0 : 0.0);
+}
+// how much a tile belongs to a lawn: 1 on lawn, the lawn share around a dry / dirt tile
+float lawnAt(ivec2 c, int layer) { return layer == 0 ? 1.0 : float(tileExtra(c) >> 2) / 63.0; }
+${SHORE_OFFSET_GLSL}
 
 vec2 slopeToWorld(int layer, vec2 g) {
   vec4 xf = uLayerXf[layer];
@@ -142,9 +157,12 @@ GSample mixSample(GSample a, GSample b, float m) {
 }
 
 // Share of the lawn / grassland layers in the final blend (for hue variation
-// and sheen), and of the dry-grass layer alone.
+// and sheen), of the dry-grass layer alone and of the lake bed; the bed's
+// (gravel, sand) look blended over the four tiles.
 float gGrassy;
 float gDry;
+float gBed;
+vec2 gBedLook;
 
 GSample sampleGround(vec3 wp, vec4 nzA, vec4 nzB, vec4 nzC, vec4 nzD) {
   gOuterY = wp.y;
@@ -164,6 +182,8 @@ GSample sampleGround(vec3 wp, vec4 nzA, vec4 nzB, vec4 nzC, vec4 nzD) {
     GSample a = sampleLayer(base, wp.xz);
     gGrassy = base == 0 ? 1.0 : 0.0;
     gDry = 0.0;
+    gBed = base == 7 ? 1.0 : 0.0;
+    gBedLook = vec2(0.0);
     if (dry < 0.01) return a;
     GSample b = sampleLayer(1, wp.xz);
     float m = 0.5 * smoothstep(0.2, 0.6, dry + (b.h - a.h) * 0.4 + (nzD.g - 0.5) * 0.35);
@@ -180,10 +200,31 @@ GSample sampleGround(vec3 wp, vec4 nzA, vec4 nzB, vec4 nzC, vec4 nzD) {
   int L1 = layerAt(i0 + ivec2(1, 0));
   int L2 = layerAt(i0 + ivec2(0, 1));
   int L3 = layerAt(i0 + ivec2(1, 1));
+  gBedLook = vec2(0.0);
+  if (L0 == 7 || L1 == 7 || L2 == 7 || L3 == 7)
+    gBedLook = mix(mix(bedCode(i0), bedCode(i0 + ivec2(1, 0)), f.x), mix(bedCode(i0 + ivec2(0, 1)), bedCode(i0 + ivec2(1, 1)), f.x), f.y);
+  // dry-grass / dirt patches inside a lawn (lawn share): mostly turf again,
+  // with streaky low-contrast wear instead of round beige stains
+  bool dryOrDirt = L0 == 1 || L0 == 2 || L1 == 1 || L1 == 2 || L2 == 1 || L2 == 2 || L3 == 1 || L3 == 2;
+  float lawn = 0.0;
+  if (dryOrDirt) {
+    lawn = mix(mix(lawnAt(i0, L0), lawnAt(i0 + ivec2(1, 0), L1), f.x), mix(lawnAt(i0 + ivec2(0, 1), L2), lawnAt(i0 + ivec2(1, 1), L3), f.x), f.y);
+    lawn = smoothstep(0.3, 0.8, lawn);
+    if (lawn > 0.0) {
+      vec2 sp = mat2(0.87, 0.5, -0.5, 0.87) * wp.xz;
+      float streak = textureGrad(uNoise, vec2(sp.x * 0.035, sp.y * 0.12), gDx * 0.12, gDy * 0.12).g;
+      lawn *= 0.62 + 0.38 * smoothstep(0.35, 0.65, streak);
+    }
+  }
   if (L0 == L1 && L0 == L2 && L0 == L3) {
     gGrassy = L0 <= 1 ? 1.0 : 0.0;
     gDry = L0 == 1 ? 1.0 : 0.0;
-    return sampleLayer(L0, wp.xz);
+    gBed = L0 == 7 ? 1.0 : 0.0;
+    GSample u = sampleLayer(L0, wp.xz);
+    if (lawn < 0.01) return u;
+    gDry *= 1.0 - lawn;
+    gGrassy = 1.0;
+    return mixSample(u, sampleLayer(0, wp.xz), lawn);
   }
   // merge equal layers, keep the two strongest
   float W0 = (1.0 - f.x) * (1.0 - f.y), W1 = f.x * (1.0 - f.y), W2 = (1.0 - f.x) * f.y, W3 = f.x * f.y;
@@ -211,7 +252,16 @@ GSample sampleGround(vec3 wp, vec4 nzA, vec4 nzB, vec4 nzC, vec4 nzD) {
   float m = smoothstep(0.06, 0.94, s);
   gGrassy = mix(A <= 1 ? 1.0 : 0.0, B <= 1 ? 1.0 : 0.0, m);
   gDry = mix(A == 1 ? 1.0 : 0.0, B == 1 ? 1.0 : 0.0, m);
-  return mixSample(a, b, m);
+  gBed = mix(A == 7 ? 1.0 : 0.0, B == 7 ? 1.0 : 0.0, m);
+  GSample r = mixSample(a, b, m);
+  // the dry / dirt part of the blend gives way to lawn (only next to lawn)
+  float dd = mix(A == 1 || A == 2 ? 1.0 : 0.0, B == 1 || B == 2 ? 1.0 : 0.0, m) * lawn;
+  if (dd < 0.01) return r;
+  gDry *= 1.0 - lawn;
+  gGrassy = min(1.0, gGrassy + dd);
+  if (A == 0) return mixSample(r, a, dd);
+  if (B == 0) return mixSample(r, b, dd);
+  return mixSample(r, sampleLayer(0, wp.xz), dd);
 }
 
 // Rounded-rectangle distance (in tiles) from the open sides of a path tile.
@@ -272,6 +322,13 @@ const MAIN = /* glsl */ `
     float olive = smoothstep(0.45, 0.7, nzB.g * 0.6 + nzC.r * 0.4);
     gAlb *= mix(vec3(1.0), vec3(0.86, 0.97, 0.72), gDry * olive * 0.6);
   }
+  // the lake bed takes after its shore: grey gravel by snow / rock, pale sand by sand
+  if (gBed > 0.0) {
+    float bl = gLuma(gAlb);
+    vec3 bedT = mix(gAlb, vec3(bl) * vec3(2.0, 2.1, 2.2), gBedLook.x);
+    bedT = mix(bedT, vec3(bl) * vec3(3.8, 3.3, 2.4), gBedLook.y);
+    gAlb = mix(gAlb, bedT, gBed);
+  }
   vec2 gSlope = gs.slope;
   float gRough = gs.rough;
   float gAO = gs.ao;
@@ -322,15 +379,33 @@ const MAIN = /* glsl */ `
       gAO = mix(gAO, ps.ao, pm);
       gGrassy *= 1.0 - pm;
     }
+  } else if (gGrassy > 0.0) {
+    // trampled verges: lawn beside a path is worn thin and yellowing (guests
+    // step off the paving), the natural place for wear instead of random stains
+    vec2 f = fract(vWPos.xz / TILE_M);
+    float dv = 9.0;
+    if (isPathAt(tc + ivec2(-1, 0))) dv = min(dv, f.x);
+    if (isPathAt(tc + ivec2(1, 0))) dv = min(dv, 1.0 - f.x);
+    if (isPathAt(tc + ivec2(0, -1))) dv = min(dv, f.y);
+    if (isPathAt(tc + ivec2(0, 1))) dv = min(dv, 1.0 - f.y);
+    float verge = (1.0 - smoothstep(0.0, 0.18 + 0.14 * nzC.g, dv)) * gGrassy;
+    gAlb = mix(gAlb, gAlb * vec3(1.1, 1.0, 0.7), verge * (0.25 + 0.25 * nzD.r));
   }
 
-  // ---- wet shore band, underwater absorption of the bed (per channel:
-  //      red goes first, then green → teal shallows, dark deep pools)
-  float wy = vWPos.y - WATER_Y;
-  float wet = 1.0 - smoothstep(0.0, 0.16, wy);
+  // ---- shore: the visible waterline wanders a little below the water plane
+  //      (shoreOffset, shared with water.ts); wy is the height above it. A
+  //      darker, glossier wet bank (≈0.3–0.6 m wide on a pond's slope) above
+  //      it; below it the bed absorbed per channel (red goes first, then
+  //      green → teal shallows, dark deep pools)
+  float wy = vWPos.y - WATER_Y + shoreOffset(nzB, nzC);
+  float bank = 0.08 + 0.1 * nzC.b;
+  float wet = 1.0 - smoothstep(bank * 0.45, bank, wy);
   float underwater = 1.0 - smoothstep(-0.02, 0.02, wy);
-  gAlb *= mix(1.0, mix(0.62, 0.82, underwater), wet);
-  gRough = mix(gRough, 0.45, wet * 0.8);
+  // snow stays white down to the water (sand and soil darken when wet)
+  wet *= 1.0 - smoothstep(0.55, 0.75, gLuma(gAlb));
+  gAlb *= mix(1.0, mix(0.68, 0.82, underwater), wet);
+  // a satin film, not a mirror: a glossier bank caught the sky / moon as a pale rim
+  gRough = mix(gRough, mix(0.68, 0.45, underwater), wet * 0.85);
   if (underwater > 0.0) {
     // light path down to the bed and back up to the eye (the down leg is
     // shorter than the view leg under a high sun)
@@ -415,7 +490,9 @@ export function createGroundMaterial(textures: GroundTextureSet, typeTex: THREE.
           float gLow = (1.0 - smoothstep(0.18, 0.62, uSunDirW.y)) * smoothstep(0.0, 0.06, uSunDirW.y);
           reflectedLight.directDiffuse += uSunCol * gAlb * RECIPROCAL_PI * (gGrassy * gLow * 0.22 * gLit);
 
-          float occ = mix(1.0, gAO, 0.85);
+          // soft: the layer AO is texture-scale crevice shading, and sky fill
+          // still reaches most of it (strong AO crushed shade toward black)
+          float occ = mix(1.0, gAO, 0.5);
           reflectedLight.indirectDiffuse *= occ;
           // bright ground (snow): light bouncing between it, nearby sunlit snow
           // and the haze adds a neutral fill the sky-only environment lacks, so

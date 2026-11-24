@@ -11,11 +11,14 @@
 //                                are per-instance texels of the batch data
 //                                texture (HUMAN_LOOK_TEXELS, see writeHumanLook)
 //                                passed to the fragment shader as flat varyings.
+// Both get warm light from the night lamps a person stands under
+// (props/lights/lampField.ts).
 
 import * as THREE from 'three';
 import { HIGHLIGHT_FN_GLSL, NOISE_GLSL } from '../material/shaderChunks';
 import { crowdDepthMaterial, type BatchMaterials } from '../crowd/materials';
 import { crowdUniforms, patchCrowdVertex } from '../crowd/skinning';
+import { applyLampField } from '../../props/lights/lampField';
 
 export interface HumanColors {
   skin: number;
@@ -107,6 +110,9 @@ float hmRough = 0.55;
   if (uMicro > 0.5) fold = cr_vnoise(vRestPos * vec3(30.0, 9.0, 30.0)) - 0.5;
   hmCol = mix(hmCol, ${e.pants} * (1.0 + fold * 0.12), pantsM);
   hmCol = mix(hmCol, ${e.shirt} * (1.0 + fold * 0.1), shirtM);
+  // waistband under the hem of the top (not on a lab coat): separates top and bottom
+  float belt = trunk * (1.0 - hm_step(hmMarks.y, y)) * hm_step(hmMarks.y - 0.03, y) * step(hmCut.z, 0.0);
+  hmCol = mix(hmCol, ${e.pants} * 0.4, belt);
   hmRough = mix(hmRough, 0.86, max(shirtM, pantsM));
   float shoe = onLeg * (1.0 - hm_step(hmMarks.z, y));
   hmCol = mix(hmCol, ${e.shoes}, shoe);
@@ -206,6 +212,7 @@ ${HIGHLIGHT_FN_GLSL}`,
       )
       .replace('#include <roughnessmap_fragment>', ROUGHNESS_GLSL)
       .replace('#include <opaque_fragment>', 'outgoingLight = crHighlightOf(outgoingLight, uHighlight);\n#include <opaque_fragment>');
+    applyLampField(shader);
   };
   mat.customProgramCacheKey = () => 'creature-human-v2';
   return mat;
@@ -334,6 +341,7 @@ ${humanColorGLSL({
       )
       .replace('#include <roughnessmap_fragment>', ROUGHNESS_GLSL)
       .replace('#include <opaque_fragment>', 'outgoingLight = crHighlightOf(outgoingLight, vHm5.w);\n#include <opaque_fragment>');
+    applyLampField(shader);
   };
   mat.customProgramCacheKey = () => `creature-human-batch-v2-${n}`;
   return { material: mat, depth: crowdDepthMaterial(u), uniforms: [u] };

@@ -357,6 +357,8 @@ export interface CommandResult {
    * habitat ("a path runs inside the fence"). The UI shows it as a warning.
    */
   warning?: string;
+  /** With severity 'confirm': the `warning` cut down to fit the confirm bar (e.g. "Far too crowded (42 tiles, needs 68)"); the dialog shows it in full. */
+  shortWarning?: string;
   /**
    * Removals: share of the build price paid back — 1 when everything removed was built in
    * the last game hour (undoing a mis-tap), REFUND_FRACTION (0.4) for older things.

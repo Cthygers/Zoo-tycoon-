@@ -248,7 +248,8 @@ function design(ctx: DesignContext): CreatureDesign {
     waddle: 0.15,
     proneY: 0.12,
     crouchY: 0.145,
-    swimDepth: 0.075,
+    // float high, as resting and porpoising penguins do: back and head clear of the water
+    swimDepth: 0.015,
     swimPitch: 1.45,
     swimShift: -0.13,
   });

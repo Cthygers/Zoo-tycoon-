@@ -10,8 +10,8 @@ import type { EventBus, TileRect } from '../core/events';
 import type { World } from '../core/world';
 import { AtmosphereModel } from './atmosphere';
 import { BoardwalkDecks } from './boardwalk';
-import { computeCelestial, type Celestial } from './celestial';
-import { MESOPIC_EXPOSURE, installShaderPatches } from './grade';
+import { SOLAR_NOON_H, computeCelestial, type Celestial } from './celestial';
+import { DAY_FLARE, FLARE_EXPOSURE, MESOPIC_EXPOSURE, installShaderPatches } from './grade';
 import { GrassField, type TuftShape } from './grass';
 import { createGroundMaterial, type GroundMaterialOptions, type GroundUniforms } from './groundMaterial';
 import { OuterLand } from './outer';
@@ -47,16 +47,70 @@ export const SUN_FACING_MAX = 4.5;
 const DEG = Math.PI / 180;
 /** The sky environment map is re-captured at most this often while time flows (s)… */
 const ENV_MIN_INTERVAL = 6;
-/** …when the sun moved this far since the last capture… */
-const ENV_SUN_STEP = 4 * DEG;
+/**
+ * …when the sun moved this far since the last capture (the sky's colours
+ * change fast near the horizon and hardly at all under a high sun, where
+ * applyEnvIntensity's brightness follow is enough)…
+ */
+function envSunStep(sunElev: number): number {
+  return (4 + 6 * smooth01(15 * DEG, 30 * DEG, sunElev)) * DEG;
+}
 /** …or this often anyway (cloud drift). */
 const ENV_MAX_AGE = 40;
 const FOG_DENSITY = 0.00085;
 const GROUND_ALBEDO = new THREE.Color(0.1, 0.12, 0.065);
 const BANK_ALBEDO = new THREE.Color(0.05, 0.07, 0.035);
 const MOON_TINT = new THREE.Color(0.52, 0.68, 1.0);
+/**
+ * Daylight fill (hemisphere light) on top of the sky environment: the
+ * single-scattering sky lacks multiple scattering and the light bounced off
+ * sunlit surroundings, so shade came out at 4–9 % of sunlit on screen (real
+ * clear-sky shade: ≈ 15–25 %). Sky side: this much more sky irradiance,
+ * desaturated (multiply scattered and bounced light is far less blue than the
+ * clear sky), plus a share of the direct sun scattered back by everything
+ * sunlit around. Ground side: the sunlit ground's bounce (neutral, warm).
+ */
+const SKY_FILL = 0.9;
+const SKY_FILL_DESAT = 0.7;
+const SUN_FILL = 0.05;
+const BOUNCE_ALBEDO = new THREE.Color(0.2, 0.18, 0.15);
+/** Floor of the environment's brightness scale in full daylight (see applyEnvIntensity). */
+const ENV_DAY_MIN = 0.6;
+/**
+ * The sun path is symmetric about noon, the air is not: morning light is
+ * cooler and hazier (more fill, denser haze), afternoon light warmer. Sun
+ * colour factors (≈ luminance neutral) at full morning / afternoon.
+ */
+const MORNING_SUN = new THREE.Color(0.95, 1.0, 1.08);
+const AFTERNOON_SUN = new THREE.Color(1.07, 1.0, 0.86);
+/** Extra haze (fog density share) and daylight fill in the full morning. */
+const MORNING_HAZE = 0.7;
+const MORNING_FILL = 0.25;
 /** Blue-hour sky colour (luminance 1), see the sky shader's uTwilight. */
 const TWILIGHT_BLUE = new THREE.Color(0.646, 0.999, 2.056);
+
+/** Vertical field of view (deg) on screens up to ≈ 16:10. */
+const BASE_FOV = 45;
+/**
+ * Widest horizontal field of view (deg): on 20:9 phones a fixed 45° vertical
+ * FOV is ≈ 85° across, and buildings and people at the frame edges lean like
+ * in an action cam; capped, the view reads like a natural photo.
+ */
+const MAX_HFOV = 68;
+
+/** Vertical FOV (deg) for an aspect ratio: BASE_FOV, narrowed on wide screens to the MAX_HFOV cap. */
+export function cameraFov(aspect: number): number {
+  const capped = (2 * Math.atan(Math.tan((MAX_HFOV / 2) * DEG) / aspect)) / DEG;
+  return Math.min(BASE_FOV, capped);
+}
+
+/**
+ * How much farther the camera controller (ui/camera.ts) puts the camera for a
+ * narrowed FOV: the square root of the lens's zoom (≈ 1.17 on 20:9).
+ */
+function lensScale(fov: number): number {
+  return Math.sqrt(Math.tan((BASE_FOV / 2) * DEG) / Math.tan((fov / 2) * DEG));
+}
 
 /** Pull a colour toward TWILIGHT_BLUE at equal luminance. */
 function twilightTint(c: THREE.Color, k: number): THREE.Color {
@@ -128,9 +182,10 @@ function rrt(v: number): number {
  * fog / clear colour, which three mixes in after tone mapping.
  */
 export function gradeToneMap(c: THREE.Color, exposure: number, out: THREE.Color): THREE.Color {
-  let r = c.r,
-    g = c.g,
-    b = c.b;
+  const flare = (DAY_FLARE * (1 - smooth01(FLARE_EXPOSURE[0], FLARE_EXPOSURE[1], exposure))) / exposure;
+  let r = c.r + flare,
+    g = c.g + flare,
+    b = c.b + flare;
   const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
   const disp = lum * exposure;
   const meso = smooth01(MESOPIC_EXPOSURE[0], MESOPIC_EXPOSURE[1], exposure) * (1 - smooth01(0.06, 0.5, disp)) * 0.82;
@@ -189,8 +244,8 @@ export function daylight(atm: AtmosphereModel, sunElev: number, sunCol: THREE.Co
   const se = sunElev / DEG;
   atm.transmittance(sunElev, atm.observerKm, sunCol);
   // the model reddens the mid-morning / late-afternoon sun a little too much;
-  // keep the deep orange for the last few degrees only
-  const desat = (0.12 + 0.18 * smooth01(4, 12, se)) * (1 - smooth01(25, 45, se));
+  // trim it lightly, so a sun below ~25° still reads warm
+  const desat = (0.12 + 0.03 * smooth01(4, 12, se)) * (1 - smooth01(25, 45, se));
   if (desat > 0) {
     const l = luminance(sunCol);
     sunCol.lerp(scratchGrey.setRGB(l, l, l), desat);
@@ -215,6 +270,21 @@ export function daylight(atm: AtmosphereModel, sunElev: number, sunCol: THREE.Co
   return { skyE, sunLight, sunLumMeter, meterE, displayB, sunTrim };
 }
 
+const scratchFill = new THREE.Color();
+
+/**
+ * Daylight fill of the hemisphere light (SKY_FILL …) for sky irradiance
+ * `skyIrr` and direct light on horizontal ground `sunH`, scaled by `day`
+ * (1 = full daylight) and boosted by the hazy `morning` (0…1). Writes the sky
+ * side to `sky` and the ground side (sunlit-ground bounce) to `ground`.
+ */
+export function daylightFill(skyIrr: THREE.Color, sunH: THREE.Color, day: number, morning: number, sky: THREE.Color, ground: THREE.Color): void {
+  sky.copy(skyIrr).multiplyScalar((SKY_FILL + MORNING_FILL * morning) * day);
+  const l = luminance(sky);
+  sky.lerp(scratchFill.setRGB(l, l, l), SKY_FILL_DESAT).add(scratchFill.copy(sunH).multiplyScalar(SUN_FILL * day));
+  ground.copy(sunH).add(skyIrr).multiply(BOUNCE_ALBEDO).multiplyScalar(day);
+}
+
 /** Per-tier environment detail (the contract's QualitySettings stay generic). */
 interface EnvTier {
   trees: number;
@@ -232,16 +302,24 @@ interface EnvTier {
   /** Face size of the sky capture behind the PMREM environment. */
   envCapture: number;
   /**
+   * GGX samples per texel of the environment's sharp mips (three's stock
+   * 256 costs ≈ 2–3 frames of GPU time per re-capture; the smooth sky needs
+   * far fewer).
+   */
+  envSamples: number;
+  /**
    * Re-render the shadow map every n-th frame. Its pass is ~30 % of the
    * render CPU; on low, a frame of shadow lag on moving creatures is the
    * cheaper trade.
    */
   shadowEvery: number;
 }
+/** GGX samples of three's PMREMGenerator (r187). */
+const STOCK_GGX_SAMPLES = 256;
 const ENV_TIERS: Record<QualityLevel, EnvTier> = {
-  low: { trees: 420, nearSprites: 7, farSprites: 4, grassCapacity: 1000, tuft: { blades: 6, segs: 2 }, shadowReach: 26, shadowMaxHalf: 60, groundRes: 256, anisotropy: 2, envCapture: 128, shadowEvery: 2 },
-  medium: { trees: 820, nearSprites: 11, farSprites: 5, grassCapacity: 1900, tuft: { blades: 7, segs: 2 }, shadowReach: 42, shadowMaxHalf: 85, groundRes: 512, anisotropy: 4, envCapture: 256, shadowEvery: 1 },
-  high: { trees: 1400, nearSprites: 14, farSprites: 7, grassCapacity: 3400, tuft: { blades: 8, segs: 3 }, shadowReach: 70, shadowMaxHalf: 120, groundRes: 512, anisotropy: 8, envCapture: 256, shadowEvery: 1 },
+  low: { trees: 420, nearSprites: 7, farSprites: 4, grassCapacity: 1000, tuft: { blades: 6, segs: 2 }, shadowReach: 26, shadowMaxHalf: 60, groundRes: 256, anisotropy: 2, envCapture: 128, envSamples: 64, shadowEvery: 2 },
+  medium: { trees: 820, nearSprites: 11, farSprites: 5, grassCapacity: 1900, tuft: { blades: 7, segs: 2 }, shadowReach: 42, shadowMaxHalf: 85, groundRes: 512, anisotropy: 4, envCapture: 256, envSamples: STOCK_GGX_SAMPLES, shadowEvery: 1 },
+  high: { trees: 1400, nearSprites: 14, farSprites: 7, grassCapacity: 3400, tuft: { blades: 8, segs: 3 }, shadowReach: 70, shadowMaxHalf: 120, groundRes: 512, anisotropy: 8, envCapture: 256, envSamples: STOCK_GGX_SAMPLES, shadowEvery: 1 },
 };
 
 /** Ground shader features per tier (compile-time defines). */
@@ -317,6 +395,9 @@ export class RenderContext implements IRenderContext {
   private tmpC = new THREE.Color();
   private tmpC2 = new THREE.Color();
   private skyIrr = new THREE.Color();
+  /** Daylight fill on the hemisphere light's sky / ground side (see daylightFill). */
+  private dayFill = new THREE.Color();
+  private bounce = new THREE.Color();
   private mountainAmb = new THREE.Color();
   private tmpV = new THREE.Vector3();
   private tmpV2 = new THREE.Vector3();
@@ -397,7 +478,7 @@ export class RenderContext implements IRenderContext {
     this.height = Math.max(1, container.clientHeight || window.innerHeight);
     r.setSize(this.width, this.height, false);
 
-    this.camera = new THREE.PerspectiveCamera(45, this.width / this.height, 0.3, 4500);
+    this.camera = new THREE.PerspectiveCamera(cameraFov(this.width / this.height), this.width / this.height, 0.3, 4500);
     this.camera.position.set(WORLD_W / 2, 35, WORLD_H + 10);
     this.camera.lookAt(this.focus);
 
@@ -573,6 +654,12 @@ export class RenderContext implements IRenderContext {
     // ---- natural light: sun (direct) + sky, lifted at low sun (see daylight)
     const dl = daylight(atm, sunElev, this.sunCol);
     const { skyE, sunLight } = dl;
+    // morning / afternoon character (MORNING_SUN …)
+    const hour = this.clockMinute / 60;
+    const morning = hour < SOLAR_NOON_H ? 1 - smooth01(9, 11, hour) : 0;
+    const afternoon = hour > SOLAR_NOON_H ? smooth01(13.5, 17, hour) : 0;
+    this.sunCol.multiply(this.tmpC.setRGB(1, 1, 1).lerp(MORNING_SUN, morning).lerp(AFTERNOON_SUN, afternoon));
+    this.fog.density = FOG_DENSITY * (1 + MORNING_HAZE * morning * (1 - night));
 
     // ---- moon: fades in as the sky darkens, blue-tinted (night grade desaturates further)
     const moonUp = smooth01(-2, 8, cel.moonElev / DEG);
@@ -634,9 +721,12 @@ export class RenderContext implements IRenderContext {
     twilightTint(this.fogHDR.copy(atm.horizon).multiplyScalar(skyE), twilight * 0.8);
     this.fogHDR.add(this.tmpC.copy(nightSky).multiplyScalar(1.5)).add(this.tmpC2.copy(u.uHorizonGlow.value).multiplyScalar(0.3));
 
-    // hemisphere fill: low, mostly to lift deep shadows and for env-less materials
-    this.hemi.color.copy(skyIrr).multiplyScalar(0.25 / Math.PI);
-    this.hemi.groundColor.copy(u.uGround.value).multiplyScalar(0.6);
+    // hemisphere fill: a faint base (deep shadows, env-less materials) plus the
+    // daylight fill; night keeps the moonlit look it was tuned for
+    const sunH = this.tmpC2.copy(this.sun.color).multiplyScalar(this.sun.intensity * Math.max(this.lightDir.y, 0));
+    daylightFill(skyIrr, sunH, 1 - night, morning, this.dayFill, this.bounce);
+    this.hemi.color.copy(skyIrr).multiplyScalar(0.25 / Math.PI).add(this.dayFill);
+    this.hemi.groundColor.copy(u.uGround.value).multiplyScalar(0.6).add(this.bounce);
     this.hemi.intensity = 1;
 
     // water: reflected banks ≈ dark foliage lit by sky + sun, blended with haze
@@ -651,14 +741,14 @@ export class RenderContext implements IRenderContext {
     this.outer.updateTreeShadows(this.sunDirection, (1 - night) * Math.min(1, Math.max(0, se / 6)));
 
     // mountains (own haze in HDR)
-    this.mountainAmb.copy(skyIrr).multiplyScalar(1 / Math.PI);
+    this.mountainAmb.copy(skyIrr).add(this.dayFill).multiplyScalar(1 / Math.PI);
     this.outer.setMountainLight(this.fogHDR, this.tmpC.copy(this.sun.color).multiplyScalar(this.sun.intensity / Math.max(sunLight, 0.1)), this.mountainAmb, this.lightDir);
 
     // distant forest
     const fu = this.outer.forest.uniforms;
     fu.uSunDir.value.copy(this.lightDir);
     fu.uSunE.value.copy(this.sun.color).multiplyScalar(this.sun.intensity);
-    fu.uSkyE.value.copy(skyIrr);
+    fu.uSkyE.value.copy(skyIrr).add(this.dayFill);
     fu.uGroundE.value.copy(groundIrr).multiply(GROUND_ALBEDO).multiplyScalar(0.9);
 
     // ground / grass shader inputs
@@ -669,12 +759,13 @@ export class RenderContext implements IRenderContext {
     this.grass.uniforms.uSunCol.value.copy(this.sun.color).multiplyScalar(this.sun.intensity);
 
     // ---- exposure: displayed brightness per sun elevation (B_TABLE) / scene light
-    const E = Math.max(dl.sunLumMeter, moonLum) + luminance(skyIrr) + 1e-5;
+    // (the fill lights the metered ground too: sunlit ground keeps its brightness)
+    const E = Math.max(dl.sunLumMeter, moonLum) + luminance(skyIrr) + luminance(this.dayFill) + 1e-5;
     this.targetExposure = Math.min(Math.max(dl.displayB / E, 0.7), 20);
 
     // environment re-capture (≈50 passes) only every few degrees of sun motion;
     // in between its brightness follows the sky (applyEnvIntensity)
-    if (Math.abs(sunElev - this.envSunElev) > ENV_SUN_STEP) this.envDirty = true;
+    if (Math.abs(sunElev - this.envSunElev) > envSunStep(Math.min(sunElev, this.envSunElev))) this.envDirty = true;
     this.applyEnvIntensity();
     this.post?.setNight(night);
   }
@@ -686,7 +777,9 @@ export class RenderContext implements IRenderContext {
    */
   private applyEnvIntensity(): void {
     const lum = luminance(this.skyIrr);
-    this.scene.environmentIntensity = this.envSkyLum > 0 ? Math.min(Math.max(lum / this.envSkyLum, 0.25), 4) : 1;
+    // in daylight the sky never dims fast enough for a large correction to be right
+    const min = 0.25 + (ENV_DAY_MIN - 0.25) * (1 - this._night);
+    this.scene.environmentIntensity = this.envSkyLum > 0 ? Math.min(Math.max(lum / this.envSkyLum, min), 4) : 1;
   }
 
   // ------------------------------------------------------------ focus / shadows
@@ -811,7 +904,8 @@ export class RenderContext implements IRenderContext {
     const cam = this.camera.position;
     const gx = this.focus.x + (cam.x - this.focus.x) * 0.35;
     const gz = this.focus.z + (cam.z - this.focus.z) * 0.35;
-    const camDist = cam.distanceTo(this.focus);
+    // (by framing distance: a narrowed lens puts the camera farther back)
+    const camDist = cam.distanceTo(this.focus) / lensScale(this.camera.fov);
     const D = this.quality.detailDistance;
     const g = 1 - Math.min(Math.max((camDist - D * 1.3) / (D * 0.9), 0), 1);
     this.grass.setCenter(gx, gz, g);
@@ -871,6 +965,8 @@ export class RenderContext implements IRenderContext {
       this.envCamera = new THREE.CubeCamera(0.1, 10, this.envCapture);
     }
     this.envCamera!.update(this.renderer, this.envScene);
+    // (the prefilter material exists from the first capture on)
+    this.setPmremSamples(ENV_TIERS[this.quality.level].envSamples);
     this.envRT = this.pmrem.fromCubemap(this.envCapture.texture, this.envRT);
     this.scene.environment = this.envRT.texture;
     this.envSunElev = Math.asin(this.sunDirection.y);
@@ -878,6 +974,31 @@ export class RenderContext implements IRenderContext {
     this.envDirty = false;
     this.envAge = 0;
     this.applyEnvIntensity();
+  }
+
+  /**
+   * Set the GGX sample count of the PMREM generator's prefilter shader (from
+   * the next capture on). three has no option for it: the stock shader text
+   * is patched, and left alone if it no longer has the expected form. Fewer
+   * samples read a proportionally blurrier source mip, as three's own bias
+   * does for 256.
+   */
+  private setPmremSamples(samples: number): void {
+    const m = (this.pmrem as unknown as { _ggxMaterial?: THREE.ShaderMaterial | null })._ggxMaterial;
+    if (!m || m.userData.whSamples === samples) return;
+    const stock = (m.userData.whStock as string | undefined) ?? m.fragmentShader;
+    m.userData.whStock = stock;
+    m.userData.whSamples = samples;
+    const define = `#define GGX_SAMPLES ${STOCK_GGX_SAMPLES}u`;
+    const bias = 'log2( d ) + lodBias';
+    if (samples === STOCK_GGX_SAMPLES || !stock.includes(define) || !stock.includes(bias)) {
+      if (m.fragmentShader === stock) return;
+      m.fragmentShader = stock;
+    } else {
+      const extra = 0.5 * Math.log2(STOCK_GGX_SAMPLES / samples);
+      m.fragmentShader = stock.replace(define, `#define GGX_SAMPLES ${samples}u`).replace(bias, `${bias} + ${extra.toFixed(3)}`);
+    }
+    m.needsUpdate = true;
   }
 
   /**
@@ -891,7 +1012,8 @@ export class RenderContext implements IRenderContext {
     this.envHeld = true;
     return () => {
       this.envHeld = false;
-      if (this.envRT && Math.abs(Math.asin(this.sunDirection.y) - this.envSunElev) <= ENV_SUN_STEP) {
+      const elev = Math.asin(this.sunDirection.y);
+      if (this.envRT && Math.abs(elev - this.envSunElev) <= envSunStep(Math.min(elev, this.envSunElev))) {
         this.envDirty = false;
         this.envAge = 0;
       }
@@ -927,6 +1049,7 @@ export class RenderContext implements IRenderContext {
     this.height = Math.max(1, Math.floor(height));
     this.renderer.setSize(this.width, this.height, false);
     this.camera.aspect = this.width / this.height;
+    this.camera.fov = cameraFov(this.camera.aspect);
     this.camera.updateProjectionMatrix();
     this.post?.setSize(this.width, this.height, this.renderer.getPixelRatio());
   }

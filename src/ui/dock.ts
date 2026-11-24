@@ -172,6 +172,14 @@ export class Dock {
     return null;
   }
 
+  /** Scroll the open drawer's row so `card` is in full view (centred when it was not). */
+  revealCard(card: HTMLElement): void {
+    const row = this.row;
+    const left = card.offsetLeft - row.scrollLeft;
+    if (left >= 0 && left + card.offsetWidth <= row.clientWidth) return;
+    row.scrollLeft = card.offsetLeft - (row.clientWidth - card.offsetWidth) / 2;
+  }
+
   get drawerEl(): HTMLElement | null {
     return this.openCat ? this.drawer : null;
   }

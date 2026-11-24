@@ -35,6 +35,9 @@ import type {
 // Simulation (src/sim)
 // ===========================================================================
 
+/** How short of room a habitat is: 'mild' a bit, 'severe' packed enough to stress the animals and make them sick. */
+export type CrowdLevel = 'no' | 'mild' | 'severe';
+
 export interface SpeciesSuitability {
   speciesId: string;
   /** Overall 0..1 */
@@ -42,6 +45,7 @@ export interface SpeciesSuitability {
   terrain: number; // 0..1 match of terrain composition
   foliage: number; // 0..1 match of liked objects density
   space: number; // 0..1 (1 = enough room for current population)
+  crowded: CrowdLevel;
   fenceOk: boolean; // fence strength >= species danger
   hasWater: boolean; // pond/trough reachable
   hasFood: boolean; // feeder present (or keeper can feed)
@@ -78,6 +82,8 @@ export interface ZooStats {
   fairAdmission: number;
   /** Guests the zoo holds at once (grows with paths and habitats); arrivals wait while it is full. */
   guestCapacity: number;
+  /** No room for another party: arrivals are turned away until guests leave. */
+  full: boolean;
   /** People turned away today because the zoo was full. */
   turnedAwayToday: number;
   /** Why the gate lets nobody in right now (no animals on view, the entrance path cut), or null. */
@@ -99,6 +105,8 @@ export interface SimMessage {
 export interface GoalProgress {
   current: number;
   target: number;
+  /** Set while there is nothing to measure yet (e.g. no full day of guests): shown instead of current / target. */
+  waiting?: string;
 }
 
 /** Wages, animal food and upkeep: booked at midnight, accruing through the day. */

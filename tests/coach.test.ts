@@ -72,6 +72,7 @@ function setup(opts: { animals?: number } = {}) {
     openCategory: () => null,
     categoryButton: () => button,
     card: () => null,
+    revealCard: vi.fn(),
     drawer: () => null,
     toolBar: () => null,
     confirmBar: () => null,
@@ -166,7 +167,7 @@ describe('Coach', () => {
     expect(coach.dockedRect).toBeNull();
     setTool({ kind: 'fence', fenceId: 1 });
     coach.update(1);
-    expect(bubbleTexts(coach)[2]).toBe('Drag a rectangle on open grass. Keep paths outside it.');
+    expect(bubbleTexts(coach)[2]).toBe('Drag about 8×8 tiles of open grass, room for a small herd. Keep paths outside it.');
     expect(bubble.classList.contains('docked')).toBe(true);
     // top-left, just under the top bar (the fake bubble is 200 × 50)
     expect(coach.rect).toEqual({ left: 10, top: 66, right: 210, bottom: 116 });
@@ -232,6 +233,29 @@ describe('Coach', () => {
     coach.update(1);
     expect(priv.pillTrack.classList.contains('hidden')).toBe(true);
     expect(priv.pillProgress.textContent).toBe('');
+    // nothing measured yet (no full day of guests): the sim's note instead of "0% / 75%"
+    sim.objectives = [{ id: 'guest_happy_75', text: 'Reach 75% guest happiness for a day', done: false, reward: 6000 }];
+    sim.progress.guest_happy_75 = { current: 0, target: 75, waiting: 'No full day yet' };
+    coach.update(1);
+    expect(priv.pillTrack.classList.contains('hidden')).toBe(true);
+    expect(priv.pillProgress.textContent).toBe('No full day yet');
+  });
+
+  it('scrolls the step’s card into view once each time its drawer opens', () => {
+    const { coach, host } = setup();
+    const at = () => ({ getBoundingClientRect: () => ({ left: 600, top: 172, right: 692, bottom: 280, width: 92, height: 108 }) }) as unknown as HTMLElement;
+    const drawer = at();
+    let card = at();
+    host.openCategory = () => 'habitats';
+    host.drawer = () => drawer;
+    host.card = () => card;
+    for (let i = 0; i < 3; i++) coach.update(1);
+    expect(host.revealCard).toHaveBeenCalledTimes(1);
+    expect(host.revealCard).toHaveBeenLastCalledWith(card);
+    // the drawer opened again: the dock built new cards
+    card = at();
+    coach.update(1);
+    expect(host.revealCard).toHaveBeenCalledTimes(2);
   });
 
   it('opens the build category for a goal, or the Goals tab', () => {

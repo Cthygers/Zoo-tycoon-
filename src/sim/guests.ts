@@ -5,12 +5,12 @@
 // shops and restrooms (see queues.ts), rest on benches, drop litter, donate and
 // head home together.
 
-import { CLOSE_HOUR, DEFAULT_ADMISSION, GAME_MINUTES_PER_SECOND, MAP_H, MAP_W, OPEN_HOUR, TILE } from '../core/constants';
+import { CLOSE_HOUR, DEFAULT_ADMISSION, ENTRANCE_TILE, GAME_MINUTES_PER_SECOND, MAP_H, MAP_W, OPEN_HOUR, TILE } from '../core/constants';
 import type { PlacedObject, ShopKind } from '../core/types';
 import { FENCES_BY_ID } from '../data/fences';
 import { OBJECTS_BY_ID } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
-import { personName, pluralName, randomGuestAppearance, singularName } from './names';
+import { fitOutfit, personName, pluralName, randomGuestAppearance, singularName } from './names';
 import { FAR, N_TILES } from './nav';
 import { QP_INSIDE, QP_SERVE, QueueSystem, type ServiceKind, type ServicePoint } from './queues';
 import { hash01 } from './rng';
@@ -26,6 +26,8 @@ const DZ = [0, 0, 1, -1];
 const LATE_CLEAR = (CLOSE_HOUR + 1.5) * 60;
 /** Average party size (arrival rates are in people, parties spawn as units). */
 const AVG_PARTY = 2.25;
+/** Room a party needs before it is let in: the largest party. */
+const PARTY_ROOM = 4;
 /**
  * People the ticket booths let in per game hour: a base plus a little per exhibit,
  * so a bigger zoo welcomes more visitors. People walk in real time while the clock
@@ -85,6 +87,10 @@ type ServiceAnswer = 'ok' | 'later' | 'full' | 'far' | 'cutoff' | 'broke' | 'non
 /** 'noAnimals': no animals guests could see; 'cut': none the paths from the gate lead to. */
 type GateState = 'open' | 'noAnimals' | 'cut';
 const ENTRANCE_CUT = 'The entrance path is cut — reconnect it to open the gate.';
+/** Visitors turned away in a day before the "zoo full" message. */
+const FULL_NOTE_AT = 10;
+/** The entrance plaza, where the turned-away crowd is (message focus). */
+const GATE_SPOT = { x: (ENTRANCE_TILE.x + 0.5) * TILE, z: (ENTRANCE_TILE.z - 0.5) * TILE };
 
 /** Party-wide minimum of the basic needs (filled by partyNeeds). */
 interface PartyNeeds {
@@ -293,11 +299,14 @@ export class GuestSystem {
     }
     while (sim.spawnAcc >= 1) {
       sim.spawnAcc -= 1;
-      if (sim.guests.size + 4 > this.capacity) {
+      if (this.full()) {
         // full: this party goes elsewhere today
+        const before = sim.turnedAwayToday;
         sim.turnedAwayToday += AVG_PARTY;
-        if (sim.turnedAwayToday >= 10)
-          sim.notify('zoo-full', `Zoo full — ${Math.round(sim.turnedAwayToday)} visitors turned away today. More paths and exhibits make room.`, 'warn', undefined, 200);
+        // once a day, when it starts to matter; the guest chip already shows a full zoo, so only
+        // the zoo's first time is a toast
+        if (before < FULL_NOTE_AT && sim.turnedAwayToday >= FULL_NOTE_AT)
+          sim.notifyFirst('zoo-full', `Zoo full — ${Math.round(sim.turnedAwayToday)} visitors turned away today. More paths and exhibits make room.`, 'warn', GATE_SPOT);
         continue;
       }
       this.spawnParty();
@@ -325,6 +334,11 @@ export class GuestSystem {
     }
     this.gate = reachable ? 'open' : onView ? 'cut' : 'noAnimals';
     return this.gate;
+  }
+
+  /** No room for another party (the largest one): arrivals are turned away. */
+  full(): boolean {
+    return this.sim.guests.size + PARTY_ROOM > this.capacity;
   }
 
   /** Why the gate is shut, for the zoo stats (null while it is open). */
@@ -458,6 +472,8 @@ export class GuestSystem {
       // family resemblance
       appearance.skin = lead.appearance.skin;
       if (rng.chance(0.55)) appearance.hair = lead.appearance.hair;
+      // the outfit was fitted to the companion's own skin and hair
+      fitOutfit(appearance);
     }
     const budget = child ? rng.range(0, 8) : rng.range(18, 80);
     const tx = tile % MAP_W;

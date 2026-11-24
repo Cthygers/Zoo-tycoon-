@@ -43,9 +43,10 @@ const GOAL_CATEGORY: Record<string, CategoryId> = {
 
 /**
  * A goal's progress the way the goal states its target: "141 / 150", "$84,016 / $100,000",
- * "62% / 75%".
+ * "62% / 75%" (or the sim's note while there is nothing to measure yet).
  */
 export function goalProgressText(goal: Pick<Objective, 'text'>, p: GoalProgress): string {
+  if (p.waiting) return p.waiting;
   const money = goal.text.includes(fmtMoney(p.target));
   const pct = new RegExp(`(^|\\D)${p.target}%`).test(goal.text);
   const f = (v: number) => (money ? fmtMoney(v) : `${v.toLocaleString('en-US')}${pct ? '%' : ''}`);
@@ -54,7 +55,7 @@ export function goalProgressText(goal: Pick<Objective, 'text'>, p: GoalProgress)
 
 /** Share of a goal reached, 0..1. */
 export function goalFraction(p: GoalProgress): number {
-  return p.target > 0 ? Math.max(0, Math.min(1, p.current / p.target)) : 0;
+  return p.target > 0 && !p.waiting ? Math.max(0, Math.min(1, p.current / p.target)) : 0;
 }
 
 /** The goal as the pill words it: without its parenthesised how-to, and (`short`) without the leading verb. */
@@ -94,7 +95,8 @@ const STEPS: TourStep[] = [
     tool: (t) => t.kind === 'fence',
     open: 'Animals live in fenced habitats. Tap Habitat to build one.',
     pick: 'Pick a fence: timber rails suit grazers.',
-    use: 'Drag a rectangle on open grass. Keep paths outside it.',
+    // about 64 tiles: room for the smallest herd of any grazer a timber fence holds (3 zebras need 60)
+    use: 'Drag about 8×8 tiles of open grass, room for a small herd. Keep paths outside it.',
     confirm: 'Tap Build to put the fence up.',
     done: (sim) => sim.world.habitats.size > 0,
   },
@@ -162,6 +164,8 @@ export interface CoachHost {
   /** Dock elements the bubble can point at (null / hidden = not on screen). */
   categoryButton(id: CategoryId): HTMLElement | null;
   card(match: (key: string) => boolean): HTMLElement | null;
+  /** Scroll the drawer so this card is in view. */
+  revealCard(card: HTMLElement): void;
   drawer(): HTMLElement | null;
   toolBar(): HTMLElement | null;
   confirmBar(): HTMLElement | null;
@@ -207,6 +211,8 @@ export class Coach {
   /** Where the bubble is on screen (null while hidden), and whether it is docked in a top corner. */
   private placed: ScreenRect | null = null;
   private docked = false;
+  /** The step's card last scrolled into view (the dock builds new cards each time a drawer opens). */
+  private revealed: HTMLElement | null = null;
 
   constructor(private host: CoachHost) {
     // two lines: the goal, then how far along it is and the reward
@@ -308,10 +314,10 @@ export class Coach {
     this.pill.classList.add('fresh');
   }
 
-  /** Bar and "141 / 150" for a goal with a number to reach (hidden for one-step goals). */
+  /** Bar and "141 / 150" for a goal with a number to reach (no bar for one-step goals or before there is a number). */
   private updatePillProgress(goal: Objective): void {
     const p = this.host.sim.objectiveProgress(goal.id);
-    toggleClass(this.pillTrack, 'hidden', !p);
+    toggleClass(this.pillTrack, 'hidden', !p || !!p.waiting);
     setText(this.pillProgress, p ? goalProgressText(goal, p) : '');
     const w = p ? `${(goalFraction(p) * 100).toFixed(1)}%` : '0%';
     if (this.pillBar.style.width !== w) this.pillBar.style.width = w;
@@ -391,6 +397,11 @@ export class Coach {
       const card = h.card(s.card);
       const drawer = h.drawer();
       if (card && drawer) {
+        // once per drawer opening, so the player can still scroll on through the cards
+        if (card !== this.revealed) {
+          this.revealed = card;
+          h.revealCard(card);
+        }
         const c = card.getBoundingClientRect();
         const d = drawer.getBoundingClientRect();
         // the tool bar sits over the drawer while a tool is in hand

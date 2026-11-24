@@ -5,7 +5,7 @@
 // triplanar texture (RockMaterial) so there are no UV seams.
 
 import * as THREE from 'three';
-import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { mergeVertices, toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { hashFloat as hashF, Noise, Rng } from '../../core/rng';
 import { barkMat, barkTextures } from './barks';
 import { addTube, groupOf, MeshData, v3, type V3 } from './geo';
@@ -120,13 +120,13 @@ function iceMat(): RockMaterial {
     triTex: cachedTexture('rock-ice', () => albedoHeightTexture(genIce())),
     tile: 1.2,
     bump: 0.008,
-    roughness: 0.3,
-    surfRoughness: 0.88,
+    // weathered, frosted faces: a soft sheen, not wet glass
+    roughness: 0.45,
+    surfRoughness: 0.9,
     surfTint: 0xf4f7fa,
     // faint blue "subsurface" lift in shadowed ice
-    emissive: 0x0a1e30,
-    emissiveIntensity: 0.18,
-    envMapIntensity: 1.1,
+    emissive: 0x0b1a24,
+    emissiveIntensity: 0.1,
   });
 }
 
@@ -160,6 +160,8 @@ interface RockOpts {
   flatBase?: number;
   /** Faceted (flat) normals. */
   flat?: boolean;
+  /** Hard edges where faces meet at more than this angle (rad): crisp fracture planes, cavity shading kept. */
+  crease?: number;
   seed: number;
 }
 
@@ -226,6 +228,15 @@ function rockShape(rng: Rng, o: RockOpts): RockShape {
     // faceted: per-face normals; cavity shading is not used
     geo.computeVertexNormals();
     return { geo, disp: new Float32Array(geo.getAttribute('position').count) };
+  }
+  if (o.crease !== undefined) {
+    // non-indexed in index order: carry each corner's displacement along
+    const index = g.getIndex()!;
+    const creased = toCreasedNormals(g, o.crease);
+    g.dispose();
+    const cd = new Float32Array(index.count);
+    for (let i = 0; i < index.count; i++) cd[i] = disp[index.getX(i)];
+    return { geo: creased, disp: cd };
   }
   geo.computeVertexNormals();
   return { geo, disp };
@@ -500,8 +511,9 @@ export function buildIceRocks(variant: number): THREE.Group {
   ];
   if (variant % 2) blocks.push({ r: [0.38, 0.5, 0.36], x: -0.35, z: -0.6, det: 2 });
   blocks.forEach((b, k) => {
-    const shape = rockShape(rng, { radii: [b.r[0] * 1.25, b.r[1] * 1.3, b.r[2] * 1.25], detail: rockDetail(b.det), cuts: 14, cutDepth: [0.42, 0.78], noise: 0.03, freq: 2.0, flatBase: 0.5, seed: 400 + k + variant * 11 });
-    appendRock(md, shape, mtx(b.x * rng.range(0.9, 1.1), -minY(shape) - b.r[1] * 0.08, b.z * rng.range(0.9, 1.1), rng.range(0, 6.28)), { base: [0.5, 0.68, 0.82], vary: 0.1, lichen: 0, moss: 0, snow: 0.85, ice: true, seed: 70 + k });
+    const shape = rockShape(rng, { radii: [b.r[0] * 1.25, b.r[1] * 1.3, b.r[2] * 1.25], detail: rockDetail(b.det), cuts: 14, cutDepth: [0.42, 0.78], noise: 0.02, freq: 2.0, flatBase: 0.5, crease: 0.45, seed: 400 + k + variant * 11 });
+    // near-white glacial ice (≈ #dfe8ee): blue only where light travels deep (crevices, undersides)
+    appendRock(md, shape, mtx(b.x * rng.range(0.9, 1.1), -minY(shape) - b.r[1] * 0.08, b.z * rng.range(0.9, 1.1), rng.range(0, 6.28)), { base: [0.74, 0.8, 0.85], vary: 0.06, lichen: 0, moss: 0, snow: 0.9, ice: true, seed: 70 + k });
   });
   return finishRocks(md, iceMat(), 'ice');
 }

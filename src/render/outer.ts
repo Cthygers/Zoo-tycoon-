@@ -253,6 +253,8 @@ export class OuterLand {
     this.near = new THREE.Mesh(nearGeo, groundMaterial);
     this.near.receiveShadow = true;
     this.near.name = 'outer-near';
+    // ponds continue into the near ring: drawn before the water's murk layers (water.ts)
+    this.near.renderOrder = -2;
     this.far = new THREE.Mesh(farGeo, groundMaterial);
     this.far.name = 'outer-far';
     this.group.add(this.near, this.far);

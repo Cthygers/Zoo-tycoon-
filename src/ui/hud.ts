@@ -15,17 +15,13 @@ export interface HudHost {
   setSpeed(s: SimSpeed): void;
 }
 
-/** The sim lets a party in only while this many more guests fit (see GuestSystem.trySpawn). */
-const PARTY_ROOM = 4;
-
-/** Guest chip: how many are in the zoo of how many fit, and whether arrivals are waiting for room. */
-export function guestChip(st: Pick<ZooStats, 'guestsInZoo' | 'guestCapacity'>): { count: string; cap: string; full: boolean; label: string } {
-  const full = st.guestsInZoo + PARTY_ROOM > st.guestCapacity;
+/** Guest chip: how many are in the zoo of how many fit, and whether arrivals are turned away. */
+export function guestChip(st: Pick<ZooStats, 'guestsInZoo' | 'guestCapacity' | 'full'>): { count: string; cap: string; full: boolean; label: string } {
   return {
     count: String(st.guestsInZoo),
     cap: `/${st.guestCapacity}`,
-    full,
-    label: `Guests in the zoo: ${st.guestsInZoo} of ${st.guestCapacity}${full ? ' (full)' : ''}`,
+    full: st.full,
+    label: `Guests in the zoo: ${st.guestsInZoo} of ${st.guestCapacity}${st.full ? ' (full)' : ''}`,
   };
 }
 

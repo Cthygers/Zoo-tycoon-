@@ -444,17 +444,43 @@ export class Simulation implements ISimulation {
    * again for `cooldown` simulated seconds (null = never throttled).
    */
   notify(key: string | null, text: string, kind: NotifyKind, focus?: { x: number; z: number }, cooldown = 90) {
-    if (key) {
-      const last = this.notifyLast.get(key);
-      if (last !== undefined && this.time - last < cooldown) return;
-      this.notifyLast.set(key, this.time);
-    }
-    this.events.emit('notify', focus ? { text, kind, focus: { x: focus.x, z: focus.z } } : { text, kind });
+    if (key && !this.claimNotify(key, cooldown)) return;
+    this.emitNotify(text, kind, focus, false);
+  }
+
+  /**
+   * A lasting problem (e.g. a flooded habitat), throttled like `notify`: a toast when it starts,
+   * then log-only reminders while it lasts (a repeat within two cooldowns of the one before).
+   */
+  remind(key: string, text: string, kind: NotifyKind, focus?: { x: number; z: number }, cooldown = 90) {
+    const last = this.notifyLast.get(key);
+    if (!this.claimNotify(key, cooldown)) return;
+    this.emitNotify(text, kind, focus, last !== undefined && this.time - last < 2 * cooldown);
+  }
+
+  /** A toast the first time this zoo meets `key` (remembered in the save), log-only after that. */
+  notifyFirst(key: string, text: string, kind: NotifyKind, focus?: { x: number; z: number }) {
+    const seen = this.progress.announced.has(key);
+    this.progress.announced.add(key);
+    this.emitNotify(text, kind, focus, seen);
   }
 
   /** A message for the log only, no toast: something on screen already shows it. */
   logMessage(text: string, kind: NotifyKind, focus?: { x: number; z: number }) {
-    this.events.emit('notify', focus ? { text, kind, focus: { x: focus.x, z: focus.z }, logOnly: true } : { text, kind, logOnly: true });
+    this.emitNotify(text, kind, focus, true);
+  }
+
+  /** Throttle by key: false if `key` was sent less than `cooldown` simulated seconds ago. */
+  private claimNotify(key: string, cooldown: number): boolean {
+    if (!this.canNotify(key, cooldown)) return false;
+    this.notifyLast.set(key, this.time);
+    return true;
+  }
+
+  private emitNotify(text: string, kind: NotifyKind, focus: { x: number; z: number } | undefined, logOnly: boolean) {
+    const n: GameEvents['notify'] = focus ? { text, kind, focus: { x: focus.x, z: focus.z } } : { text, kind };
+    if (logOnly) n.logOnly = true;
+    this.events.emit('notify', n);
   }
 
   private recordMessage(n: GameEvents['notify']) {
@@ -832,6 +858,7 @@ export class Simulation implements ISimulation {
       litterCount: this.litter.size,
       fairAdmission: Math.round(this.guestSys.fairPrice),
       guestCapacity: this.guestSys.capacity,
+      full: this.guestSys.full(),
       turnedAwayToday: Math.round(this.turnedAwayToday),
       gateClosed: this.guestSys.gateNote(),
     };
@@ -855,6 +882,7 @@ export class Simulation implements ISimulation {
         terrain: 0,
         foliage: 0,
         space: 0,
+        crowded: 'no',
         fenceOk: false,
         hasWater: false,
         hasFood: false,
@@ -896,6 +924,7 @@ export class Simulation implements ISimulation {
       terrain: e.terrain,
       foliage: e.foliage,
       space: e.space,
+      crowded: e.crowded,
       fenceOk: e.fenceOk,
       hasWater: e.hasWater,
       hasFood: e.hasFood,

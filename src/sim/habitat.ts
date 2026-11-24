@@ -3,7 +3,7 @@
 // compatibility) plus per-habitat cached tile lists the animal AI uses.
 
 import { MAP_W, SHALLOW_DEPTH } from '../core/constants';
-import type { SpeciesSuitability } from '../core/contracts';
+import type { CrowdLevel, SpeciesSuitability } from '../core/contracts';
 import { Terrain, TERRAIN_COUNT, type Habitat, type SpeciesDef } from '../core/types';
 import type { World } from '../core/world';
 import { fenceAdvice } from '../data/fences';
@@ -71,6 +71,13 @@ export function terrainWant(sp: SpeciesDef, out: number[]): number[] {
 
 /** Below this share of the room its animals need a habitat is crowded enough to stress them (see crowding). */
 export const CROWDED_SPACE = 0.7;
+/** From this share of the room its animals need up, a habitat has room enough. */
+export const ROOMY_SPACE = 0.95;
+
+/** How short of room a habitat with this share of the room its animals need is. */
+export function crowdLevel(space: number): CrowdLevel {
+  return space < CROWDED_SPACE ? 'severe' : space < ROOMY_SPACE ? 'mild' : 'no';
+}
 
 /** 0 with room enough (space ≥ CROWDED_SPACE), rising to 1 as a habitat gets packed. */
 export function crowding(space: number): number {
@@ -174,9 +181,10 @@ export function evaluateSpecies(
   }
   if (adding || !pop.count.get(sp.id)) required += sp.spacePerAnimal;
   const space = required <= 0 ? 1 : Math.min(1, area / required);
+  const crowded = crowdLevel(space);
   // packed animals get stressed and sick and stop breeding: then it is the first thing to fix
-  if (space < CROWDED_SPACE) urgent.push(`Too crowded (${area} tiles, needs ${Math.ceil(required)}) — the animals get stressed and sick`);
-  else if (space < 0.95) issues.push(`Too crowded (${area} tiles, needs ${Math.ceil(required)})`);
+  if (crowded === 'severe') urgent.push(`Too crowded (${area} tiles, needs ${Math.ceil(required)}) — the animals get stressed and sick`);
+  else if (crowded === 'mild') issues.push(`Too crowded (${area} tiles, needs ${Math.ceil(required)})`);
 
   // ---- footing for animals that can't swim
   const footing = footingShare(sp, hab.terrainCounts, area);
@@ -239,6 +247,7 @@ export function evaluateSpecies(
     terrain,
     foliage,
     space,
+    crowded,
     fenceOk,
     hasWater,
     hasFood,

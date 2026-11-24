@@ -336,8 +336,9 @@ function actSwim(ctx: AnimCtx, st: PenguinState, pose: Pose): void {
   const bob = 0.012 * Math.sin(t * TAU * 0.6) * (1 - swimK * 0.5);
   pose.p[R.root].y += -st.hipsY - p.swimDepth + bob + air * 0.32 - swimK * 0.012;
   pose.p[R.root].z += p.swimShift;
-  // horizontal body, nose slightly up when floating; follows the leap arc
-  rotParent(pose, R.root, 'x', p.swimPitch - 0.12 * (1 - swimK) - 0.55 * arcSlope);
+  // horizontal body when swimming; floating, the chest rides up out of the
+  // water (the white front shows); follows the leap arc
+  rotParent(pose, R.root, 'x', p.swimPitch - 0.32 * (1 - swimK) - 0.55 * arcSlope);
   rotParent(pose, R.root, 'z', 0.05 * Math.sin(t * 1.3) * (1 - swimK));
   rig.fk(pose);
   // flippers: underwater flight strokes when moving, sculling when floating.

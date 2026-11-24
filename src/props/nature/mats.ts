@@ -122,6 +122,7 @@ export function natureResourceStats(): { textures: number; materials: number } {
 // sunrise canopy pale.
 const LEAF_LIGHT = /* glsl */ `
 uniform float uLeafTrans;
+uniform float uLeafNight;
 void RE_Direct_Leaf( const in IncidentLight directLight, const in vec3 geometryPosition, const in vec3 geometryNormal, const in vec3 geometryViewDir, const in vec3 geometryClearcoatNormal, const in PhysicalMaterial material, inout ReflectedLight reflectedLight ) {
   RE_Direct_Physical( directLight, geometryPosition, geometryNormal, geometryViewDir, geometryClearcoatNormal, material, reflectedLight );
   float lfBack = pow( saturate( dot( -geometryViewDir, directLight.direction ) ), 4.0 );
@@ -130,7 +131,7 @@ void RE_Direct_Leaf( const in IncidentLight directLight, const in vec3 geometryP
   lfBack *= mix( 0.3, 1.0, smoothstep( 0.05, 0.45, lfElev ) );
   vec3 lfAlb = material.diffuseContribution;
   vec3 lfThrough = lfAlb * clamp( lfAlb / max( dot( lfAlb, vec3( 0.2126, 0.7152, 0.0722 ) ), 1e-3 ), 0.0, 2.0 );
-  reflectedLight.directDiffuse += directLight.color * RECIPROCAL_PI * ( lfThrough * lfBack * 1.6 + lfAlb * lfWrap * 0.5 ) * uLeafTrans;
+  reflectedLight.directDiffuse += directLight.color * RECIPROCAL_PI * ( lfThrough * lfBack * 1.6 + lfAlb * lfWrap * 0.5 ) * uLeafTrans * ( 1.0 - uLeafNight );
 }
 #undef RE_Direct
 #define RE_Direct RE_Direct_Leaf
@@ -138,14 +139,26 @@ void RE_Direct_Leaf( const in IncidentLight directLight, const in vec3 geometryP
 
 // Canopy multiple scattering: sky light reaching shaded leaves has passed
 // through other leaves, so tint the ambient toward the leaf's own hue
-// (keeps crown interiors green instead of sky-blue).
+// (keeps crown interiors green instead of sky-blue). Under the moon a crown
+// is a dark mass: no light through the leaves (above), no silvery sheen off
+// thousands of card faces, and less of the lifted night sky inside it.
 const LEAF_AMBIENT = /* glsl */ `
 {
   float lfLum = max( dot( diffuseColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) ), 1e-3 );
   vec3 lfHue = clamp( diffuseColor.rgb / lfLum, 0.0, 2.0 );
-  reflectedLight.indirectDiffuse *= mix( vec3( 1.0 ), lfHue, 0.4 );
+  reflectedLight.indirectDiffuse *= mix( vec3( 1.0 ), lfHue, 0.4 ) * ( 1.0 - 0.4 * uLeafNight );
+  reflectedLight.directSpecular *= 1.0 - 0.8 * uLeafNight;
+  reflectedLight.indirectSpecular *= 1.0 - 0.8 * uLeafNight;
 }
 `;
+
+/** 0 by day … 1 at full night (shared by every foliage material). */
+const leafNight = { value: 0 };
+
+/** Tell the foliage materials how dark it is (props layer, each frame: its nightFactor). */
+export function setNatureNight(night: number): void {
+  leafNight.value = night;
+}
 
 export interface FoliageParams extends THREE.MeshStandardMaterialParameters {
   /** Strength of light transmitted through the leaves (0..1). */
@@ -154,6 +167,7 @@ export interface FoliageParams extends THREE.MeshStandardMaterialParameters {
 
 export class FoliageMaterial extends THREE.MeshStandardMaterial {
   readonly leafTrans = { value: 0.5 };
+  readonly leafNight = leafNight;
   readonly isFoliageMaterial = true;
 
   constructor(params: FoliageParams = {}) {
@@ -174,6 +188,7 @@ export class FoliageMaterial extends THREE.MeshStandardMaterial {
 
   override onBeforeCompile(shader: THREE.WebGLProgramParametersWithUniforms): void {
     shader.uniforms.uLeafTrans = this.leafTrans;
+    shader.uniforms.uLeafNight = this.leafNight;
     const nfb = THREE.ShaderChunk.normal_fragment_begin.replace('normal *= faceDirection;', '');
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <lights_physical_pars_fragment>', `#include <lights_physical_pars_fragment>\n${LEAF_LIGHT}`)
@@ -193,7 +208,11 @@ export class FoliageMaterial extends THREE.MeshStandardMaterial {
 }
 
 /** Foliage material for an atlas (cached by key). */
-export function foliageMaterial(key: string, map: THREE.Texture, opts: { sway: number; translucency?: number; roughness?: number; color?: number; alphaTest?: number }): FoliageMaterial {
+export function foliageMaterial(
+  key: string,
+  map: THREE.Texture,
+  opts: { sway: number; translucency?: number; roughness?: number; color?: number; alphaTest?: number; crownFade?: boolean },
+): FoliageMaterial {
   return cachedMaterial(`leaf:${key}#${map.uuid.slice(0, 8)}`, () => {
     const m = new FoliageMaterial({
       map,
@@ -203,8 +222,10 @@ export function foliageMaterial(key: string, map: THREE.Texture, opts: { sway: n
       alphaTest: opts.alphaTest ?? 0.5,
     });
     m.userData.sway = opts.sway;
-    // near-camera dissolve (props layer) for occluding leaves / fronds
+    // near-camera dissolve (props layer) for occluding leaves / fronds; whole
+    // crowns too when every geometry carries its crown (geo.ts addCrownFade)
     m.userData.foliage = true;
+    if (opts.crownFade) m.userData.crownFade = true;
     return m;
   });
 }
@@ -215,7 +236,7 @@ export function foliageMaterial(key: string, map: THREE.Texture, opts: { sway: n
  * flower card `ground`. One material each = one batch (draw call) each.
  */
 export const LEAF_PARAMS = {
-  trees: { sway: 0.011, translucency: 0.45, roughness: 0.78 },
+  trees: { sway: 0.011, translucency: 0.45, roughness: 0.78, crownFade: true },
   ground: { sway: 0.065, translucency: 0.55, roughness: 0.78 },
 } as const;
 

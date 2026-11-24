@@ -64,6 +64,7 @@ export class SampleImpl implements CoatSample {
   w = 0;
   gloss = 0;
   fur = 1;
+  fold = 0;
   /** Normalized part weights (index = part id). */
   partW: Float32Array;
   /** Raw min distance per part (index = part id). */
@@ -155,6 +156,7 @@ export class SampleImpl implements CoatSample {
     this.w = 0;
     this.gloss = 0;
     this.fur = 1;
+    this.fold = 0;
   }
 }
 
@@ -640,7 +642,10 @@ export function buildGeometry(input: MeshInput, detail: 0 | 1 | 2, baker: Vertex
   return { geometry, rig, field, bounds: meshed.bounds, triangles: indexArr.length / 3, ms: now() - t0 };
 }
 
-/** Baker for animals: color (vec3), color2 (vec3), pattern (vec4: s, w, gloss, fur − 1). */
+/**
+ * Baker for animals: color (vec3), color2 (vec3), pattern (vec4: s, w, gloss,
+ * fur − 1 for long hair, else −fold for the skin folds of 'wrinkled' skin).
+ */
 export function coatBaker(coat: (s: SampleImpl) => void): VertexBaker {
   return {
     attributes: [
@@ -659,7 +664,7 @@ export function coatBaker(coat: (s: SampleImpl) => void): VertexBaker {
       out[2][v * 4] = s.s;
       out[2][v * 4 + 1] = s.w;
       out[2][v * 4 + 2] = s.gloss;
-      out[2][v * 4 + 3] = s.fur - 1;
+      out[2][v * 4 + 3] = s.fur > 1 ? s.fur - 1 : -s.fold;
     },
   };
 }

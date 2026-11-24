@@ -6,14 +6,17 @@
 //   * glossy patches (eyes, nose leather) from a baked gloss value,
 //   * 'wrinkled' skin: a network of fine creases (grooves darkened in the
 //     albedo) for elephants, rhinos and hippos instead of the cell plates of
-//     'hide', which read as reptile scales up close,
+//     'hide', which read as reptile scales up close, plus deep folds across
+//     legs and trunks where the coat sets `fold` (baked as −pattern.w),
 //   * an optional growth-dependent juvenile tint (chick down). Growth comes
 //     from the instance's look texel in the batched renderer (`USE_BATCHING`)
 //     and is 1 (adult) for standalone meshes,
-//   * for the standalone highlight material, the selection rim (crHighlight).
+//   * for the standalone highlight material, the selection rim (crHighlight),
+//   * warm light from the night lamps it stands under (props/lights/lampField.ts).
 
 import * as THREE from 'three';
 import type { LookSpec } from '../types';
+import { applyLampField } from '../../props/lights/lampField';
 import { HIGHLIGHT_FN_GLSL, NOISE_GLSL } from './shaderChunks';
 
 const SKIN_IDS: Record<LookSpec['skin'], number> = { fur: 0, hide: 1, smooth: 2, feather: 3, wrinkled: 4 };
@@ -124,6 +127,16 @@ float cr_crease(vec3 q) {
   float c = abs(cr_vnoise(q * 2.3 + 3.3) - 0.5);
   return smoothstep(0.0, 0.11, a) * 0.5 + smoothstep(0.0, 0.085, b) * 0.32 + smoothstep(0.0, 0.07, c) * 0.18;
 }
+// Deep skin folds, CR_FOLD × the crease scale: long grooves running across
+// the limbs and trunk (object-space Y is up the legs and the hanging trunk),
+// a few centimetres apart, plus a fainter, finer cross set. They still read
+// at mid range on a phone, where the fine creases are sub-pixel.
+#define CR_FOLD 4.0
+float cr_fold(vec3 q) {
+  float a = abs(cr_vnoise(q * vec3(0.3, 1.0, 0.3)) - 0.5);
+  float b = abs(cr_vnoise(q * vec3(0.8, 0.6, 0.8) + 7.7) - 0.5);
+  return smoothstep(0.0, 0.12, a) * 0.78 + smoothstep(0.0, 0.07, b) * 0.22;
+}
 #endif`,
       )
       .replace(
@@ -165,7 +178,15 @@ float crCreaseH = 1.0;
   if (fa > 0.001) crCreaseH = cr_crease(vRestPos / crGrain);
   float groove = 1.0 - crCreaseH;
   float gd = clamp(uBump * 1.2, 0.12, 0.6);
-  diffuseColor.rgb *= mix(1.0 - gd * 0.14, 1.0 - gd * groove * groove, fa) * (1.0 - vPattern.z) + vPattern.z;
+  // folds (where the coat puts them): same treatment at their own, larger scale
+  float ff = (1.0 - smoothstep(crGrain * CR_FOLD * 0.5, crGrain * CR_FOLD * 2.5, crPix)) * max(-vPattern.w, 0.0);
+  float foldShade = 1.0 - gd * 0.06 * max(-vPattern.w, 0.0);
+  if (ff > 0.001) {
+    float fold = 1.0 - cr_fold(vRestPos / (crGrain * CR_FOLD));
+    foldShade = mix(foldShade, 1.0 - gd * 0.45 * fold * fold, ff);
+  }
+  float shade = mix(1.0 - gd * 0.14, 1.0 - gd * groove * groove, fa) * foldShade;
+  diffuseColor.rgb *= shade * (1.0 - vPattern.z) + vPattern.z;
 }
 #endif
 #if CR_JUV == 1
@@ -218,6 +239,21 @@ if (crFade > 0.001 && vPattern.z < 0.5) {
   gv -= normal * dot(gv, normal);
   normal = normalize(normal - gv * uBump * 0.35 * crFade * sqrt(crFur));
 }
+#if CR_SKIN == 4
+{
+  // fold relief, faded at its own (larger) scale
+  float ff = (1.0 - smoothstep(crGrain * CR_FOLD * 0.35, crGrain * CR_FOLD * 1.6, crPix)) * max(-vPattern.w, 0.0);
+  if (ff > 0.001 && vPattern.z < 0.5) {
+    vec3 p = vRestPos / (crGrain * CR_FOLD);
+    float e = 0.3;
+    float h0 = cr_fold(p);
+    vec3 g = vec3(cr_fold(p + vec3(e, 0.0, 0.0)) - h0, cr_fold(p + vec3(0.0, e, 0.0)) - h0, cr_fold(p + vec3(0.0, 0.0, e)) - h0) / e;
+    vec3 gv = normalMatrix * g;
+    gv -= normal * dot(gv, normal);
+    normal = normalize(normal - gv * uBump * 0.2 * ff);
+  }
+}
+#endif
 #endif`,
       )
       .replace(
@@ -228,10 +264,11 @@ if (crFade > 0.001 && vPattern.z < 0.5) {
   outgoingLight += uSheen * (1.0 - vPattern.z) * rim * (totalDiffuse * 0.9 + diffuseColor.rgb * 0.04);
 }
 #if CR_HIGHLIGHT == 1
-outgoingLight = crHighlightOf(outgoingLight, uHighlight);
+outgoingLight = crHighlightFurOf(outgoingLight, uHighlight, vPattern.w);
 #endif
 #include <opaque_fragment>`,
       );
+    applyLampField(shader);
   };
   mat.customProgramCacheKey = () => `creature-animal-${skin}-${pattern}-${micro}-${juv}-${hl}`;
   mat.userData.creatureUniforms = uniforms;

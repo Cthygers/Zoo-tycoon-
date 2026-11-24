@@ -8,6 +8,8 @@ import { WATER_LEVEL, WORLD_H, WORLD_W } from '../core/constants';
 import type { World } from '../core/world';
 
 const DEG = Math.PI / 180;
+/** Vertical FOV (deg) the distances below are tuned for (render/context.ts narrows it on wide screens). */
+const BASE_FOV = 45;
 
 export interface CameraLimits {
   minDistance: number;
@@ -106,13 +108,25 @@ export class CameraController {
     else if (this.yaw < -Math.PI) this.yaw += Math.PI * 2;
   }
 
+  /**
+   * Camera distance per unit of `distance`. A FOV narrower than BASE_FOV
+   * (capped horizontal FOV on wide phones) zooms in; the camera backs off by
+   * the square root of that zoom (≈ +15 % on 20:9), so views keep most of
+   * their framing while the longer lens flattens the perspective. Distances,
+   * limits and callers' zoom levels stay in BASE_FOV terms.
+   */
+  private lensScale(): number {
+    return Math.sqrt(Math.tan((BASE_FOV / 2) * DEG) / Math.tan((this.camera.fov / 2) * DEG));
+  }
+
   /** Position the three.js camera from target / yaw / pitch / distance. */
   applyPose(): void {
     const cp = Math.cos(this.pitch);
     const cam = this.camera;
-    const px = this.target.x + Math.sin(this.yaw) * cp * this.distance;
-    const pz = this.target.z + Math.cos(this.yaw) * cp * this.distance;
-    let py = this.target.y + Math.sin(this.pitch) * this.distance;
+    const d = this.distance * this.lensScale();
+    const px = this.target.x + Math.sin(this.yaw) * cp * d;
+    const pz = this.target.z + Math.cos(this.yaw) * cp * d;
+    let py = this.target.y + Math.sin(this.pitch) * d;
     const floor = this.groundHeight(px, pz) + 1.6;
     if (py < floor) py = floor;
     cam.position.set(px, py, pz);

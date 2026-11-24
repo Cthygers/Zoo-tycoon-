@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { FoliageMaterial, RockMaterial } from '../src/props/nature/mats';
+import { FoliageMaterial, RockMaterial, setNatureNight } from '../src/props/nature/mats';
+import { buildIceRocks } from '../src/props/nature/rocks';
 
 /** Run a material's onBeforeCompile on a copy of the physical shader source. */
 function compile(m: THREE.Material): THREE.WebGLProgramParametersWithUniforms {
@@ -32,5 +33,44 @@ describe('nature materials honour envMapIntensity under scene.environment', () =
     expect(sh.fragmentShader).toContain('rockPerturb');
     expect((sh.uniforms.envMapScale as THREE.IUniform<number>).value).toBeCloseTo(1.1);
     expect(sh.uniforms.uTriTex).toBeDefined();
+  });
+});
+
+describe('foliage at night', () => {
+  it('drops light through the leaves and the silvery sheen as night falls (one shared setting)', () => {
+    const a = new FoliageMaterial();
+    const b = new FoliageMaterial();
+    const sh = compile(a);
+    expect(sh.fragmentShader).toMatch(/uLeafTrans \* \( 1\.0 - uLeafNight \)/);
+    expect(sh.fragmentShader).toContain('reflectedLight.indirectSpecular *= 1.0 - 0.8 * uLeafNight;');
+    setNatureNight(0.75);
+    expect((sh.uniforms.uLeafNight as THREE.IUniform<number>).value).toBe(0.75);
+    expect(b.leafNight.value).toBe(0.75);
+    setNatureNight(0);
+  });
+});
+
+describe('ice rockery', () => {
+  it('is near-white glacial ice with crisp fracture planes, blue only where light runs deep', () => {
+    const g = buildIceRocks(0);
+    const mesh = g.children[0] as THREE.Mesh;
+    const col = mesh.geometry.getAttribute('color');
+    const nrm = mesh.geometry.getAttribute('normal');
+    let lum = 0;
+    let rb = 0;
+    let flatShared = 0;
+    for (let i = 0; i < col.count; i++) {
+      lum += 0.2126 * col.getX(i) + 0.7152 * col.getY(i) + 0.0722 * col.getZ(i);
+      rb += col.getX(i) / Math.max(col.getZ(i), 1e-3);
+    }
+    // creased normals: the three corners of most faces share one face normal
+    for (let t = 0; t + 2 < nrm.count; t += 3) {
+      const d = nrm.getX(t) * nrm.getX(t + 1) + nrm.getY(t) * nrm.getY(t + 1) + nrm.getZ(t) * nrm.getZ(t + 1);
+      if (d > 0.999) flatShared++;
+    }
+    // the old saturated baby-blue base had red at about half of blue; smooth normals shared no corner
+    expect(lum / col.count).toBeGreaterThan(0.5);
+    expect(rb / col.count).toBeGreaterThan(0.6);
+    expect(flatShared / (nrm.count / 3)).toBeGreaterThan(0.15);
   });
 });

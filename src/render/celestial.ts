@@ -1,13 +1,16 @@
-// Sun and moon positions for the game clock. Mid-latitude summer: sunrise
-// ≈ 06:00, solar noon 13:00 (south, +Z), sunset ≈ 20:00. World axes: east =
-// +X, north = −Z, up = +Y.
+// Sun and moon positions for the game clock. Mid-latitude late summer:
+// sunrise ≈ 06:30, solar noon 13:00 (south, +Z), sunset ≈ 19:30, so the last
+// visitor hour (zoo closes at 20:00) gets golden light and the lamps come on
+// before closing. World axes: east = +X, north = −Z, up = +Y.
 
 import * as THREE from 'three';
 
 const LAT = (45 * Math.PI) / 180;
-// declination chosen so the sun crosses the horizon 7 h from solar noon
-const DECL = Math.atan(-Math.cos((105 * Math.PI) / 180) / Math.tan(LAT));
-const SOLAR_NOON_H = 13;
+/** Hours from solar noon to sunset. */
+const HALF_DAY_H = 6.5;
+// declination chosen so the sun crosses the horizon HALF_DAY_H from solar noon
+const DECL = Math.atan(-Math.cos((HALF_DAY_H * 15 * Math.PI) / 180) / Math.tan(LAT));
+export const SOLAR_NOON_H = 13;
 const SYNODIC = 29.53;
 
 function equatorialToWorld(hourAngle: number, decl: number, out: THREE.Vector3): THREE.Vector3 {

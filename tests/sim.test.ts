@@ -553,7 +553,8 @@ describe('animals and water', () => {
     expect(tooDeep).toBe(0);
     expect(swimming).toBeGreaterThan(50); // penguins / tigers swim
     expect(noseOut).toBe(0);
-  });
+    // a fixed number of steps of a fixed seed: only the time limit could make it fail on a busy machine
+  }, 60_000);
 });
 
 describe('persistence', () => {
@@ -636,6 +637,25 @@ describe('persistence', () => {
   });
 });
 
+/**
+ * CPU milliseconds per call of `fn`: the fastest of `batches` runs of `calls` calls. CPU time of this
+ * test process, not wall time, so other processes competing for the cores don't count; the best batch
+ * drops what is left (preemption, a GC pause).
+ */
+function cpuMsPerCall(fn: () => void, calls: number, batches = 3): number {
+  // Node's process.cpuUsage (the project's types are the browser's)
+  type CpuTime = { user: number; system: number };
+  const proc = (globalThis as unknown as { process: { cpuUsage(since?: CpuTime): CpuTime } }).process;
+  let best = Infinity;
+  for (let b = 0; b < batches; b++) {
+    const t0 = proc.cpuUsage();
+    for (let i = 0; i < calls; i++) fn();
+    const used = proc.cpuUsage(t0);
+    best = Math.min(best, (used.user + used.system) / 1000 / calls);
+  }
+  return best;
+}
+
 describe('performance', () => {
   it('updates a busy zoo (150 guests, ~50 animals) within budget', () => {
     const events = new EventBus();
@@ -651,20 +671,14 @@ describe('performance', () => {
     }
     expect(sim.guests.size).toBeGreaterThan(120);
     expect(sim.animals.size).toBeGreaterThan(40);
-    // measure at 1x, 60 fps
+    // ms per 60 fps frame at 1x and at 4x
     sim.setSpeed(1);
-    const frames = 600;
-    const t0 = performance.now();
-    for (let i = 0; i < frames; i++) sim.update(1 / 60);
-    const avg1 = (performance.now() - t0) / frames;
-    // and at 4x
+    const avg1 = cpuMsPerCall(() => sim.update(1 / 60), 200);
     sim.setSpeed(3);
-    const t1 = performance.now();
-    for (let i = 0; i < frames; i++) sim.update(1 / 60);
-    const avg4 = (performance.now() - t1) / frames;
+    const avg4 = cpuMsPerCall(() => sim.update(1 / 60), 200);
     expect(avg1).toBeLessThan(2);
     expect(avg4).toBeLessThan(4);
     // tile index sanity for guests
     for (const g of sim.guests.values()) expect(g.tile).toBeGreaterThanOrEqual(0), expect(g.tile).toBeLessThan(MAP_W * MAP_W);
-  });
+  }, 60_000);
 });

@@ -20,6 +20,11 @@ interface ObjectiveDef {
 const of = (current: number, target: number): GoalProgress => ({ current: Math.min(target, Math.floor(current)), target });
 /** Guests on the best single day so far, today included. */
 const bestDay = (s: Simulation, p: Progress) => Math.max(p.bestDayGuests, s.guestsToday);
+/** Departing guests a day needs before their average happiness counts as that day's. */
+const HAPPY_DAY_GUESTS = 20;
+/** The happiest day so far in percent, or a note while no day has had enough departing guests to judge. */
+const happyDay = (p: Progress, target: number): GoalProgress =>
+  p.bestDayHappiness > 0 ? of(p.bestDayHappiness * 100, target) : { current: 0, target, waiting: 'No full day yet' };
 
 // Rewards start small (the first week runs on ticket money with a little help) and grow
 // with the goals; the mid-game goals keep something to aim for while the zoo expands.
@@ -42,7 +47,7 @@ const OBJECTIVES: ObjectiveDef[] = [
   { id: 'guests_150', text: 'Welcome 150 guests in a single day', reward: 5000, check: (s) => s.guestsToday >= 150, progress: (s, p) => of(bestDay(s, p), 150) },
   { id: 'species_8', text: 'Exhibit 8 different species', reward: 8000, check: (_s, p) => p.speciesCount >= 8, progress: (_s, p) => of(p.speciesCount, 8) },
   { id: 'visitors_2500', text: 'Welcome 2,500 visitors in total', reward: 5000, check: (s) => s.totalVisitors >= 2500, progress: (s) => of(s.totalVisitors, 2500) },
-  { id: 'guest_happy_75', text: 'Reach 75% guest happiness for a day', reward: 6000, check: (_s, p) => p.bestDayHappiness >= 0.75, progress: (_s, p) => of(p.bestDayHappiness * 100, 75) },
+  { id: 'guest_happy_75', text: 'Reach 75% guest happiness for a day', reward: 6000, check: (_s, p) => p.bestDayHappiness >= 0.75, progress: (_s, p) => happyDay(p, 75) },
   { id: 'rating_70', text: 'Reach a zoo rating of 70', reward: 8000, check: (s) => s.rating >= 70, progress: (s) => of(s.rating, 70) },
   { id: 'habitats_80', text: 'Get 8 habitats to 80% suitability', reward: 6000, check: (_s, p) => p.goodHabitats >= 8, progress: (_s, p) => of(p.goodHabitats, 8) },
   { id: 'money_100k', text: 'Have $100,000 in the bank', reward: 10000, check: (s) => s.money >= 100000, progress: (s) => of(Math.max(0, s.money), 100000) },
@@ -80,6 +85,8 @@ export interface ProgressSave {
   bestRunning?: number;
   /** Best average happiness (0..1) of the guests who left on one closed day. */
   bestDayHappiness?: number;
+  /** Warnings already shown once as a toast (see Simulation.notifyFirst). */
+  announced?: string[];
 }
 
 export class Progress {
@@ -88,7 +95,10 @@ export class Progress {
   bestDayGuests = 0;
   /** Best running result of one closed day. */
   bestRunning = 0;
-  /** Best average happiness of the guests leaving on one closed day (days with a handful of guests don't count). */
+  /**
+   * Best average happiness of the guests leaving on one closed day (days with a handful of guests
+   * don't count); 0 until such a day has closed, as in saves from before it was kept.
+   */
   bestDayHappiness = 0;
   /** Today's departing guests: summed happiness and head count. */
   private leftHappy = 0;
@@ -97,6 +107,8 @@ export class Progress {
   goodHabitats = 0;
   /** Species that have had a baby in this zoo. */
   readonly bredSpecies = new Set<string>();
+  /** Warnings this zoo has already shown once as a toast: later ones go to the log only. */
+  readonly announced = new Set<string>();
   has = { food: false, drink: false, restroom: false, bench: false, bin: false, gift: false };
   speciesCount = 0;
   happyAnimals = 0;
@@ -119,6 +131,7 @@ export class Progress {
     this.leftHappy = this.leftCount = 0;
     this.goodHabitats = 0;
     this.bredSpecies.clear();
+    this.announced.clear();
     this.ratingAcc = 0;
     this.complaintAcc = 0;
     this.facilitiesRev = -1;
@@ -135,6 +148,7 @@ export class Progress {
       bredSpecies: Array.from(this.bredSpecies),
       bestRunning: this.bestRunning,
       bestDayHappiness: this.bestDayHappiness,
+      announced: Array.from(this.announced),
     };
   }
   /** `bestRunning`: the best closed day in the saved ledger, for saves that did not keep it. */
@@ -149,6 +163,8 @@ export class Progress {
     this.goodHabitats = 0;
     this.bredSpecies.clear();
     for (const id of d.bredSpecies ?? []) this.bredSpecies.add(id);
+    this.announced.clear();
+    for (const key of d.announced ?? []) this.announced.add(key);
     this.ratingAcc = d.ratingAcc ?? 0;
     this.complaintAcc = d.complaintAcc ?? 0;
     this.facilitiesRev = -1;
@@ -167,7 +183,7 @@ export class Progress {
   closeDay(guests: number, running: number) {
     this.bestDayGuests = Math.max(this.bestDayGuests, guests);
     this.bestRunning = Math.max(this.bestRunning, running);
-    if (this.leftCount >= 20) this.bestDayHappiness = Math.max(this.bestDayHappiness, this.leftHappy / this.leftCount);
+    if (this.leftCount >= HAPPY_DAY_GUESTS) this.bestDayHappiness = Math.max(this.bestDayHappiness, this.leftHappy / this.leftCount);
     this.leftHappy = this.leftCount = 0;
   }
 

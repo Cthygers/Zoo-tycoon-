@@ -104,10 +104,81 @@ const SKIN = [0xf3d5c0, 0xe9c2a2, 0xdcab86, 0xcf9a73, 0xb98260, 0xa06c4b, 0x8a5a
 const HAIR = [0x16110e, 0x241912, 0x33241a, 0x4a3324, 0x5e4330, 0x7a5a3c, 0xa0804f, 0xc4a46e, 0x8b4a2a, 0x6e6e6e, 0xb8b2a8];
 const SHIRT = [
   0x2f3e55, 0x445a3a, 0x7a2f2f, 0xb8913a, 0x2f6b6b, 0xdcd8cf, 0x6f6f6f, 0xc4644a, 0x4f4a6b, 0x8a9a5b, 0x3b5f8a, 0xa35a6e, 0xe6e1d3,
-  0x1f2328, 0x9b6b43, 0x5b7c8c,
+  0x1f2328, 0x9b6b43, 0x5b7c8c, 0x8fa6bf, 0x9a9c9f, 0x6a85a6, 0x86977a,
 ];
 const PANTS = [0x2c3e5c, 0x3b4f6e, 0x1e2a3c, 0x6b5f4a, 0x8c7b5e, 0x2a2a2c, 0x55585c, 0x5a4636, 0x46503b, 0x9a8f7c];
 const SHOES = [0xe8e6e1, 0x222222, 0x4a3426, 0x6b6b6b, 0x8a6a4a, 0x2c3a4f];
+
+// Outfit contrast. With smooth bodies and no garment seams, colour is the only
+// clothing cue: a top or bottom close to the skin reads as bare skin, and an
+// all-pale figure reads as a statue.
+/** Below this CIE76 ΔE a garment reads as skin. */
+const SKIN_DELTA_E = 15;
+/** Minimum lightness gap (CIE L*, 0..100) between top and bottom. */
+const TOP_BOTTOM_L = 18;
+/** L* above which a top counts as white / cream, and hair as grey / blonde. */
+const PALE_TOP_L = 80;
+const PALE_HAIR_L = 45;
+
+/** CIE L*a*b* (D65) of an sRGB colour. */
+export function hexToLab(hex: number): [number, number, number] {
+  const lin = (c: number) => {
+    const v = c / 255;
+    return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  };
+  const r = lin((hex >> 16) & 255);
+  const g = lin((hex >> 8) & 255);
+  const b = lin(hex & 255);
+  const f = (t: number) => (t > 216 / 24389 ? Math.cbrt(t) : (24389 / 27 * t + 16) / 116);
+  const fx = f((0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047);
+  const fy = f(0.2126 * r + 0.7152 * g + 0.0722 * b);
+  const fz = f((0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883);
+  return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
+}
+
+/** A garment colour close enough to the skin to read as bare skin. */
+export function looksLikeSkin(cloth: number, skin: number): boolean {
+  const [L1, a1, b1] = hexToLab(cloth);
+  const [L2, a2, b2] = hexToLab(skin);
+  if (Math.hypot(L1 - L2, a1 - a2, b1 - b2) < SKIN_DELTA_E) return true;
+  // same lightness (relative luminance within 15 %) and a similar hue
+  const y1 = ((L1 + 16) / 116) ** 3;
+  const y2 = ((L2 + 16) / 116) ** 3;
+  if (Math.abs(y1 - y2) > 0.15 * Math.max(y1, y2) || Math.hypot(a1, b1) < 10) return false;
+  const dh = Math.abs(Math.atan2(b1, a1) - Math.atan2(b2, a2)) * (180 / Math.PI);
+  return Math.min(dh, 360 - dh) < 25;
+}
+
+/**
+ * `list[from]` if `ok` accepts it, else one of the accepted colours chosen by
+ * `from` (so the rejected share spreads over them), else `list[from]`.
+ */
+function pickFrom(list: readonly number[], from: number, ok: (c: number) => boolean): number {
+  if (ok(list[from])) return list[from];
+  const good = list.filter(ok);
+  return good.length ? good[from % good.length] : list[from];
+}
+
+/**
+ * Make a guest's outfit read as clothes: neither garment passes for skin, the
+ * top differs in lightness from the bottom, and a woman with grey or blonde
+ * hair never gets a white / cream top (some wear it as a dress: a statue).
+ * Only garments drawn from the guest palettes are changed, each to a suitable
+ * palette colour chosen by its own index, so it uses no random draws and can run again after
+ * a companion takes on the party leader's skin.
+ */
+export function fitOutfit(app: HumanAppearance): void {
+  const pi = PANTS.indexOf(app.pants);
+  if (pi >= 0) app.pants = pickFrom(PANTS, pi, (c) => !looksLikeSkin(c, app.skin));
+  const si = SHIRT.indexOf(app.shirt);
+  if (si < 0) return;
+  const pantsL = hexToLab(app.pants)[0];
+  const paleHair = app.female && hexToLab(app.hair)[0] > PALE_HAIR_L;
+  app.shirt = pickFrom(SHIRT, si, (c) => {
+    const L = hexToLab(c)[0];
+    return !looksLikeSkin(c, app.skin) && Math.abs(L - pantsL) >= TOP_BOTTOM_L && !(paleHair && L > PALE_TOP_L);
+  });
+}
 
 export function randomGuestAppearance(rng: SimRng, child: boolean): HumanAppearance {
   const female = rng.chance(0.5);
@@ -119,7 +190,7 @@ export function randomGuestAppearance(rng: SimRng, child: boolean): HumanAppeara
   if (child && hairStyle === 2) hairStyle = 0;
   const greyChance = child ? 0 : 0.12;
   const hair = rng.chance(greyChance) ? rng.pick([0x6e6e6e, 0xb8b2a8]) : rng.pick(HAIR.slice(0, 9));
-  return {
+  const app: HumanAppearance = {
     skin: rng.pick(SKIN),
     hair,
     shirt: rng.pick(SHIRT),
@@ -131,6 +202,8 @@ export function randomGuestAppearance(rng: SimRng, child: boolean): HumanAppeara
     child,
     female,
   };
+  fitOutfit(app);
+  return app;
 }
 
 const UNIFORM: Record<StaffRole, { shirt: number; pants: number; shoes: number }> = {

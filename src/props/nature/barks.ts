@@ -479,5 +479,8 @@ export function barkMat(kind: BarkKind, sway = 0, fade = true): THREE.MeshStanda
   if (kind === 'bamboo') opts.roughness = 0.45;
   if (kind === 'cactus') opts.roughness = 0.6;
   if (kind === 'baobab') opts.roughness = 0.84;
-  return barkMaterial(`${kind}:${sway}${fade ? '' : ':nofade'}`, t.map, t.normal, opts);
+  const m = barkMaterial(`${kind}:${sway}${fade ? '' : ':nofade'}`, t.map, t.normal, opts);
+  // the near-camera view hole cuts limbs, never this much of the trunk (props/lod/fade.ts)
+  if (kind === 'baobab') m.userData.trunkRadius = 2;
+  return m;
 }

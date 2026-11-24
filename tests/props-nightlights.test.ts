@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { EventBus } from '../src/core/events';
 import { PathType, Terrain } from '../src/core/types';
 import { World } from '../src/core/world';
+import * as THREE from 'three';
 import { buildPoolGrid, poolLight, surfaceBrightness, type WorldEmitter } from '../src/props/lights/nightlights';
+import { applyLampField, lampFieldAt, lampFieldUniforms, resetLampField, writeLampField } from '../src/props/lights/lampField';
 
 function lamp(x: number, z: number, y = 3.2): WorldEmitter {
   return { x, y, z, kind: 'lamp', px: x, pz: z, radius: 6.7, intensity: 1 };
@@ -85,5 +87,38 @@ describe('night light pools', () => {
     expect(surfaceBrightness(world, 25, 21)).toBeGreaterThan(paved); // snow
     const grid = buildPoolGrid([lamp(21, 21)], () => 0, (x, z) => surfaceBrightness(world, x, z));
     for (let i = 0; i < grid.light.length; i++) expect(grid.bright[i]).toBeCloseTo(surfaceBrightness(world, grid.position[i * 3], grid.position[i * 3 + 2]), 6);
+  });
+});
+
+describe('lamp light on creatures', () => {
+  it('maps the pool grid onto the map-wide field', () => {
+    const grid = buildPoolGrid([lamp(30.3, 40.2), lamp(-1, 2)], () => 0);
+    writeLampField(grid.position, grid.light);
+    expect(lampFieldAt(30, 40)).toBeCloseTo(lightAt(grid, 30, 40), 2);
+    expect(lampFieldAt(33, 40)).toBeCloseTo(lightAt(grid, 33, 40), 2);
+    expect(lampFieldAt(30, 48)).toBe(0);
+    // a pool reaching past the map edge keeps its in-map part
+    expect(lampFieldAt(0, 2)).toBeGreaterThan(0.3);
+    resetLampField();
+    expect(lampFieldAt(30, 40)).toBe(0);
+    expect(lampFieldUniforms.uLampMark.value).toBe(0);
+  });
+
+  it('patches a standard material shader with one field fetch per vertex and keeps every hook for later patches', () => {
+    const shader = {
+      uniforms: {},
+      vertexShader: THREE.ShaderLib.physical.vertexShader,
+      fragmentShader: THREE.ShaderLib.physical.fragmentShader,
+    } as unknown as THREE.WebGLProgramParametersWithUniforms;
+    applyLampField(shader);
+    expect(shader.uniforms.uLampField).toBe(lampFieldUniforms.uLampField);
+    expect(shader.uniforms.uLampLight).toBe(lampFieldUniforms.uLampLight);
+    expect(shader.vertexShader.match(/textureLod\( uLampField|textureLod\(uLampField/g)?.length).toBe(1);
+    expect(shader.fragmentShader).toContain('reflectedLight.indirectDiffuse += uLampLight');
+    for (const hook of ['#include <common>', '#include <project_vertex>']) expect(shader.vertexShader).toContain(hook);
+    for (const hook of ['#include <common>', '#include <aomap_fragment>', '#include <tonemapping_fragment>', '#include <opaque_fragment>'])
+      expect(shader.fragmentShader).toContain(hook);
+    // the lamp light lands before the lighting is summed up
+    expect(shader.fragmentShader.indexOf('uLampLight * (')).toBeLessThan(shader.fragmentShader.indexOf('#include <aomap_fragment>'));
   });
 });

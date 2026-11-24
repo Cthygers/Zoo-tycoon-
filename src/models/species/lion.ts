@@ -101,24 +101,28 @@ function headPrims(male: boolean): Prim[] {
  * masses — a ruff framing the face (behind the cheeks, ears poking out above
  * it), a cap over the crown behind the ears, the thick neck mane rising above
  * the nape, the shoulder fringe and the long chest bib between the forelegs.
- * Gentle, vertically stretched noise breaks the outline into hanging locks;
- * strand detail comes from the coat (streaks) and the fur micro-normal.
+ * Vertically stretched noise breaks the outline into hanging locks — finer
+ * and stronger on the outer masses, so the mane ends in ragged tufts instead
+ * of a hard helmet line; strand detail comes from the coat (streaks) and the
+ * fur micro-normal. A thin fringe continues the bib under the chest.
  */
 function manePrims(): Prim[] {
   const hair = (seed: number, amp: number, freq = 8): PrimOpts['noise'] => ({ amp, freq, stretch: [1.4, 0.4, 1.2], octaves: 3, ridged: true, seed });
   const o = (blend: number, seed: number, amp: number, freq?: number): PrimOpts => ({ blend, part: 'mane', region: 'mane', noise: hair(seed, amp, freq) });
   return [
     // ruff: a thick disc behind the face, from the brow over the cheeks to the throat
-    ellipsoid('mane_head', [0, 0.93, 0.73], [0.33, 0.29, 0.15], { rot: [-0.12, 0, 0], ...o(0.07, 31, 0.02, 8) }),
+    ellipsoid('mane_head', [0, 0.93, 0.73], [0.33, 0.29, 0.15], { rot: [-0.12, 0, 0], ...o(0.07, 31, 0.024, 11) }),
     // crown cap between and behind the ears
     ellipsoid('mane_head', [0, 1.11, 0.735], [0.16, 0.105, 0.15], o(0.09, 32, 0.014)),
     // neck mane, its crest rising above the nape
-    ellipsoid('mane_neck', [0, 1.0, 0.565], [0.235, 0.265, 0.255], { rot: [-0.25, 0, 0], ...o(0.1, 33, 0.018) }),
+    ellipsoid('mane_neck', [0, 1.0, 0.565], [0.235, 0.265, 0.255], { rot: [-0.25, 0, 0], ...o(0.1, 33, 0.024, 11) }),
     // shoulder fringe fading into the withers
-    ellipsoid('mane_chest', [0, 0.99, 0.37], [0.22, 0.2, 0.16], o(0.14, 34, 0.014)),
+    ellipsoid('mane_chest', [0, 0.99, 0.37], [0.22, 0.2, 0.16], o(0.14, 34, 0.026, 12)),
     // throat and chest bib hanging between the forelegs
-    ellipsoid('mane_neck', [0, 0.76, 0.63], [0.155, 0.2, 0.15], o(0.1, 35, 0.016)),
-    ellipsoid('mane_chest', [0, 0.64, 0.5], [0.12, 0.17, 0.12], o(0.09, 36, 0.016)),
+    ellipsoid('mane_neck', [0, 0.76, 0.63], [0.155, 0.2, 0.15], o(0.1, 35, 0.022, 12)),
+    ellipsoid('mane_chest', [0, 0.64, 0.5], [0.12, 0.17, 0.12], o(0.09, 36, 0.024, 12)),
+    // chest / belly fringe: a narrow band of longer hair under the chest, between the forelegs
+    ellipsoid('mane_chest', [0, 0.52, 0.17], [0.07, 0.05, 0.21], o(0.08, 37, 0.02, 14)),
   ];
 }
 
@@ -202,8 +206,8 @@ function tailPrims(t: Vec3[]): Prim[] {
 // ---------------------------------------------------------------------------
 // Coat
 
-const TAWNY_BACK = 0x91693c;
-const TAWNY = 0xae8450;
+const TAWNY_BACK = 0x7d5935;
+const TAWNY = 0xa07843;
 const CREAM = 0xc9ab82;
 const NOSE = 0x8e5444;
 const LIP = 0x201814;
@@ -218,10 +222,12 @@ function lionCoat(male: boolean, hs: number, eye: Vec3, eyeR: number) {
     // head-local coordinates (authored at head scale 1, relative to the poll)
     const hx = x / hs, hy = (y - POLL[1]) / hs, hz = (z - POLL[2]) / hs;
     const n = fbm(x * 3, y * 3, z * 3, 3, 4);
-    // countershading: darker along the spine, cream belly / inner legs
-    const back = smooth(0.2, 0.9, c.ny) * smooth(0.7, 0.95, y);
+    // countershading: a darker saddle along the spine, cream belly / inner legs
+    const back = smooth(0.1, 0.85, c.ny) * smooth(0.66, 0.95, y);
     c.color.setHex(TAWNY);
-    blendHex(c.color, TAWNY_BACK, back * 0.7 + n * 0.15);
+    blendHex(c.color, TAWNY_BACK, clamp01(back * 0.9 + n * 0.2));
+    // broad, soft tonal drift through the coat (no flat single-colour flanks)
+    blendHex(c.color, TAWNY_BACK, smooth(0.0, 0.45, fbm(x * 2.4 + 5, y * 2.4, z * 2.4, 2, 6)) * 0.3);
     const hw = clamp01(c.pw('head') + c.pw('muzzle') + c.pw('chin') + c.pw('nose') + c.pw('ear'));
     // (not on the head: pale jaws and cheeks read as a bear's face)
     const under = clamp01(smooth(0.0, -0.7, c.ny) * 0.9 + (Math.abs(x) < 0.1 && y < 0.75 ? 0.3 : 0)) * (1 - hw * 0.8);
@@ -281,6 +287,9 @@ function lionCoat(male: boolean, hs: number, eye: Vec3, eyeR: number) {
     blendHex(c.color, TUFT, smooth(0.15, 0.5, c.pw('tuft')));
     // legs a touch darker than the flanks (they catch a lot of sky light)
     c.color.multiplyScalar(1 - 0.12 * clamp01((c.pw('leg') + c.pw('paw')) * 1.5));
+    // muscle modelling: the grooves around shoulder, elbow and haunch and the
+    // flank under the ribs shade in, so the body doesn't read as smooth plastic
+    if (c.pw('body') + c.pw('belly') + c.pw('neck') > 0.3) c.color.multiplyScalar(1 - 0.5 * c.ao(0.14));
     // paws: slightly darker, dusty
     blendHex(c.color, 0x8a6c46, smooth(0.12, 0.0, y) * 0.4);
     // mane: golden in the ruff framing the face, darkening to brown and
@@ -387,7 +396,7 @@ function design(ctx: DesignContext): CreatureDesign {
     },
     coat: lionCoat(male, headScale, eye, eyeR),
     look: {
-      skin: 'fur', pattern: 'none', roughness: 0.9, sheen: 0.4, grain: male ? 0.009 : 0.007, bump: 0.35, mottle: 0.1,
+      skin: 'fur', pattern: 'none', roughness: 0.9, sheen: 0.4, grain: male ? 0.009 : 0.007, bump: 0.55, mottle: 0.12,
       // cubs: a woollier, greyer-tawny coat
       juvenile: { color: 0xa39071, amount: 0.4, until: 0.65, keep: 0.85 },
     },

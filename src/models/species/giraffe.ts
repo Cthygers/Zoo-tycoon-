@@ -200,21 +200,22 @@ function earPrims(): Prim[] {
 function legPrimsLeft(): Prim[] {
   const f = J.front, h = J.hind;
   return [
-    // front: upper arm in the body, muscular forearm, knobbly knee, slim cannon, fetlock, pastern, hoof
+    // front: upper arm in the body, muscular forearm, knobbly knee, cannon, fetlock, pastern, hoof
+    // (knee and fetlock stand clearly proud of the cannon: thin even stilts read as poles)
     cone('FL_upper', f.upper, f.lower, 0.14, 0.11, { blend: 0.1, part: 'body' }),
     cone('FL_lower', [0.2, 1.9, 0.57], [0.18, 1.03, 0.78], 0.095, 0.058, { blend: 0.05, part: 'leg', region: 'FL' }),
-    ellipsoid('FL_lower', [0.182, 1.0, 0.79], [0.062, 0.078, 0.066], { blend: 0.04, part: 'leg', region: 'FL' }),
-    cone('FL_foot', [0.18, 0.96, 0.79], [0.18, 0.31, 0.8], 0.05, 0.043, { blend: 0.035, part: 'leg', region: 'FL' }),
-    ellipsoid('FL_toe', [0.18, 0.27, 0.805], [0.052, 0.062, 0.058], { blend: 0.03, part: 'leg', region: 'FL' }),
+    ellipsoid('FL_lower', [0.182, 1.0, 0.79], [0.07, 0.086, 0.074], { blend: 0.04, part: 'leg', region: 'FL' }),
+    cone('FL_foot', [0.18, 0.96, 0.79], [0.18, 0.31, 0.8], 0.055, 0.047, { blend: 0.035, part: 'leg', region: 'FL' }),
+    ellipsoid('FL_toe', [0.18, 0.27, 0.805], [0.059, 0.068, 0.065], { blend: 0.03, part: 'leg', region: 'FL' }),
     cone('FL_toe', [0.18, 0.25, 0.81], [0.18, 0.1, 0.845], 0.044, 0.05, { blend: 0.02, part: 'leg', region: 'FL' }),
     cone('FL_toe', [0.18, 0.105, 0.85], [0.18, 0.025, 0.885], 0.055, 0.072, { blend: 0.015, part: 'hoof', region: 'FL' }),
     roundBox('FL_toe', [0.18, -0.08, 0.87], [0.15, 0.08, 0.15], 0.01, { sub: true, blend: 0.01, part: 'hoof', region: 'FL' }),
     // hind: thigh in the body, gaskin, prominent hock, long cannon
     cone('HL_upper', h.upper, h.lower, 0.15, 0.115, { blend: 0.12, part: 'body' }),
     cone('HL_lower', [0.24, 1.88, -0.6], [0.19, 1.15, -0.98], 0.1, 0.06, { blend: 0.05, part: 'leg', region: 'HL' }),
-    ellipsoid('HL_foot', [0.19, 1.12, -1.0], [0.05, 0.075, 0.07], { blend: 0.035, part: 'leg', region: 'HL' }),
-    cone('HL_foot', [0.19, 1.1, -0.98], [0.18, 0.31, -0.94], 0.05, 0.043, { blend: 0.035, part: 'leg', region: 'HL' }),
-    ellipsoid('HL_toe', [0.18, 0.27, -0.935], [0.052, 0.062, 0.058], { blend: 0.03, part: 'leg', region: 'HL' }),
+    ellipsoid('HL_foot', [0.19, 1.12, -1.0], [0.057, 0.083, 0.078], { blend: 0.035, part: 'leg', region: 'HL' }),
+    cone('HL_foot', [0.19, 1.1, -0.98], [0.18, 0.31, -0.94], 0.055, 0.047, { blend: 0.035, part: 'leg', region: 'HL' }),
+    ellipsoid('HL_toe', [0.18, 0.27, -0.935], [0.059, 0.068, 0.065], { blend: 0.03, part: 'leg', region: 'HL' }),
     cone('HL_toe', [0.18, 0.25, -0.93], [0.18, 0.1, -0.895], 0.044, 0.05, { blend: 0.02, part: 'leg', region: 'HL' }),
     cone('HL_toe', [0.18, 0.105, -0.89], [0.18, 0.025, -0.865], 0.055, 0.07, { blend: 0.015, part: 'hoof', region: 'HL' }),
     roundBox('HL_toe', [0.18, -0.08, -0.88], [0.15, 0.08, 0.15], 0.01, { sub: true, blend: 0.01, part: 'hoof', region: 'HL' }),
@@ -244,6 +245,8 @@ const CREAM = 0xe2d3b0;
 const PATCH = 0x6e3b1d;
 const PATCH_BULL = 0x4f2914;
 const TAN = 0xc49a62;
+/** Lower legs: off-white with a little dust, darker than the cream network so they don't glare. */
+const LEG_CREAM = 0xcbb894;
 const HOOF = 0x2b2420;
 const TUFT = 0x15100d;
 
@@ -261,6 +264,7 @@ function giraffeCoat(male: boolean, eye: Vec3) {
     let cell = 0.34;
     cell += (0.3 - cell) * neckK;
     cell += (0.2 - cell) * clamp01(legK * 1.4) * smooth(2.0, 1.2, y);
+    cell += (0.14 - cell) * clamp01(legK * 1.4) * smooth(1.45, 1.05, y);
     cell += (0.16 - cell) * headK;
     const wx = fbm(x * 3.1, y * 3.1, z * 3.1, 2, 72) * 0.32;
     const wy = fbm(x * 3.1 + 11, y * 3.1, z * 3.1, 2, 73) * 0.32;
@@ -287,10 +291,10 @@ function giraffeCoat(male: boolean, eye: Vec3) {
     // pale belly, inner legs
     const under = smooth(-0.2, -0.85, c.ny) * smooth(2.4, 2.0, y);
     blendHex(c.color, TAN, under * 0.6);
-    // legs: patches fade out below knees / hocks to plain cream
-    const low = smooth(1.35, 0.85, y);
-    blendHex(c.color, CREAM, low * 0.92);
-    blendHex(c.color2, 0xd8c8a4, low);
+    // legs: patches reach the knees / hocks, then fade to a dusty cream
+    const low = smooth(1.02, 0.62, y);
+    blendHex(c.color, LEG_CREAM, low * 0.92);
+    blendHex(c.color2, LEG_CREAM, low);
     c.w *= 1 - low;
     // face: tan with small patches, pale muzzle, darker brow line
     if (headK > 0.2) {

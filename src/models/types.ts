@@ -103,6 +103,11 @@ export interface CoatSample {
   gloss: number;
   /** Fur strand length multiplier for the micro-normal (1 = look.grain; manes ≈ 3–4). */
   fur: number;
+  /**
+   * 'wrinkled' skin: depth 0..1 of the deep skin folds that run across the
+   * part (legs, trunk, neck; 0 = fine creases only). Ignored where fur > 1.
+   */
+  fold: number;
 }
 
 export type CoatFn = (c: CoatSample) => void;

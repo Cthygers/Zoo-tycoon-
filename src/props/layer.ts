@@ -42,7 +42,7 @@ import { autoLod } from './lod/autolod';
 import { applyFade, fadeModeOf, fadeUniforms, updateFade } from './lod/fade';
 import { propsTier, type PropsTier } from './lod/tiers';
 import { concreteMaterial, disposePropMaterials, projectBoxUVs, surfaceTextures } from './materials';
-import { atlasSteps, disposeNatureResources, paintAtlasesOffThread, withQuality } from './nature';
+import { atlasSteps, disposeNatureResources, paintAtlasesOffThread, setNatureNight, withQuality } from './nature';
 import { PROP_SPECS, type PropSpec } from './registry';
 import { disposeStructures } from './structures';
 import { applyWind, cloneWithHooks, disposeWind, hasSway, setupWindMesh, updateWind } from './wind';
@@ -437,7 +437,7 @@ export class PropsLayer implements IPropsLayer {
     const fade = this.fadeMats.has(m) ? null : fadeModeOf(m);
     if (fade) {
       applyFade(m, fade);
-      // MSAA tiers: the fade resolves as translucency instead of a dither
+      // MSAA tiers: alpha to coverage anti-aliases the leaf cut-outs (the near-camera fade itself is all or nothing, lod/fade.ts)
       m.alphaToCoverage = this.quality.antialias;
       this.fadeMats.add(m);
     }
@@ -794,6 +794,8 @@ export class PropsLayer implements IPropsLayer {
     // lamps / windows
     if (Math.abs(nightFactor - this.nightLevel) > 0.001) {
       this.nightLevel = nightFactor;
+      // moonlit crowns: no light through the leaves, no silvery sheen (nature/mats.ts)
+      setNatureNight(nightFactor);
       for (const m of this.nightMats) m.emissiveIntensity = nightFactor * this.glowOf(m.userData.nightEmissive as number);
     }
 

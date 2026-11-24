@@ -17,31 +17,31 @@ function fragment(material: THREE.Material): string {
   return shader.fragmentShader;
 }
 
-/** The rim is applied to the lit colour after lighting and before the colour is written. */
-function expectRim(fs: string, amount: string): void {
+/** The rim (`call`) is applied to the lit colour after lighting and before the colour is written. */
+function expectRim(fs: string, call: string): void {
   expect(fs).toContain('vec3 crHighlight(');
-  const at = fs.indexOf(`outgoingLight = crHighlightOf(outgoingLight, ${amount});`);
+  const at = fs.indexOf(`outgoingLight = ${call};`);
   expect(at).toBeGreaterThan(fs.indexOf('#include <lights_fragment_end>'));
   expect(at).toBeLessThan(fs.lastIndexOf('#include <opaque_fragment>'));
   expect(fs).not.toMatch(/totalEmissiveRadiance \+=/);
 }
 
 describe('creature selection highlight', () => {
-  it('batched animals: rim from the look texel, before the underwater shading', () => {
+  it('batched animals: rim from the look texel, dimmed on long hair, before the underwater shading', () => {
     const fs = fragment(batchedAnimalMaterials({ skin: 'fur' }, 1).material);
-    expectRim(fs, 'vCrLook0.x');
+    expectRim(fs, 'crHighlightFurOf(outgoingLight, vCrLook0.x, vPattern.w)');
     // submerged parts do not glow
-    expect(fs.indexOf('crHighlightOf(outgoingLight')).toBeLessThan(fs.indexOf('float crWd ='));
+    expect(fs.indexOf('crHighlightFurOf(outgoingLight')).toBeLessThan(fs.indexOf('float crWd ='));
   });
 
   it('batched people: rim from the look texel', () => {
-    expectRim(fragment(createHumanBatchMaterial(1, [MARKS]).material), 'vHm5.w');
+    expectRim(fragment(createHumanBatchMaterial(1, [MARKS]).material), 'crHighlightOf(outgoingLight, vHm5.w)');
   });
 
   it('standalone highlight materials use the rim, not the emissive colour', () => {
     const animal = createAnimalMaterial({ look: { skin: 'fur' }, detail: 1, highlight: true });
     expect(animal.emissive.getHex()).toBe(0);
-    expectRim(fragment(animal), 'uHighlight');
+    expectRim(fragment(animal), 'crHighlightFurOf(outgoingLight, uHighlight, vPattern.w)');
     expect(fragment(createAnimalMaterial({ look: { skin: 'fur' }, detail: 1 }))).toContain('#define CR_HIGHLIGHT 0');
     const person = createHumanMaterial(
       { skin: 0xc08060, hair: 0x302010, shirt: 0x4060a0, pants: 0x303030, shoes: 0x202020, hat: 0x000000 },
@@ -50,7 +50,7 @@ describe('creature selection highlight', () => {
       1,
     );
     expect(person.emissive.getHex()).toBe(0);
-    expectRim(fragment(person), 'uHighlight');
+    expectRim(fragment(person), 'crHighlightOf(outgoingLight, uHighlight)');
   });
 });
 
@@ -60,6 +60,13 @@ describe('selection rim brightness', () => {
     expect(fs).toContain('#if NUM_DIR_LIGHTS > 0');
     expect(fs).toMatch(/#define crKeyLevel\(\) \(directionalLights\[0\]\.color \* saturate/);
     expect(fs).toContain('irradiance + iblIrradiance + 0.6 * crKeyLevel()');
+  });
+
+  it('is dimmed on manes (long strands), full elsewhere', () => {
+    const fs = fragment(batchedAnimalMaterials({ skin: 'fur' }, 1).material);
+    expect(fs).toContain('rim *= rim * rimK;');
+    expect(fs).toMatch(/#define crHighlightOf\(light, h\) crHighlight\([^\n]*, 1\.0\)\n/);
+    expect(fs).toContain('1.0 / (1.0 + 2.5 * max(fur, 0.0))');
   });
 });
 

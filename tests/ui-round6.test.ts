@@ -46,19 +46,20 @@ describe('confirm before serious outcomes', () => {
 });
 
 describe('guest capacity', () => {
-  it('shows guests in the zoo of how many fit, full once no party gets in', () => {
-    expect(guestChip({ guestsInZoo: 110, guestCapacity: 141 })).toEqual({ count: '110', cap: '/141', full: false, label: 'Guests in the zoo: 110 of 141' });
-    expect(guestChip({ guestsInZoo: 138, guestCapacity: 141 }).full).toBe(true); // a party of 4 no longer fits
-    expect(guestChip({ guestsInZoo: 138, guestCapacity: 141 }).label).toBe('Guests in the zoo: 138 of 141 (full)');
+  it('shows guests in the zoo of how many fit, full once the sim turns parties away', () => {
+    expect(guestChip({ guestsInZoo: 110, guestCapacity: 141, full: false })).toEqual({ count: '110', cap: '/141', full: false, label: 'Guests in the zoo: 110 of 141' });
+    expect(guestChip({ guestsInZoo: 138, guestCapacity: 141, full: true }).full).toBe(true);
+    expect(guestChip({ guestsInZoo: 138, guestCapacity: 141, full: true }).label).toBe('Guests in the zoo: 138 of 141 (full)');
   });
 });
 
 describe('habitat room', () => {
   it('says plainly when a habitat is crowded and how much room it needs', () => {
-    expect(roomText(1, 30)).toEqual({ text: 'Enough room', kind: 'good' });
-    expect(roomText(30 / 34, 30)).toEqual({ text: 'A bit crowded — needs 34 tiles', kind: 'warn' });
-    expect(roomText(30 / 80, 30)).toEqual({ text: 'Too crowded — needs 80 tiles', kind: 'bad' }); // 16 zebras: stress and sickness
-    expect(roomText(30 / 320, 30).text).toBe('Too crowded — needs 320 tiles');
+    expect(roomText(null, 30)).toEqual({ text: 'Enough room', kind: 'good' });
+    expect(roomText({ space: 1, crowded: 'no' }, 30)).toEqual({ text: 'Enough room', kind: 'good' });
+    expect(roomText({ space: 30 / 34, crowded: 'mild' }, 30)).toEqual({ text: 'A bit crowded — needs 34 tiles', kind: 'warn' });
+    expect(roomText({ space: 30 / 80, crowded: 'severe' }, 30)).toEqual({ text: 'Too crowded — needs 80 tiles', kind: 'bad' }); // 16 zebras: stress and sickness
+    expect(roomText({ space: 30 / 320, crowded: 'severe' }, 30).text).toBe('Too crowded — needs 320 tiles');
   });
 });
 

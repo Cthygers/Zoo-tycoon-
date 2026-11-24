@@ -61,6 +61,9 @@ export const SELL_FRACTION = 0.5;
 /** An adoption or move that packs a habitat past this many times what it holds asks first. */
 const MAX_CROWDING = 1.5;
 
+/** Sentence case for warnings joined from parts (and a part that goes after a "; "). */
+const capital = (t: string) => t[0].toUpperCase() + t.slice(1);
+const uncapital = (t: string) => t[0].toLowerCase() + t.slice(1);
 
 export class Commands {
   /** Wall-clock throttle for failure toasts while dragging tools. */
@@ -812,13 +815,18 @@ export class Commands {
     const spot = this.animalSpot(sp, wx, wz, null);
     if (spot.why) return this.result(false, sp.cost, spot.why, dryRun, at);
     if (!sim.canAfford(sp.cost)) return this.result(false, sp.cost, this.noMoney(sp.cost), dryRun, at);
-    const extra = spot.confirm ? { severity: 'confirm' as const } : undefined;
+    const extra = this.spotExtra(spot);
     if (dryRun) return this.result(true, sp.cost, undefined, true, at, spot.warning, extra);
     const a = sim.animalSys.create(speciesId, wx, wz, { adult: true, sex: this.adoptSex(sp, w.habitatOf[w.idx(Math.floor(wx / TILE), Math.floor(wz / TILE))]) });
     sim.spend('animalPurchases', sp.cost);
     sim.events.emit('animalAdded', { id: a.id });
     sim.markPopulationDirty();
     return this.result(true, sp.cost, undefined, false, at, spot.warning, extra);
+  }
+
+  /** An animal spot that asks first: the result's severity, with the short warning for the confirm bar. */
+  private spotExtra(spot: { short?: string; confirm?: boolean }): Partial<CommandResult> | undefined {
+    return spot.confirm ? { severity: 'confirm', shortWarning: spot.short } : undefined;
   }
 
   /** Zoos pair animals up: a newcomer is of the sex its species is short of in that habitat. */
@@ -837,7 +845,7 @@ export class Commands {
    * Can an animal of `sp` be put down at (wx, wz)? `why` = it can't; `warning` = it can, but
    * the habitat is risky or poor for it. `mover` is the animal being moved (null = a new one).
    */
-  private animalSpot(sp: SpeciesDef, wx: number, wz: number, mover: AnimalState | null): { why?: string; warning?: string; confirm?: boolean } {
+  private animalSpot(sp: SpeciesDef, wx: number, wz: number, mover: AnimalState | null): { why?: string; warning?: string; short?: string; confirm?: boolean } {
     const sim = this.sim;
     const w = sim.world;
     const t = w.tileOfWorld(wx, wz);
@@ -850,31 +858,43 @@ export class Commands {
     }
     if (w.isTileSolid(t.x, t.z)) return { why: 'Something is in the way — pick an open spot' };
     if (w.getTerrain(t.x, t.z) === Terrain.DeepWater && !sp.swims) return { why: `${sp.name}s can’t swim — place it on land` };
+    // each problem in full (dialogs, toasts) and short (the confirm bar of an adoption that asks first)
     const warn: string[] = [];
+    const short: string[] = [];
     const weakFence = hab.minFenceStrength < sp.danger;
-    if (weakFence) warn.push(`the fence is too weak for a ${sp.name} — use ${fenceAdvice(sp.danger)}`);
+    if (weakFence) {
+      warn.push(`the fence is too weak for a ${sp.name} — use ${fenceAdvice(sp.danger)}`);
+      short.push('fence too weak');
+    }
     // an animal moved within its own habitat is already part of the population
     const adding = !mover || mover.habitatId !== hab.id;
     const ev = evaluateSpecies(w, hab, sp, sim.population(hab.id), sim.keeperCount(), adding);
+    // " (30 tiles, needs 80) — the animals get stressed…" from the habitat's crowding issue, and without its tail
+    const crowdIssue = ev.issues.find((i) => i.startsWith('Too crowded'));
+    const room = crowdIssue ? ` ${crowdIssue.slice('Too crowded '.length)}` : '';
+    const roomShort = room.replace(/ — .*$/, '');
     // past ~150% of what the habitat holds: worth asking before doing it
     const packed = adding && ev.space < 1 / MAX_CROWDING;
-    if (ev.compat < 0.5) warn.push(ev.issues.find((i) => i.includes('predators')) ?? 'it does not get along with the other animals here');
-    else if (packed) {
-      const crowded = ev.issues.find((i) => i.startsWith('Too crowded'));
-      warn.push(`it would be far too crowded here${crowded ? ` ${crowded.slice('Too crowded '.length)}` : ''}`);
+    if (ev.compat < 0.5) {
+      const issue = ev.issues.find((i) => i.includes('predators'));
+      warn.push(issue ?? 'it does not get along with the other animals here');
+      short.push(issue ? uncapital(issue.replace(/ — .*$/, '')) : 'does not get along with the others');
+    } else if (packed) {
+      warn.push(`it would be far too crowded here${room}`);
+      short.push(`far too crowded${roomShort}`);
     } else if (ev.score < 0.45) {
       // the fence advice is already given above: name the next problem instead of repeating it
       const issue = ev.issues.find((i) => !(weakFence && i.startsWith('Fence too weak')));
-      warn.push(`this habitat suits it poorly (${Math.round(ev.score * 100)}%)${issue ? `: ${issue}` : ''}`);
-    }
-    else if (adding && ev.space < 0.95) {
-      const crowded = ev.issues.find((i) => i.startsWith('Too crowded'));
-      warn.push(`it would be too crowded here${crowded ? ` ${crowded.slice('Too crowded '.length)}` : ''}`);
+      const pct = Math.round(ev.score * 100);
+      warn.push(`this habitat suits it poorly (${pct}%)${issue ? `: ${issue}` : ''}`);
+      short.push(`suits it poorly (${pct}%)`);
+    } else if (adding && ev.crowded !== 'no') {
+      warn.push(`it would be too crowded here${room}`);
+      short.push(`too crowded${roomShort}`);
     }
     if (!warn.length) return {};
-    const text = warn.join('; ');
-    const warning = text[0].toUpperCase() + text.slice(1);
-    return packed ? { warning, confirm: true } : { warning };
+    const spot = { warning: capital(warn.join('; ')), short: capital(short.join('; ')) };
+    return packed ? { ...spot, confirm: true } : spot;
   }
 
   /** Carry an animal to a spot inside a habitat (its own or another one), free of charge. */
@@ -889,7 +909,7 @@ export class Commands {
     if (a.escaped) return this.result(false, 0, `${a.name} is on the loose — a keeper or vet has to catch it first`, dryRun, at);
     const spot = this.animalSpot(sp, wx, wz, a);
     if (spot.why) return this.result(false, 0, spot.why, dryRun, at);
-    const extra = spot.confirm ? { severity: 'confirm' as const } : undefined;
+    const extra = this.spotExtra(spot);
     if (dryRun) return this.result(true, 0, undefined, true, at, spot.warning, extra);
     sim.animalSys.relocate(a, wx, wz);
     return this.result(true, 0, undefined, false, at, spot.warning, extra);

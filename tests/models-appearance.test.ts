@@ -1,0 +1,108 @@
+// Guest outfits read as clothes (no skin-coloured or all-pale figures) and the
+// outfit rules draw nothing from the shared sim RNG, so seeded sims are unchanged;
+// the guest walk keeps a natural step; pachyderm skin folds sit on legs and trunks.
+import { describe, expect, it } from 'vitest';
+import * as THREE from 'three';
+import { fitOutfit, hexToLab, looksLikeSkin, randomGuestAppearance } from '../src/sim/names';
+import { SimRng } from '../src/sim/rng';
+import { CreatureFactory } from '../src/models';
+import { assetFromDesign } from '../src/models/assets';
+import { SPECIES_MODELS } from '../src/models/species';
+import { SPECIES_BY_ID } from '../src/data/species';
+import type { QualitySettings } from '../src/core/contracts';
+
+const L = (hex: number) => hexToLab(hex)[0];
+
+describe('guest outfits', () => {
+  it('never pass for skin, separate top from bottom, and keep pale tops off pale-haired women', () => {
+    const rng = new SimRng(11);
+    for (let i = 0; i < 3000; i++) {
+      const a = randomGuestAppearance(rng, i % 4 === 0);
+      expect(looksLikeSkin(a.shirt, a.skin)).toBe(false);
+      expect(looksLikeSkin(a.pants, a.skin)).toBe(false);
+      expect(Math.abs(L(a.shirt) - L(a.pants))).toBeGreaterThanOrEqual(18);
+      if (a.female && L(a.hair) > 45) expect(L(a.shirt)).toBeLessThanOrEqual(80);
+    }
+  });
+
+  it('flags the reported look-alikes: tan dress on tan skin, cream top on pale skin', () => {
+    expect(looksLikeSkin(0x9b6b43, 0xb98260)).toBe(true);
+    expect(looksLikeSkin(0xe6e1d3, 0xf3d5c0)).toBe(true);
+    expect(looksLikeSkin(0x2c3e5c, 0xb98260)).toBe(false);
+  });
+
+  it('uses exactly the draws of the plain palette picks (10 for a child, 16 for an adult)', () => {
+    // mulberry32 advances its state by a fixed step per float
+    for (const [child, draws] of [[true, 10], [false, 16]] as const) {
+      for (let seed = 1; seed < 40; seed++) {
+        const rng = new SimRng(seed * 7919);
+        const s0 = rng.state;
+        randomGuestAppearance(rng, child);
+        expect(rng.state).toBe((s0 + draws * 0x6d2b79f5) >>> 0);
+      }
+    }
+  });
+
+  it('re-fits a companion that takes on the party leader’s skin', () => {
+    const app = { skin: 0x2c3e5c, hair: 0x16110e, shirt: 0x2f3e55, pants: 0x9a8f7c, shoes: 0x222222, hairStyle: 0 as const, height: 1.7, build: 1, child: false, female: false };
+    app.skin = 0xb98260;
+    app.shirt = 0x9b6b43; // tan on tan
+    fitOutfit(app);
+    expect(looksLikeSkin(app.shirt, app.skin)).toBe(false);
+    expect(Math.abs(L(app.shirt) - L(app.pants))).toBeGreaterThanOrEqual(18);
+  });
+
+  it('leaves colours outside the guest palettes (staff uniforms) alone', () => {
+    const app = { skin: 0xe9c2a2, hair: 0xb8b2a8, shirt: 0xe4e8ea, pants: 0x3d6f78, shoes: 0xe8e6e1, hairStyle: 1 as const, height: 1.65, build: 1, child: false, female: true };
+    fitOutfit(app);
+    expect(app.shirt).toBe(0xe4e8ea);
+    expect(app.pants).toBe(0x3d6f78);
+  });
+});
+
+const QUALITY: QualitySettings = { level: 'low', pixelRatio: 1, antialias: false, shadows: false, shadowMapSize: 1024, grassDensity: 0, postFX: false, detailDistance: 40, creatureDetail: 0 };
+
+describe('guest walk', () => {
+  it('caps the step at about 0.42 × height and folds the swing knee ≈ 55–60°', () => {
+    const f = new CreatureFactory(QUALITY);
+    const h = f.createHuman({ skin: 0xc68e6a, hair: 0x332211, shirt: 0x335577, pants: 0x222222, shoes: 0x111111, hairStyle: 0, height: 1.77, build: 1, child: false, female: false }, 'guest', 3);
+    const m = h as unknown as { rt: { fk(p: unknown): void; wp: THREE.Vector3[]; def: { names: string[] } }; out: unknown };
+    const id = (n: string) => m.rt.def.names.indexOf(n);
+    const [hip, knee, ankle, ankleR] = ['thigh.L', 'shin.L', 'foot.L', 'foot.R'].map(id);
+    for (const speed of [1.27, 2.2]) {
+      let maxFlex = 0, maxGap = 0;
+      for (let k = 0; k < 360; k++) {
+        h.update(1 / 60, { action: 'walk', speed });
+        if (k < 120) continue;
+        m.rt.fk(m.out);
+        const w = m.rt.wp;
+        const flex = w[knee].clone().sub(w[hip]).angleTo(w[ankle].clone().sub(w[knee]));
+        maxFlex = Math.max(maxFlex, flex);
+        maxGap = Math.max(maxGap, Math.abs(w[ankle].z - w[ankleR].z));
+      }
+      expect(maxGap / h.height).toBeLessThan(0.42);
+      expect(maxFlex * (180 / Math.PI)).toBeGreaterThan(50);
+      expect(maxFlex * (180 / Math.PI)).toBeLessThan(65);
+    }
+    h.dispose();
+  });
+});
+
+describe('pachyderm skin folds', () => {
+  it('bakes deep folds on the legs and trunk, a faint network on the body, none on the tusks', () => {
+    const design = SPECIES_MODELS.elephant.design({ def: SPECIES_BY_ID.elephant, sex: 'M', detail: 0 });
+    const geo = assetFromDesign('elephant-folds', design, 0).geometry;
+    const pos = geo.getAttribute('position');
+    const pat = geo.getAttribute('pattern');
+    let lowLeg = 0, lowLegN = 0, back = 0, backN = 0, glossyFolds = 0;
+    for (let i = 0; i < pos.count; i++) {
+      const fold = Math.max(-pat.getW(i), 0);
+      if (pos.getY(i) < 0.8 && Math.abs(pos.getZ(i)) < 1.2) { lowLeg += fold; lowLegN++; }
+      if (pos.getY(i) > 2.9 && Math.abs(pos.getX(i)) < 0.3) { back += fold; backN++; }
+      if (pat.getZ(i) > 0.3 && fold > 0) glossyFolds++;
+    }
+    expect(lowLeg / lowLegN).toBeGreaterThan(0.8);
+    expect(back / backN).toBeCloseTo(0.3, 1);
+    expect(glossyFolds).toBe(0);
+  });
+});

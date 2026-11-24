@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { Noise, Rng } from '../../core/rng';
 import { atlas, type AtlasKind, cellUV, leafMaterial } from './atlases';
 import { barkMat, type BarkKind, BARK_U, BARK_V } from './barks';
-import { addRibbon, addTube, CardSet, ellipsoidNormal, type Ellipsoid, groupOf, MeshData, v3, type V3 } from './geo';
+import { addCrownFade, addRibbon, addTube, CardSet, ellipsoidNormal, type Ellipsoid, groupOf, MeshData, v3, type V3 } from './geo';
 import { detail, natureQuality } from './mats';
 import { sstep } from './tex';
 import { crownOf, growTree, leafAO, meshBark, placeLeaves, type Branch, type Skeleton, type TreeSpec } from './treegen';
@@ -87,6 +87,7 @@ function fullTree(p: TreeParts): THREE.Group {
     [bark, barkMat(p.bark, opts.barkSway), 'bark'],
     [leaves, leafMat(p, opts), 'leaves'],
   ]);
+  addCrownFade(g, crown);
   p.crown = crown;
   p.fullTris = bark.tris + leaves.tris;
   p.fullCards = cards.length;
@@ -124,6 +125,7 @@ function lodTree(p: TreeParts): THREE.Group {
     [bark, barkMat(p.bark, opts.barkSway), 'bark'],
     [leaves, leafMat(p, opts), 'leaves'],
   ]);
+  addCrownFade(g, crown);
   g.userData.tris = bark.tris + leaves.tris;
   return g;
 }
@@ -639,6 +641,7 @@ function palm(variant: number, lod: boolean): THREE.Group {
     [bark, barkMat('palm', 0.004), 'bark'],
     [fronds, leafMaterial('trees'), 'leaves'],
   ]);
+  addCrownFade(g, crown);
   g.userData.tris = bark.tris + fronds.tris;
   return g;
 }
@@ -754,6 +757,7 @@ function bamboo(variant: number, lod: boolean): THREE.Group {
     [canes, barkMat('bamboo', 0.012), 'canes'],
     [leaves, leafMaterial('trees'), 'leaves'],
   ]);
+  addCrownFade(g, crown);
   g.userData.tris = canes.tris + leaves.tris;
   return g;
 }

@@ -6,8 +6,12 @@
 // same tessellation as the terrain), soft shoreline foam and premultiplied-alpha
 // compositing so the reflection is not dimmed by transparency. Per-channel
 // absorption of the lake bed itself happens in the ground shader, so the
-// surface only veils what is below lightly at the shore (the bed and wading
-// legs stay visible) and strongly over the middle of ponds and deep pools.
+// surface only veils what is below lightly at the shore (the bed stays
+// visible) and strongly over the middle of ponds and deep pools. The visible
+// waterline is bent by noise off the terrain's straight-edged contour, with
+// the sheen building up over the first centimetres (no hard bright rim), and
+// depth-only murk layers under the surface hide whatever stands deeper than
+// ~20 cm (wading legs fade out instead of showing as dark shapes).
 
 import * as THREE from 'three';
 import { MAP_H, MAP_W, TILE, WATER_LEVEL } from '../core/constants';
@@ -16,6 +20,38 @@ import type { World } from '../core/world';
 import { nearWater } from './terrain';
 
 const CX = MAP_W + 1;
+
+/**
+ * GLSL: depth below the water plane (m) where open water starts. The terrain
+ * meets the flat water plane along a straight-edged contour (bilinear tiles,
+ * fan tessellation); noise at ~1.4 m and ~0.6 m bends the visible waterline
+ * away from it. The ground shader's wet bank calls it with the same noise
+ * samples (uNoise at 0.087 and 0.41 per metre), so bank and water agree.
+ */
+export const SHORE_OFFSET_GLSL = /* glsl */ `
+float shoreOffset(vec4 nB, vec4 nC) {
+  return max(0.0, 0.06 + (nB.g - 0.5) * 0.2 + (nC.r - 0.5) * 0.06);
+}
+`;
+
+/**
+ * Murk layers: [depth below the surface (m), share of MSAA samples hidden].
+ * Depth-only copies of the surface, drawn after the ground (terrain.ts and
+ * outer.ts draw it at renderOrder -2) and before everything that stands in
+ * the water (creatures, props: 0). Whatever lies deeper than a layer is
+ * hidden behind it, so a wading leg fades out within ~20 cm the way it does
+ * in a murky pond, instead of showing as a dark shape the veil cannot match
+ * (the surface only knows how deep the bed is, not the leg). With MSAA each
+ * layer covers its share of the samples (alpha to coverage): a four-step fade.
+ * Without MSAA one layer (MURK_SINGLE) cuts at ~9 cm.
+ */
+const MURK_LAYERS: readonly (readonly [number, number])[] = [
+  [0.04, 0.25],
+  [0.09, 0.5],
+  [0.15, 0.75],
+  [0.22, 1],
+];
+const MURK_SINGLE = 1;
 
 export interface WaterUniforms {
   [k: string]: THREE.IUniform;
@@ -33,6 +69,8 @@ export class WaterSurface {
   readonly uniforms: WaterUniforms;
   private geo = new THREE.BufferGeometry();
   private material: THREE.MeshPhysicalMaterial;
+  private murk: THREE.Mesh[] = [];
+  private murkMsaa: boolean | null = null;
   private vmap = new Int32Array(CX * (MAP_H + 1));
 
   constructor(
@@ -83,12 +121,15 @@ export class WaterSurface {
           uniform vec3 uBank;
           varying float vDepth;
           varying vec3 vWPos;
-          vec3 wGlintN;`,
+          vec3 wGlintN;
+          ${SHORE_OFFSET_GLSL}`,
         )
         .replace(
           '#include <map_fragment>',
           `float wDepth = vDepth;
-          if (wDepth < -0.02) discard;
+          // depth past the (noisy) waterline: the water fades in over its first cm
+          float wEdge = wDepth - shoreOffset(texture2D(uNoise, vWPos.xz * 0.087), texture2D(uNoise, vWPos.xz * 0.41));
+          if (wEdge <= 0.0) discard;
           vec3 wV = normalize(cameraPosition - vWPos);
           float wDist = length(cameraPosition - vWPos);
           // seen from afar, sub-pixel ripples tilt many facets toward the
@@ -105,9 +146,9 @@ export class WaterSurface {
           // shoreline foam: thin, broken, slowly pulsing
           float fn = texture2D(uNoise, vWPos.xz * 0.6 + vec2(uTime * 0.02, -uTime * 0.015)).b;
           float fn2 = texture2D(uNoise, vWPos.xz * 1.9 - vec2(uTime * 0.03, uTime * 0.01)).g;
-          float shore = 1.0 - smoothstep(0.0, 0.025 + 0.035 * fn, wDepth);
+          float shore = 1.0 - smoothstep(0.0, 0.025 + 0.035 * fn, wEdge);
           float foam = shore * smoothstep(0.5, 0.7, fn2 * 0.6 + fn * 0.4 + 0.1 * sin(uTime * 0.8 + vWPos.x * 0.7)) * 0.45;
-          foam = max(foam, (1.0 - smoothstep(0.0, 0.01, wDepth)) * 0.25 * fn2);
+          foam = max(foam, (1.0 - smoothstep(0.0, 0.01, wEdge)) * 0.25 * fn2);
           diffuseColor.rgb = mix(mix(uShallow, uDeep, smoothstep(0.6, 2.4, pathLen)), vec3(0.42, 0.43, 0.41), foam);`,
         )
         .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = mix(mix(roughness, 0.22, wFar), 0.55, foam);')
@@ -144,8 +185,11 @@ export class WaterSurface {
             // reflectance floor: ripples always tilt some facets toward the
             // brighter low sky, so even steep views keep a sky / cloud sheen
             float Fs = 0.02 + 0.98 * pow(1.0 - NdV, 5.0);
-            float F = max(Fs, mix(0.065, 0.1, wFar));
-            vec3 wSpec = reflectedLight.directSpecular + reflectedLight.indirectSpecular * (F / Fs);
+            // a film of water a few cm deep mirrors little: the sheen builds up
+            // over the first ~15 cm instead of ending in a bright hard line
+            float wSheen = smoothstep(0.0, 0.15, wEdge);
+            float F = max(Fs, mix(0.065, 0.1, wFar)) * wSheen;
+            vec3 wSpec = (reflectedLight.directSpecular + reflectedLight.indirectSpecular * (F / Fs)) * wSheen;
             #if NUM_DIR_LIGHTS > 0
             {
               // sun glitter: the last directional light of the lighting loop
@@ -159,8 +203,7 @@ export class WaterSurface {
             float a = clamp(max(absorb, foam), 0.0, 1.0);
             float alpha = a + (1.0 - a) * F;
             gl_FragColor = vec4(wDiff * a * (1.0 - F) + wSpec * (1.0 - foam * 0.7), alpha);
-            gl_FragColor.a *= smoothstep(-0.02, 0.005, wDepth);
-            gl_FragColor.rgb *= smoothstep(-0.02, 0.005, wDepth);
+            gl_FragColor *= smoothstep(0.0, 0.05, wEdge);
           }`,
         )
         .replace(
@@ -182,6 +225,24 @@ export class WaterSurface {
     this.mesh.receiveShadow = true;
     this.mesh.castShadow = false;
     this.mesh.renderOrder = 10;
+    for (const [depth, share] of MURK_LAYERS) {
+      const mm = new THREE.MeshBasicMaterial({ colorWrite: false, opacity: share, alphaToCoverage: true });
+      mm.name = 'water-murk';
+      const layer = new THREE.Mesh(this.geo, mm);
+      layer.name = 'water-murk';
+      layer.position.y = -depth;
+      layer.renderOrder = -1;
+      layer.raycast = () => {};
+      this.murk.push(layer);
+      this.mesh.add(layer);
+    }
+    // the canvas / post target has MSAA or not for the renderer's lifetime
+    this.mesh.onBeforeRender = (renderer) => {
+      const msaa = !!renderer.getContextAttributes()?.antialias;
+      if (msaa === this.murkMsaa) return;
+      this.murkMsaa = msaa;
+      this.murk.forEach((m, i) => (m.visible = msaa || i === MURK_SINGLE));
+    };
     this.rebuild();
   }
 
@@ -240,6 +301,7 @@ export class WaterSurface {
     g.computeBoundingSphere();
     this.geo = g;
     this.mesh.geometry = g;
+    for (const m of this.murk) m.geometry = g;
     this.mesh.visible = idx.length > 0;
   }
 
@@ -307,5 +369,6 @@ export class WaterSurface {
   dispose(): void {
     this.geo.dispose();
     this.material.dispose();
+    for (const m of this.murk) (m.material as THREE.Material).dispose();
   }
 }

@@ -332,6 +332,9 @@ interface Popup {
 
 const _v = new THREE.Vector3();
 const POPUP_LIFE = 1.7;
+/** A money popup is invisible this close (px, centre to edge) to the top bar, and fades in over the next POPUP_FADE px. */
+const POPUP_CLEAR = 14;
+const POPUP_FADE = 26;
 
 /** Pooled floating money labels anchored to world positions. */
 export class MoneyPopups {
@@ -362,7 +365,8 @@ export class MoneyPopups {
     p.el.style.display = 'block';
   }
 
-  update(dt: number, width: number, height: number): void {
+  /** `top`: bottom edge (px) of the top bar; a popup rising towards it fades out first. */
+  update(dt: number, width: number, height: number, top = 0): void {
     if (!this.activeCount) return;
     for (const p of this.pool) {
       if (!p.active) continue;
@@ -381,7 +385,9 @@ export class MoneyPopups {
       const sx = (_v.x * 0.5 + 0.5) * width;
       const sy = (1 - (_v.y * 0.5 + 0.5)) * height;
       const t = p.age / POPUP_LIFE;
-      const a = t < 0.15 ? t / 0.15 : t > 0.65 ? 1 - (t - 0.65) / 0.35 : 1;
+      // gone before its text (about ±10 px around sy) reaches the top bar's chips
+      const clear = Math.max(0, Math.min(1, (sy - top - POPUP_CLEAR) / POPUP_FADE));
+      const a = (t < 0.15 ? t / 0.15 : t > 0.65 ? 1 - (t - 0.65) / 0.35 : 1) * clear;
       const s = 0.85 + Math.min(1, p.age * 6) * 0.15;
       p.el.style.opacity = a.toFixed(3);
       p.el.style.transform = `translate3d(${sx.toFixed(1)}px, ${sy.toFixed(1)}px, 0) translate(-50%, -50%) scale(${s.toFixed(3)})`;

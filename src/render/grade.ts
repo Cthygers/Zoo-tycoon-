@@ -1,7 +1,8 @@
 // Global shader-chunk patches owned by the renderer:
 //
 //  - CustomToneMapping: a colour grade folded into the tone-mapping curve so
-//    every tier gets it for free (no extra full-screen pass): mesopic /
+//    every tier gets it for free (no extra full-screen pass): a little
+//    daylight veiling glare (DAY_FLARE), mesopic /
 //    scotopic vision when the view is dark-adapted (high exposure → dim
 //    parts lose colour and shift blue, reds darken — the Purkinje effect;
 //    bright lamp-lit parts keep their colour), a touch of daylight
@@ -17,7 +18,9 @@
 //    and the OutputPass hands the excess to the grade (whLampLit, see
 //    readLampMark), which drops the Purkinje shift there. Materials that
 //    tone-map themselves (low / medium) leave whLampLit at 0; their pools
-//    blend after the grade, in display space.
+//    blend after the grade, in display space. Lamp-lit creatures and people
+//    (props/lights/lampField.ts) set whLampLit themselves (WH_LAMP_LIT marks
+//    the grade being present) or, on the post-FX tier, mark the alpha too.
 //  - Directional shadow fade: shadows fade out over the outer few percent of
 //    the (camera-fitted) shadow frustum instead of ending in a hard line.
 //
@@ -29,10 +32,21 @@ import * as THREE from 'three';
 
 /** Exposure at which mesopic desaturation starts / is complete. */
 export const MESOPIC_EXPOSURE = [4.5, 10.0] as const;
+/**
+ * Veiling glare in daylight (displayed units, ≈ 3 % of sunlit ground): lens
+ * and eye scatter lift the deepest shade a little, where ACES's toe would
+ * otherwise crush dark lawn and coats in shadow to black. Fades out over
+ * FLARE_EXPOSURE (golden hour → blue hour), so night keeps its blacks.
+ */
+export const DAY_FLARE = 0.008;
+export const FLARE_EXPOSURE = [3.5, 6.0] as const;
 
-const CUSTOM_TM = /* glsl */ `float whLampLit = 0.0;
+const CUSTOM_TM = /* glsl */ `#define WH_LAMP_LIT
+float whLampLit = 0.0;
 vec3 CustomToneMapping( vec3 color ) {
 	float whEx = toneMappingExposure;
+	// daylight veiling glare: lifts the deepest shade out of ACES's toe
+	color += ${DAY_FLARE.toFixed(4)} * ( 1.0 - smoothstep( ${FLARE_EXPOSURE[0].toFixed(2)}, ${FLARE_EXPOSURE[1].toFixed(2)}, whEx ) ) / whEx;
 	float whLum = dot( color, vec3( 0.2126, 0.7152, 0.0722 ) );
 	float whDisp = whLum * whEx;
 	// rods: peak sensitivity near 500 nm, blind to red; blue-shifted percept

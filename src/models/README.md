@@ -74,7 +74,7 @@ export default okapi;
 | `regions` | detail regions keyed by `Prim.region` (`{ scale?, aniso? }`). |
 | `resolution` | base grid multiplier (bulky animals ≈ 0.7). |
 | `coat` | `(c: CoatSample) => void` — baked per vertex. |
-| `look` | `{ skin: 'fur'|'hide'|'wrinkled'|'smooth'|'feather', pattern: 'none'|'stripes'|'field', roughness, sheen, grain, bump, mottle, juvenile? }` — `'wrinkled'` = crease network for thick skins (elephant, rhino, hippo; `'hide'` = cell plates); `juvenile: { color, amount?, until?, keep? }` tints young animals (penguin chicks' grey down) per instance from their growth |
+| `look` | `{ skin: 'fur'|'hide'|'wrinkled'|'smooth'|'feather', pattern: 'none'|'stripes'|'field', roughness, sheen, grain, bump, mottle, juvenile? }` — `'wrinkled'` = crease network plus deep folds across limbs and trunk (readable at mid range) for thick skins (elephant, rhino, hippo; `'hide'` = cell plates); `juvenile: { color, amount?, until?, keep? }` tints young animals (penguin chicks' grey down) per instance from their growth |
 | `eyes` | `[{ bone, pos (left eye), radius, color? }]` — glossy spheres rigidly bound to the bone (mirrored). Use `surfacePoint()` + `seat()` to sit them on the head. |
 | `anim` | `driver(myDriver)` — see Animation. |
 | `babyScale`, `babyHead` | growth 0 → root scale / extra head scale. |
@@ -231,7 +231,11 @@ the shirt colour, bare legs or leggings below); hands have a palm, cupped
 fingers and a thumb on their own grid (medium / high); height = root scale; build
 = shader inflation along normals; clothing colours / sleeve & trouser length /
 lab coat are per-instance uniforms of a per-instance material (shared
-program). Staff: keeper (khaki + bush hat), groundskeeper (dark green + cap,
+program); a darker waistband separates top and bottom. Guest outfits come
+from `fitOutfit` in sim/names.ts: never skin-coloured, top and bottom apart
+in lightness, no pale top (or dress) under grey / blonde hair. The walk caps
+the step at ≈ 0.42 × height (faster = quicker cadence), rolls the planted
+foot heel → ball and folds the swing knee ≈ 55°. Staff: keeper (khaki + bush hat), groundskeeper (dark green + cap,
 broom while working), vet (white coat). Held items (`anim.holding`) attach to
 the right hand; balloons float on a string. ≈ 2.6–3.1k triangles at medium.
 

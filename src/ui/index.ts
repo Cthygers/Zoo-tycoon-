@@ -82,6 +82,8 @@ class GameUI implements GameUIHandle {
   private vh = window.innerHeight;
   private affordAcc = 0;
   private bottomTop = window.innerHeight;
+  /** Bottom edge of the top bar (refreshed with bottomTop): money popups fade out before it. */
+  private topBottom = 0;
   private disposed = false;
   private backArmed = false;
   private selectNextFrame: SelectionRef | null = null;
@@ -202,6 +204,7 @@ class GameUI implements GameUIHandle {
       openCategory: () => dock.openCategoryId,
       categoryButton: (id) => dock.categoryButton(id),
       card: (match) => dock.cardFor(match),
+      revealCard: (card) => dock.revealCard(card),
       drawer: () => dock.drawerEl,
       toolBar: () => dock.toolbarEl,
       confirmBar: () => dock.confirmBarEl,
@@ -753,7 +756,7 @@ class GameUI implements GameUIHandle {
     this.info.update(dt);
     this.zoo.update(dt);
     this.coach.update(dt);
-    this.popups.update(dt, this.vw, this.vh);
+    this.popups.update(dt, this.vw, this.vh, this.topBottom);
     this.costLabel.update(this.vw, this.vh, this.bottomTop - 6);
     this.affordAcc += dt;
     if (this.affordAcc > 0.25) {
@@ -765,6 +768,7 @@ class GameUI implements GameUIHandle {
       if (m && !(m.kind === 'animal' ? sim.animals.has(m.id) : sim.world.objects.has(m.id))) this.setTool({ kind: 'select' });
       // top edge of the bottom dock (+ confirm bar / tool bar): a cheap 4 Hz layout read
       this.bottomTop = this.dock.root.offsetTop || this.vh;
+      this.topBottom = this.hud.root.offsetTop + this.hud.root.offsetHeight;
       this.layoutToasts();
     }
   }

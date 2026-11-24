@@ -217,9 +217,15 @@ function hippoCoat(eye: Vec3) {
     blendHex(c.color, 0x7a4b3a, smooth(0.15, 0.45, fbm(x * 3, y * 3, z * 3, 2, 103)) * 0.14);
     // broad warmer, browner patches on the flanks (no flat grey)
     blendHex(c.color, 0x6e5a4f, smooth(-0.05, 0.3, fbm(x * 0.8, y * 0.8, z * 0.8, 2, 105)) * 0.45 * smooth(0.7, 0.1, c.ny));
+    // wet mud from the pool on the lower flanks and legs: darker, glossier, ragged top edge
+    const wetTop = 1.0 + n * 0.2 + fbm(x * 4.5, y * 4.5, z * 4.5, 2, 106) * 0.14;
+    const wet = smooth(wetTop, wetTop - 0.2, y) * smooth(-0.95, -0.7, c.ny);
+    blendHex(c.color, 0x3b2f27, wet * 0.6);
     c.color2.copy(c.color).multiplyScalar(0.62);
     c.w = 0;
-    c.gloss = 0.1;
+    c.gloss = 0.1 + 0.3 * wet;
+    // deep skin folds across the stubby legs and the neck; the barrel stays smooth
+    c.fold = Math.max(0.2, clamp01((c.pw('leg') + c.pw('foot')) * 1.3), c.pw('neck') * smooth(0.6, 0.9, z));
     // neck folds
     if (c.part === 'neck' || (c.pw('neck') > 0.3 && z > 0.8)) {
       c.s = (z - 0.95) / 0.075 + n * 0.8;

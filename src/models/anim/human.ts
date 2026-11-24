@@ -35,11 +35,15 @@ function init(ctx: AnimCtx): HumanState {
   return st;
 }
 
+/** Step length cap: 0.42 × body height (body height ≈ 1.85 × the pelvis height). */
+const MAX_STRIDE_PER_HIP = 2 * 0.42 * 1.85;
+
 function pre(ctx: AnimCtx, st: HumanState): void {
   st.speed += (ctx.speed - st.speed) * damp(0.15, ctx.dt);
   const v = st.speed;
   st.amp = smooth(0.02, 0.3, v);
-  st.stride = st.legLen * clamp(0.7 + 0.68 * v / Math.sqrt(st.legLen / 0.9), 0.35, 2.6);
+  // faster walking lengthens the step up to the cap, then quickens the cadence
+  st.stride = Math.min(st.legLen * clamp(0.7 + 0.68 * v / Math.sqrt(st.legLen / 0.9), 0.35, 2.6), MAX_STRIDE_PER_HIP * st.hipsY);
   const f = v > 1e-3 ? v / st.stride : 0;
   st.phase = fract(st.phase + f * ctx.dt);
 }
@@ -47,28 +51,51 @@ function pre(ctx: AnimCtx, st: HumanState): void {
 // ---------------------------------------------------------------------------
 // building blocks
 
-/** Legs: walking cycle (stance / swing) or planted standing. */
+// Gait (fractions of the cycle; the left heel strikes at phase 0).
+const DUTY = 0.6;
+/** Toes-up pitch at heel strike and heel-up pitch at toe-off (rad). */
+const HEEL_STRIKE_PITCH = 0.25;
+const TOE_OFF_PITCH = 0.6;
+/** Ball of the foot → heel, as a fraction of the leg length (the shoe is ≈ 0.25 m for a 0.9 m leg). */
+const HEEL_PER_LEG = 0.19;
+/** Swing foot lift (× leg length): peaks early, behind the body, so the knee folds ≈ 55–60°. */
+const SWING_LIFT = 0.12;
+
+/**
+ * Legs: walking cycle (stance / swing) or planted standing. The planted foot
+ * rolls heel → flat → ball (heel strike with the toes up, pivoting on the
+ * heel; heel-off pivoting on the ball), the swing foot rises behind the body
+ * on a high arc and reaches forward with the toes up.
+ */
 function legs(ctx: AnimCtx, st: HumanState, pose: Pose): void {
-  const duty = 0.62;
   const rig = ctx.rig;
+  const a = st.amp;
+  const L = st.stride * DUTY * a;
   for (const leg of st.legs) {
     const lp = fract(st.phase + (leg.side > 0 ? 0 : 0.5));
-    const L = st.stride * duty * st.amp;
     let dz: number, dy: number, pitch: number;
-    if (lp < duty) {
-      const u = lp / duty;
-      dz = L * (0.5 - u);
+    if (lp < DUTY) {
+      const u = lp / DUTY;
+      // centred a little behind the hip: the heel-off lifts the ankle for the rear reach
+      dz = L * (0.45 - u);
       dy = 0;
-      pitch = 0.35 * st.amp * smooth(0.65, 1, u);
+      pitch = -HEEL_STRIKE_PITCH * (1 - smooth(0, 0.15, u)) + TOE_OFF_PITCH * smooth(0.55, 1, u);
     } else {
-      const w = (lp - duty) / (1 - duty);
-      dz = L * (-0.5 + (0.5 - 0.5 * Math.cos(Math.PI * w)));
-      dy = 0.075 * st.legLen * st.amp * Math.sin(Math.PI * w);
-      pitch = 0.35 * st.amp * (1 - smooth(0, 0.4, w)) - 0.25 * st.amp * smooth(0.6, 1, w);
+      const w = (lp - DUTY) / (1 - DUTY);
+      dz = L * (-0.55 + w * w * (3 - 2 * w));
+      dy = SWING_LIFT * st.legLen * Math.sin(Math.PI * w ** 0.65);
+      pitch = TOE_OFF_PITCH * (1 - smooth(0, 0.45, w)) - HEEL_STRIKE_PITCH * smooth(0.55, 1, w);
     }
+    pitch *= a;
     _C.copy(leg.r.contact);
     _C.z += dz;
-    _C.y += dy;
+    _C.y += dy * a;
+    if (pitch < 0) {
+      // toes up: pivot on the heel, not on the ball
+      const heel = HEEL_PER_LEG * st.legLen;
+      _C.y += heel * Math.sin(-pitch);
+      _C.z -= heel * (1 - Math.cos(pitch));
+    }
     rig.fkBone(pose, leg.r.upper);
     plantLeg(ctx, null, pose, leg, _C, pitch, 0);
   }
@@ -80,13 +107,16 @@ function body(ctx: AnimCtx, st: HumanState, pose: Pose): void {
   const ph = st.phase * TAU;
   const hips = R.root;
   const still = 1 - a;
-  pose.p[hips].y += -0.014 * a * Math.cos(ph * 2) - 0.004 * a;
+  // pelvis: 3.6 cm bob (lowest at heel strike, slightly lowered while walking),
+  // sway over the stance leg, hip of the leading leg forward (yaw against the
+  // arms), drop on the swing side; the thorax turns the other way
+  pose.p[hips].y += -0.018 * a * Math.cos(ph * 2) - 0.012 * a;
   pose.p[hips].x += 0.016 * a * Math.sin(ph) + 0.022 * still * glance(ctx.time, 6.5, ctx.seed + 3);
-  rotParent(pose, hips, 'y', 0.09 * a * Math.sin(ph));
+  rotParent(pose, hips, 'y', -0.09 * a * Math.cos(ph));
   rotParent(pose, hips, 'z', 0.035 * a * Math.sin(ph) - 0.03 * still * glance(ctx.time, 6.5, ctx.seed + 3));
-  rotLocal(pose, R.spine[0], 'y', -0.05 * a * Math.sin(ph));
+  rotLocal(pose, R.spine[0], 'y', 0.05 * a * Math.cos(ph));
   if (R.chest >= 0) {
-    rotLocal(pose, R.chest, 'y', -0.07 * a * Math.sin(ph));
+    rotLocal(pose, R.chest, 'y', 0.07 * a * Math.cos(ph));
     rotLocal(pose, R.chest, 'x', 0.012 * Math.sin(ctx.time * TAU * 0.25) + 0.03 * a);
   }
 }
@@ -123,11 +153,12 @@ function arms(ctx: AnimCtx, st: HumanState, pose: Pose, swingScale = 1): void {
   const sway = 0.03 * Math.sin(ctx.time * 0.9 + ctx.seed);
   const hold = ctx.holding;
   const carry = hold === 'food' || hold === 'drink' || hold === 'icecream';
-  // left arm swings with the right leg
-  arm(ctx, pose, 'L', swing * Math.sin(ph) + sway, -0.07, 0.22 + 0.25 * st.amp * Math.max(0, Math.sin(ph)));
-  if (carry) arm(ctx, pose, 'R', 0.18 + 0.05 * Math.sin(ph) * st.amp, -0.12, 1.35, 0.25);
+  // each arm is furthest forward as the opposite heel strikes
+  const fwd = Math.cos(ph);
+  arm(ctx, pose, 'L', -swing * fwd + sway, -0.07, 0.22 + 0.25 * st.amp * Math.max(0, -fwd));
+  if (carry) arm(ctx, pose, 'R', 0.18 + 0.05 * fwd * st.amp, -0.12, 1.35, 0.25);
   else if (hold === 'balloon') arm(ctx, pose, 'R', 0.35, 0.05, 0.6);
-  else arm(ctx, pose, 'R', -swing * Math.sin(ph) * (hold === 'gift' ? 0.4 : 1) - sway, -0.07, 0.22 + 0.25 * st.amp * Math.max(0, -Math.sin(ph)));
+  else arm(ctx, pose, 'R', swing * fwd * (hold === 'gift' ? 0.4 : 1) - sway, -0.07, 0.22 + 0.25 * st.amp * Math.max(0, fwd));
 }
 
 // ---------------------------------------------------------------------------

@@ -226,7 +226,8 @@ function tailPrims(): Prim[] {
 
 const SKIN = 0x5f584f;
 const TOP = 0x6f675b;
-const MUD = 0x5f4f3e;
+/** Dry ochre mud / dust caked on the legs and flanks. */
+const MUD = 0x75604a;
 // keratin: dark, warm brown at the base, worn paler and greyer towards the tip
 const HORN_BASE = 0x35291e;
 const HORN_MID = 0x4a3b2c;
@@ -253,7 +254,9 @@ function rhinoCoat(eye: Vec3, male: boolean) {
     const n = fbm(x * 1.8, y * 1.8, z * 1.8, 3, 91);
     c.color.setHex(SKIN);
     blendHex(c.color, TOP, clamp01(smooth(0.3, 0.95, c.ny) * 0.6 + n * 0.3));
-    blendHex(c.color, MUD, clamp01(smooth(0.7 + n * 0.25, 0.15, y) * 0.55));
+    blendHex(c.color, MUD, clamp01(smooth(0.7 + n * 0.25, 0.15, y) * 0.6));
+    // dust from wallowing on the back and shoulders
+    blendHex(c.color, 0x8a785f, smooth(0.45, 0.95, c.ny) * smooth(0.0, 0.4, fbm(x * 2.6, y * 2.6, z * 2.6, 2, 95)) * 0.4);
     blendHex(c.color, 0x544e47, smooth(-0.3, -0.9, c.ny) * 0.35);
     c.color2.copy(c.color).multiplyScalar(0.55);
     c.w = 0;
@@ -264,6 +267,8 @@ function rhinoCoat(eye: Vec3, male: boolean) {
       if (d < best) best = d;
     }
     const legK = clamp01((c.pw('leg') + c.pw('foot')) * 1.3);
+    // deep skin folds across the legs and the neck; a faint network on the body
+    c.fold = Math.max(0.3, legK * smooth(0.95, 0.6, y), c.pw('neck') * smooth(1.35, 1.0, y));
     if (best < 0.07) {
       // a single soft crease line along each skin fold (no parallel echoes)
       c.s = best / 0.09 + n * 0.12;
@@ -289,6 +294,7 @@ function rhinoCoat(eye: Vec3, male: boolean) {
       c.color.multiplyScalar(1 - 0.35 * c.ao(0.08));
       c.w = 0;
       c.gloss = 0.55;
+      c.fold = 0;
       return;
     }
     // dark cavity line where the horns grow out of the skin

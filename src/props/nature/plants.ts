@@ -5,7 +5,7 @@ import * as THREE from 'three';
 import { Noise, Rng } from '../../core/rng';
 import { atlas, cellUV, hedgeTextures, leafMaterial, soilTextures } from './atlases';
 import { barkMat } from './barks';
-import { addRibbon, addTube, CardSet, type Ellipsoid, ellipsoidNormal, groupOf, MeshData, v3, type V3 } from './geo';
+import { addCrownFade, addRibbon, addTube, CardSet, type Ellipsoid, ellipsoidNormal, groupOf, MeshData, v3, type V3 } from './geo';
 import { barkMaterial, cachedMaterial, detail, natureQuality } from './mats';
 import { graniteMaterial } from './rocks';
 import { sstep } from './tex';
@@ -87,6 +87,7 @@ function thornBush(variant: number, lod: boolean): THREE.Group {
     [bark, barkMat('acacia', 0.003), 'bark'],
     [leaves, leafMaterial('trees'), 'leaves'],
   ]);
+  addCrownFade(g, crown);
   g.userData.tris = bark.tris + leaves.tris;
   return g;
 }

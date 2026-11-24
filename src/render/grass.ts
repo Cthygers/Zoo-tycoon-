@@ -196,7 +196,8 @@ export class GrassField {
           `float gr = length(iPos.xz - uCenter);
           float gvis = clamp((gFalloff(gr) * uGlobal - iPar.w) / 0.1, 0.0, 1.0);
           float gsc = iPar.x * gvis;
-          vec3 transformed = position * gsc;
+          // dry tufts: low, wide clumps (straw lodges and spreads) rather than tall sticks
+          vec3 transformed = position * gsc * mix(vec3(1.0), vec3(1.35, 0.7, 1.35), iPar.y);
           transformed.xz = gRot * transformed.xz;
           vec2 gwp = iPos.xz + transformed.xz;
           float gust = textureLod(uNoise, gwp * 0.012 - uWind * uTime * 0.035, 0.0).r;
@@ -208,8 +209,9 @@ export class GrassField {
           // colour: root dark, tip light; matches the ground's macro patches
           vec4 gm = textureLod(uNoise, iPos.xz * 0.019, 0.0);
           float macro = gm.r * 0.6 + 0.2;
-          vec3 base = mix(vec3(0.034, 0.052, 0.018), vec3(0.07, 0.054, 0.03), iPar.y);
-          vec3 tip = mix(vec3(0.12, 0.19, 0.055), vec3(0.27, 0.21, 0.11), iPar.y);
+          // dry straw is paler and more golden than the soil it grows from
+          vec3 base = mix(vec3(0.034, 0.052, 0.018), vec3(0.2, 0.16, 0.09), iPar.y);
+          vec3 tip = mix(vec3(0.12, 0.19, 0.055), vec3(0.55, 0.45, 0.25), iPar.y);
           tip *= 0.85 + 0.3 * iPar.z;
           tip = mix(tip, tip * vec3(1.15, 1.02, 0.72), smoothstep(0.45, 0.75, gm.b) * 0.6);
           vGCol = mix(base, tip, smoothstep(0.0, 1.0, aBlade.x)) * (0.8 + 0.4 * macro);
@@ -362,7 +364,7 @@ export class GrassField {
       this.stagePos[j + 2] = pz;
       this.stagePos[j + 3] = hashFloat(cx + k, cz, 3) * Math.PI * 2;
       const hs = hashFloat(k, cx, cz + 11);
-      this.stagePar[j] = dry ? 1.5 + hs * 0.9 : 0.55 + hs * 0.35;
+      this.stagePar[j] = dry ? 1.7 + hs * 0.5 : 0.55 + hs * 0.35;
       this.stagePar[j + 1] = dry ? 1 : 0;
       this.stagePar[j + 2] = hashFloat(cz, k, cx + 5);
       this.stagePar[j + 3] = h / Math.max(this.density, 1e-3);

@@ -649,11 +649,12 @@ export class ToolManager implements ToolInput {
 
   /**
    * Confirm-bar note: why it fails, else the sim's warning (outranks a plain remark), else its
-   * remark. A warning the sim wants confirmed shows as `confirmKind` and marks the action risky
-   * (the button then says "… anyway").
+   * remark. A warning the sim wants confirmed shows as `confirmKind`, in its short form when it has
+   * one (the dialog then gives it in full), and marks the action risky (the button then says "… anyway").
    */
   private note(r: CommandResult, confirmKind: 'bad' | 'warn' = 'bad'): { note?: string; noteKind?: 'bad' | 'warn'; risky?: boolean } {
-    if (r.ok && r.warning) return r.severity === 'confirm' ? { note: r.warning, noteKind: confirmKind, risky: true } : { note: r.warning, noteKind: 'warn' };
+    if (r.ok && r.warning)
+      return r.severity === 'confirm' ? { note: r.shortWarning ?? r.warning, noteKind: confirmKind, risky: true } : { note: r.warning, noteKind: 'warn' };
     if (!r.reason) return {};
     return { note: r.reason, noteKind: r.ok ? 'warn' : 'bad' };
   }
@@ -727,8 +728,11 @@ export class ToolManager implements ToolInput {
     const def = FENCES_BY_ID[fenceId];
     const n = states.filter((x) => x === 'new').length;
     const metres = n * TILE;
-    const area = isRect ? Math.abs(s.b.x - s.a.x) * Math.abs(s.b.z - s.a.z) : 0;
-    this.setLabel({ x: s.b.x * TILE, z: s.b.z * TILE }, fmtMoney(r.cost), area ? `${metres} m · ${area} tiles` : `${metres} m`, r.ok && !warning);
+    // the enclosed size the way the tour and the habitat advice count it: "8×8 = 64 tiles"
+    const across = Math.abs(s.b.x - s.a.x),
+      deep = Math.abs(s.b.z - s.a.z);
+    const size = isRect ? `${metres} m · ${across}×${deep} = ${across * deep} tiles` : `${metres} m`;
+    this.setLabel({ x: s.b.x * TILE, z: s.b.z * TILE }, fmtMoney(r.cost), size, r.ok && !warning);
     this.setPending({
       title: `${def?.name ?? 'Fence'} · ${metres} m`,
       // building a fence that won't enclose anything has to be a deliberate choice

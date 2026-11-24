@@ -87,15 +87,12 @@ export function guestViewText(viewable: boolean, quality: number): { text: strin
   return quality < 0.75 ? { text: 'Partial', kind: 'good' } : { text: 'Good', kind: 'good' };
 }
 
-/** Below this share of the room its animals need, crowding stresses them and makes them sick (as the sim's CROWDED_SPACE). */
-const STRESS_SPACE = 0.7;
-
-/** Habitat room from the lowest Space of its species (1 = room for everyone): text and how it reads. */
-export function roomText(space: number, area: number): { text: string; kind: 'good' | 'warn' | 'bad' } {
-  if (space >= 0.95) return { text: 'Enough room', kind: 'good' };
+/** Habitat room from its most crowded species (null = no animals): text and how it reads. */
+export function roomText(s: Pick<SpeciesSuitability, 'space' | 'crowded'> | null, area: number): { text: string; kind: 'good' | 'warn' | 'bad' } {
+  if (!s || s.crowded === 'no') return { text: 'Enough room', kind: 'good' };
   // space = area / tiles needed (the sim's ceil of a fractional need; the epsilon absorbs float noise)
-  const needs = Math.ceil(area / Math.max(0.01, space) - 1e-6);
-  return space < STRESS_SPACE
+  const needs = Math.ceil(area / Math.max(0.01, s.space) - 1e-6);
+  return s.crowded === 'severe'
     ? { text: `Too crowded — needs ${needs} tiles`, kind: 'bad' }
     : { text: `A bit crowded — needs ${needs} tiles`, kind: 'warn' };
 }
@@ -835,8 +832,9 @@ export class InfoPanel {
         setText(kvView.v, view.text);
         kvView.v.className = `wh-kv-v ${view.kind}`;
         // crowding is what hurts animals most: say it plainly (empty habitats have room by definition)
-        const space = Math.min(1, ...(rep?.suitability ?? []).map((su) => su.space));
-        const room = roomText(space, h.tiles.length);
+        let tightest: SpeciesSuitability | null = null;
+        for (const su of rep?.suitability ?? []) if (!tightest || su.space < tightest.space) tightest = su;
+        const room = roomText(tightest, h.tiles.length);
         setText(kvRoom.v, room.text);
         kvRoom.v.className = `wh-kv-v ${room.kind}`;
         if (rep) comp.set(rep.terrainFractions);
