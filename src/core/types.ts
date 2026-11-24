@@ -364,6 +364,14 @@ export interface CommandResult {
   refundFraction?: number;
   /** Paths: tiles that already had another path type and are re-surfaced (their price is in `cost`). */
   resurfaced?: { tiles: number; cost: number };
+  /**
+   * 'confirm': the `warning` is serious enough that the UI should ask the player before
+   * going ahead (an adoption that packs a habitat far past what it holds, flooding the
+   * dry land of animals that can't swim, a bulldoze that cuts the entrance off).
+   */
+  severity?: 'confirm';
+  /** Bulldoze: no exhibit could be reached from the entrance afterwards (the gate would close). */
+  cutsEntrance?: boolean;
 }
 
 export type Tool =

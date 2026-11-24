@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 import { useEnvMapIntensity } from '../src/render/envIntensity';
+import { RenderContext } from '../src/render/context';
 
 /** Run a material's onBeforeCompile on a copy of the physical shader source. */
 function compile(m: THREE.Material): THREE.WebGLProgramParametersWithUniforms {
@@ -63,5 +64,41 @@ describe('useEnvMapIntensity', () => {
     m.customProgramCacheKey = () => 'custom-7';
     useEnvMapIntensity(m);
     expect(m.customProgramCacheKey()).toBe('custom-7|envMapScale');
+  });
+});
+
+describe('RenderContext.holdEnvironment', () => {
+  // the environment fields of a context, without a WebGL renderer
+  type EnvState = { envHeld: boolean; envRT: object | null; sunDirection: THREE.Vector3; envSunElev: number; envDirty: boolean; envAge: number };
+  const DEG = Math.PI / 180;
+  const state = (sunElevDeg: number, capturedDeg: number): EnvState => ({
+    envHeld: false,
+    envRT: {},
+    sunDirection: new THREE.Vector3(Math.cos(sunElevDeg * DEG), Math.sin(sunElevDeg * DEG), 0),
+    envSunElev: capturedDeg * DEG,
+    envDirty: true,
+    envAge: 1e9,
+  });
+  const proto = RenderContext.prototype as unknown as {
+    holdEnvironment(this: EnvState): () => void;
+    updateEnvironment(this: EnvState): void;
+  };
+
+  it('skips re-capture while held and counts the map fresh when the sun is back', () => {
+    const s = state(35, 35);
+    const release = proto.holdEnvironment.call(s);
+    // held: returns before touching the capture targets (this fake has none)
+    expect(() => proto.updateEnvironment.call(s)).not.toThrow();
+    release();
+    expect(s.envHeld).toBe(false);
+    expect(s.envDirty).toBe(false);
+    expect(s.envAge).toBe(0);
+  });
+
+  it('leaves the map due for re-capture when released with the sun elsewhere', () => {
+    const s = state(-20, 35);
+    proto.holdEnvironment.call(s)();
+    expect(s.envDirty).toBe(true);
+    expect(s.envAge).toBe(1e9);
   });
 });

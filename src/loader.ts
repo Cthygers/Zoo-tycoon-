@@ -1,5 +1,6 @@
-// Loading-screen step for main.ts: compile and first-draw every shader
-// program behind the loading screen, a few materials per frame.
+// Loading-screen steps for main.ts: capture the sky environment in a frame of
+// its own, then compile and first-draw every shader program behind the loading
+// screen, a few materials per frame.
 //
 // Drawing the whole scene once compiles every program in one go. Where shader
 // compilation is synchronous (no KHR_parallel_shader_compile, e.g. software
@@ -24,6 +25,15 @@ function isRenderable(o: THREE.Object3D): o is Renderable {
 function materialsOf(o: Renderable): THREE.Material[] {
   const m = o.material;
   return Array.isArray(m) ? m : m ? [m] : [];
+}
+
+/** Renderables drawn this frame: visible together with all their ancestors. */
+function drawnRenderables(scene: THREE.Object3D): Renderable[] {
+  const drawn: Renderable[] = [];
+  scene.traverseVisible((o) => {
+    if (isRenderable(o)) drawn.push(o);
+  });
+  return drawn;
 }
 
 /**
@@ -64,11 +74,7 @@ export async function warmUpShaders(
   onProgress?: (fraction: number) => void,
 ): Promise<void> {
   const { renderer, scene, camera } = ctx;
-  // drawn this frame: visible together with all their ancestors
-  const drawn: Renderable[] = [];
-  scene.traverseVisible((o) => {
-    if (isRenderable(o)) drawn.push(o);
-  });
+  const drawn = drawnRenderables(scene);
   const drawnSet = new Set<THREE.Object3D>(drawn);
   const hidden: Renderable[] = [];
   scene.traverse((o) => {
@@ -78,9 +84,9 @@ export async function warmUpShaders(
 
   for (const o of drawn) o.visible = false;
   try {
-    // An empty frame first: after ctx.settle() it captures the sky's
-    // environment map, which the scene's materials compile against (and which
-    // is a long GPU job of its own the first time).
+    // An empty frame first: unless main.ts already did (renderEmptyFrame) it
+    // captures the sky's environment map, which the scene's materials compile
+    // against (a long GPU job of its own).
     ctx.render();
     await nextFrame();
     for (let i = 0; i < steps.length; i++) {
@@ -98,6 +104,21 @@ export async function warmUpShaders(
       }
       onProgress?.((i + 1) / steps.length);
     }
+  } finally {
+    for (const o of drawn) o.visible = true;
+  }
+}
+
+/**
+ * Render a frame with nothing drawn: after a clock jump and ctx.settle() it
+ * re-captures the sky environment (dozens of GPU passes) in a task of its own
+ * instead of on top of the first full frame.
+ */
+export function renderEmptyFrame(ctx: IRenderContext): void {
+  const drawn = drawnRenderables(ctx.scene);
+  for (const o of drawn) o.visible = false;
+  try {
+    ctx.render();
   } finally {
     for (const o of drawn) o.visible = true;
   }

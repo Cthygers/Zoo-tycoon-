@@ -310,6 +310,9 @@ describe('day stats for shops, restrooms and staff (PT2-6)', () => {
     buyHerd(sim, 'zebra', 3);
     hire(sim);
     sim.setSpeed(3);
+    while (sim.minuteOfDay < 13 * 60) sim.update(0.5);
+    // a one-exhibit zoo makes a short visit: make sure someone needs the restroom
+    for (const g of sim.guests.values()) g.needs.bladder = Math.min(g.needs.bladder, 0.2);
     while (sim.minuteOfDay < 17 * 60) sim.update(0.5);
     const objs = [...sim.world.objects.values()];
     const snack = objs.find((o) => o.defId === 'shop_snack')!;

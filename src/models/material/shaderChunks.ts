@@ -48,19 +48,31 @@ vec3 cr_bump(vec3 surfPos, vec3 n, float h) {
 
 /**
  * `crHighlightOf(light, h)` (→ vec3) for the end of a standard material's
- * fragment shader, e.g. at `#include <opaque_fragment>` (needs `irradiance`, `iblIrradiance`, `normal` and
- * `geometryViewDir` from the lighting chunks). `h` is the pulsing highlight
- * amount (0 … ~0.32, see RiggedModel.syncFrame): up to +10 % on the lit colour
- * and a warm rim as bright as a white surface in the sky light, so the coat
- * stays readable (the ground ring already marks the selection).
+ * fragment shader, e.g. at `#include <opaque_fragment>` (needs `irradiance`, `iblIrradiance`,
+ * `nonPerturbedNormal` and `geometryViewDir` from the normal and lighting chunks). `h` is the pulsing highlight
+ * amount (0.16 … 0.32, see highlightPulse in model.ts): a +4 % lift of the lit colour
+ * and a warm Fresnel rim along the silhouette, at its edge about half as bright
+ * as a white surface in the scene's light (sky plus part of the key light on
+ * level ground, so shaded sides at a low sun don't wash out). Scaled to the
+ * scene light it reads on dark and pale coats in full sun, at dusk and at night
+ * alike, while the coat's own colour (the inner surface) stays within a few
+ * per cent.
  */
 export const HIGHLIGHT_FN_GLSL = /* glsl */ `
-vec3 crHighlight(vec3 light, float h, vec3 ambient, vec3 n, vec3 v) {
+vec3 crHighlight(vec3 light, float h, vec3 sceneIrradiance, vec3 n, vec3 v) {
   float k = clamp(h * 3.2, 0.0, 1.0);
   float rim = 1.0 - saturate(dot(n, v));
-  rim *= rim * rim;
-  float sky = dot(ambient * RECIPROCAL_PI, vec3(0.2126, 0.7152, 0.0722));
-  return light * (1.0 + 0.1 * k) + vec3(1.0, 0.85, 0.35) * (rim * k * sky);
+  rim *= rim;
+  rim *= rim;
+  float white = dot(sceneIrradiance * RECIPROCAL_PI, vec3(0.2126, 0.7152, 0.0722));
+  return light * (1.0 + 0.04 * k) + vec3(1.0, 0.8, 0.42) * (0.5 * rim * k * white);
 }
-#define crHighlightOf(light, h) crHighlight(light, h, irradiance + iblIrradiance, normal, geometryViewDir)
+#if NUM_DIR_LIGHTS > 0
+// the key light (sun or moon) falling on level ground
+#define crKeyLevel() (directionalLights[0].color * saturate(dot(directionalLights[0].direction, (viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz)))
+#else
+#define crKeyLevel() vec3(0.0)
+#endif
+// the rim follows the surface's own normal: fur / hide micro-normals would speckle it
+#define crHighlightOf(light, h) crHighlight(light, h, irradiance + iblIrradiance + 0.6 * crKeyLevel(), nonPerturbedNormal, geometryViewDir)
 `;

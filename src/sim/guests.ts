@@ -46,14 +46,16 @@ const VIEWERS_PER_TILE = 4;
 const ADULT_R = 0.26;
 const CHILD_R = 0.2;
 /** Longest look at an exhibit passed on the way to another (sim seconds, see arrive). */
-const GLANCE_SECONDS = 9;
+const GLANCE_SECONDS = 7;
 /** With more than this many tiles to go, guests walk briskly (this much faster than their stroll). */
 const BRISK_AFTER = 12;
-const BRISK = 1.2;
-/** Visit time left (sim seconds, ≈ 6 game hours) at which a party weighs distance as usual (see chooseHabitat). */
-const VISIT_AHEAD = 120;
-/** Visit time (sim seconds, ≈ 1 game hour) a new plan leaves spare for a stop on the way. */
+const BRISK = 1.35;
+/** Visit time (sim seconds, ≈ 1 game hour) a new plan leaves spare for a snack or a restroom. */
 const PLAN_SLACK = 20;
+/** Visit time left (sim seconds, ≈ 1.5 game hours) below which a party that has seen its exhibits goes home rather than stroll on. */
+const LINGER = 30;
+/** Average stop at an exhibit the party came to see (sim seconds, see startWatch). */
+const WATCH_SECONDS = 8.5;
 /** How far (sim seconds, ≈ 2 game hours) a party lets its visit run over to reach the exhibit it set out for. */
 const PLAN_GRACE = 40;
 /**
@@ -80,6 +82,9 @@ interface ServiceOpts {
   alt?: ServiceKind;
 }
 type ServiceAnswer = 'ok' | 'later' | 'full' | 'far' | 'cutoff' | 'broke' | 'none';
+/** 'noAnimals': no animals guests could see; 'cut': none the paths from the gate lead to. */
+type GateState = 'open' | 'noAnimals' | 'cut';
+const ENTRANCE_CUT = 'The entrance path is cut — reconnect it to open the gate.';
 
 /** Party-wide minimum of the basic needs (filled by partyNeeds). */
 interface PartyNeeds {
@@ -104,6 +109,12 @@ export class GuestSystem {
   fairPrice = DEFAULT_ADMISSION;
   /** Share of would-be visitors who pay at the current price (above 1 = a bargain draws extra). */
   priceFactor = 1;
+  /** Whether visitors are let in: animals on view and an exhibit the gate's paths lead to. */
+  private gate: GateState = 'open';
+  private gateRev = -1;
+  private gateTime = -1;
+  /** The gate turned visitors away since it was last open (to say when it opens again). */
+  private gateWasClosed = false;
   /** People per game hour who look at the price and walk away (from the last estimate). */
   private turnedAway = 0;
   private deterred = 0;
@@ -194,24 +205,32 @@ export class GuestSystem {
 
   private appealTmp = new Map<string, number>();
 
-  /** Draw of the animals on show (species appeal, herd sizes, how well they look). */
+  private attractionValue = 0;
+  private attractionTime = -1;
+
+  /** Draw of the animals on show (species appeal, herd sizes, how well they look), refreshed every simulated second. */
   private attraction(): number {
     const sim = this.sim;
+    if (this.attractionTime >= 0 && sim.time - this.attractionTime < 1 && this.attractionTime <= sim.time) return this.attractionValue;
+    this.attractionTime = sim.time;
     const appeal = this.appealTmp;
     appeal.clear();
     let count = 0;
+    let held = 0;
     let happy = 0;
     for (const a of sim.animals.values()) {
       if (a.escaped) continue;
       count++;
+      held += sim.collectionWeight(a);
       happy += a.happiness;
       if (!appeal.has(a.speciesId)) appeal.set(a.speciesId, SPECIES_BY_ID[a.speciesId]?.appeal ?? 5);
     }
     let attraction = 0;
     for (const v of appeal.values()) attraction += v;
-    attraction += Math.min(20, count * 0.4);
+    attraction += Math.min(20, held * 0.4);
     if (count) attraction *= 0.7 + 0.3 * (happy / count);
-    return Math.min(130, attraction);
+    this.attractionValue = Math.min(130, attraction);
+    return this.attractionValue;
   }
 
   /** Habitats with animals guests can see. */
@@ -252,6 +271,16 @@ export class GuestSystem {
       return;
     }
     this.updateCapacity();
+    const gate = this.gateState();
+    if (gate !== 'open') {
+      sim.spawnAcc = 0;
+      this.gateClosed(gate);
+      return;
+    }
+    if (this.gateWasClosed) {
+      this.gateWasClosed = false;
+      sim.notify('gate', 'The gate is open again — visitors are coming in.', 'good');
+    }
     const rate = this.arrivalRate();
     sim.spawnAcc += (rate * hours) / AVG_PARTY;
     // visitors who looked at the ticket price and walked away
@@ -265,12 +294,129 @@ export class GuestSystem {
     while (sim.spawnAcc >= 1) {
       sim.spawnAcc -= 1;
       if (sim.guests.size + 4 > this.capacity) {
-        sim.spawnAcc = Math.min(sim.spawnAcc, 1);
-        break;
+        // full: this party goes elsewhere today
+        sim.turnedAwayToday += AVG_PARTY;
+        if (sim.turnedAwayToday >= 10)
+          sim.notify('zoo-full', `Zoo full — ${Math.round(sim.turnedAwayToday)} visitors turned away today. More paths and exhibits make room.`, 'warn', undefined, 200);
+        continue;
       }
       this.spawnParty();
     }
   }
+
+  /**
+   * The ticket booths stay shut while guests could see no animals, or no exhibit can be
+   * reached from the gate (refreshed every simulated second and on world changes).
+   */
+  gateState(): GateState {
+    const sim = this.sim;
+    if (this.gateRev === sim.world.revision && sim.time - this.gateTime < 1 && this.gateTime <= sim.time) return this.gate;
+    this.gateRev = sim.world.revision;
+    this.gateTime = sim.time;
+    let onView = false;
+    let reachable = false;
+    for (const hab of sim.world.habitats.values()) {
+      if (!hab.viewTiles.length || !sim.population(hab.id).count.size) continue;
+      onView = true;
+      if (this.habExitDist(hab.id) !== FAR) {
+        reachable = true;
+        break;
+      }
+    }
+    this.gate = reachable ? 'open' : onView ? 'cut' : 'noAnimals';
+    return this.gate;
+  }
+
+  /** Why the gate is shut, for the zoo stats (null while it is open). */
+  gateNote(): string | null {
+    const g = this.gateState();
+    return g === 'cut' ? 'Entrance path cut' : g === 'noAnimals' ? 'No animals on view' : null;
+  }
+
+  /** Nobody gets in: say why, and send parties stuck by the gate home with their money back. */
+  private gateClosed(state: Exclude<GateState, 'open'>) {
+    const sim = this.sim;
+    this.gateWasClosed = true;
+    if (state === 'noAnimals') {
+      let animals = false;
+      for (const a of sim.animals.values()) if (!a.escaped) animals = true;
+      sim.notify(
+        'gate',
+        animals
+          ? 'The gate stays closed: guests can’t see any of your animals — build a path along a habitat fence.'
+          : 'The gate stays closed until there are animals to see — adopt some into a habitat beside a path.',
+        'info',
+        undefined,
+        300,
+      );
+      return;
+    }
+    sim.notify('cmp-cutoff', ENTRANCE_CUT, 'bad', this.entranceBreak() ?? undefined, 150);
+    for (const g of sim.guests.values()) {
+      if (g.leader || g.goal === 'leave' || g.phase === 3 || this.distance('exit', g.tile) === FAR) continue;
+      // they paid to see animals and can't reach any: the booths give the tickets back
+      let refund = 0;
+      if (!g.viewed.length) {
+        refund = g.paid;
+        g.paid = 0;
+        for (const id of g.party) {
+          const f = sim.guests.get(id);
+          if (!f) continue;
+          refund += f.paid;
+          f.paid = 0;
+        }
+        if (refund > 0) sim.earn('admissions', -refund);
+      }
+      this.sendHome(g, refund > 0 ? 'The paths to the animals are blocked — we got our money back.' : 'The paths to the animals are blocked — time to go home.');
+    }
+  }
+
+  /**
+   * Where the paths from the gate were cut off from the exhibits: the middle of the
+   * shortest gap between the gate's paths and paths that lead to an exhibit.
+   */
+  entranceBreak(): { x: number; z: number } | null {
+    const sim = this.sim;
+    const w = sim.world;
+    const exit = this.field('exit');
+    const views: Uint16Array[] = [];
+    for (const hab of w.habitats.values())
+      if (hab.viewTiles.length && sim.population(hab.id).count.size) views.push(this.field(`hab:${hab.id}`));
+    if (!views.length) return null;
+    const from = this.breakFrom;
+    from.fill(-1);
+    const q = this.breakQueue;
+    q.length = 0;
+    for (let i = 0; i < N_TILES; i++)
+      if (exit[i] !== FAR) {
+        from[i] = i;
+        q.push(i);
+      }
+    for (let head = 0; head < q.length; head++) {
+      const t = q[head];
+      const x = t % MAP_W,
+        z = (t / MAP_W) | 0;
+      for (let k = 0; k < 4; k++) {
+        const nx = x + DX[k],
+          nz = z + DZ[k];
+        if (!w.inBounds(nx, nz)) continue;
+        const n = nz * MAP_W + nx;
+        if (from[n] >= 0 || w.habitatOf[n]) continue;
+        from[n] = t;
+        if (w.path[n] && views.some((f) => f[n] !== FAR)) {
+          // walk back over the gap to the gate's side and point at its middle
+          const gap: number[] = [];
+          for (let c = t; exit[c] === FAR; c = from[c]) gap.push(c);
+          const mid = gap.length ? gap[gap.length >> 1] : n;
+          return { x: ((mid % MAP_W) + 0.5) * TILE, z: (((mid / MAP_W) | 0) + 0.5) * TILE };
+        }
+        q.push(n);
+      }
+    }
+    return null;
+  }
+  private breakFrom = new Int32Array(N_TILES);
+  private breakQueue: number[] = [];
 
   /** A party of 1–4 arrives at the gate: singles, couples, friends, families. */
   spawnParty(): GuestSim | null {
@@ -318,12 +464,12 @@ export class GuestSystem {
     const x = lead ? lead.x + (slot % 2 ? 0.5 : -0.5) : (tx + 0.5) * TILE + rng.range(-0.6, 0.6);
     const z = lead ? lead.z + 0.55 * Math.ceil(slot / 2) : MAP_H * TILE - 0.25;
     const id = sim.nextIds.guest++;
-    // A visit lasts 8–12 game hours: people walk in real time while the clock runs
-    // GAME_MINUTES_PER_SECOND game minutes per second, so crossing the zoo takes a few
-    // game hours. Everyone wants to be out a little before closing, so most stay until
-    // late afternoon, late arrivals make it a shorter visit, and the zoo empties
-    // through the evening.
-    const stay = (rng.range(8, 12) * 60) / GAME_MINUTES_PER_SECOND;
+    // A party stays 3–5 game hours, longer if the exhibits it came to see take longer to
+    // walk round (see planVisit), then makes room for the next. People walk in real time
+    // while the clock runs GAME_MINUTES_PER_SECOND game minutes per second, so crossing
+    // the zoo takes a game hour or two. Everyone wants to be out a little before closing,
+    // so late arrivals make it a shorter visit and the zoo empties through the evening.
+    const stay = (rng.range(3, 5) * 60) / GAME_MINUTES_PER_SECOND;
     const untilDeadline = ((CLOSE_HOUR - rng.range(0.2, 0.9)) * 60 - sim.minuteOfDay) / GAME_MINUTES_PER_SECOND;
     // the ticket against what the zoo seems worth: a bargain cheers, overpaying sours the visit
     const value = sim.admissionPrice / Math.max(1, this.fairPrice);
@@ -389,6 +535,9 @@ export class GuestSystem {
       fstate: 0,
       avoidObj: 0,
       avoidUntil: 0,
+      paid: 0,
+      wants: 0,
+      route: [],
     };
     if (!lead) {
       // walk in from the gate to its tile centre
@@ -401,6 +550,7 @@ export class GuestSystem {
     }
     sim.guests.set(id, g);
     const fee = child ? Math.round(sim.admissionPrice * 0.5) : sim.admissionPrice;
+    g.paid = fee;
     if (fee > 0) sim.earn('admissions', fee, lead ? undefined : { x: g.ax, z: z - 1 });
     sim.guestsToday++;
     sim.totalVisitors++;
@@ -447,6 +597,7 @@ export class GuestSystem {
     if (!g) return;
     if (g.qObj) this.queues.leave(g);
     sim.satisfaction += (g.happiness - sim.satisfaction) * 0.05;
+    sim.progress.noteDeparture(g.happiness);
     g.seatObj = 0;
     sim.guests.delete(id);
     // companions of a leader that vanished carry on alone; a companion leaving drops out of the party
@@ -482,6 +633,9 @@ export class GuestSystem {
     const sim = this.sim;
     this.queues.reset();
     this.capRev = -1;
+    this.attractionTime = -1;
+    // the rating's facilities term reads the capacity at any hour, not only while the gates are open
+    this.updateCapacity();
     this.habCrowdTime = -1;
     this.glanceRev = -1;
     this.habExitRev = -1;
@@ -647,8 +801,8 @@ export class GuestSystem {
     const n = g.needs;
     const sitting = g.action === 'sit';
     // Needs, per simulated second (one game hour = 20 s); everyone's body clock differs a
-    // little. Tuned so a typical visit has one meal, a drink or two and a restroom break
-    // or two, with long enough between them to walk across the zoo.
+    // little. Tuned so a typical visit has a meal, a drink or two and a restroom break,
+    // with long enough between them to walk across the zoo.
     const k = 0.8 + 0.45 * hash01(g.seed, 11);
     n.hunger = Math.max(0, n.hunger - (dt * k) / 215);
     n.thirst = Math.max(0, n.thirst - (dt * (1.85 - k)) / 165);
@@ -664,7 +818,8 @@ export class GuestSystem {
     const comfort = basic < 0.25 ? basic * 2 : 0.5 + basic * 0.5;
     const target = Math.max(0, Math.min(1, 0.24 + 0.4 * n.fun + 0.1 * n.energy + 0.14 * comfort + 0.12 * g.scenic + g.mood + g.ticketValue));
     g.happiness += (target - g.happiness) * Math.min(1, dt * 0.06);
-    g.visitLeft -= dt;
+    // time for a snack, a drink or the restroom is on top of what the party planned to see
+    if (g.goal !== 'shop' && g.goal !== 'restroom' && !g.qObj) g.visitLeft -= dt;
     g.lookTimer -= dt;
     if (g.lookTimer <= 0) {
       g.lookTimer = 2.5;
@@ -1422,6 +1577,11 @@ export class GuestSystem {
     }
     // ---------------------------------------------------------- animals
     if (this.chooseHabitat(g)) return;
+    if (g.viewed.length && g.wants && g.visitLeft < LINGER + this.walkOutTime(g)) {
+      // seen what the party came for and had a good look round: perhaps a souvenir on the way out, then home
+      if (this.souvenirOnTheWayOut(g)) return;
+      return this.leave(g, g.happiness > 0.6 ? 'We saw everything we came for. What a lovely day!' : 'We saw what we came for. Time to go home.');
+    }
     let any = false;
     for (const a of sim.animals.values())
       if (!a.escaped) {
@@ -1575,6 +1735,11 @@ export class GuestSystem {
     const sim = this.sim;
     const w = sim.world;
     if (!sim.gateTiles(this.gateTmp).length) return null;
+    // nothing at all can be reached: the break is at the entrance, not at any one exhibit
+    if (this.gateState() === 'cut') {
+      const at = this.entranceBreak();
+      return at ? { text: ENTRANCE_CUT, focus: at } : null;
+    }
     for (const hab of w.habitats.values()) {
       if (!hab.viewTiles.length || !sim.population(hab.id).count.size || this.habExitDist(hab.id) !== FAR) continue;
       const t = hab.viewTiles[0];
@@ -1612,86 +1777,119 @@ export class GuestSystem {
   }
 
   /**
-   * Pick the next exhibit. The party keeps to the one it set out for (after a
-   * snack, a restroom or a look at another exhibit on the way). Otherwise it
-   * weighs every exhibit it still has time for by what it would see: the
-   * exhibit itself plus the unseen ones the walk there passes (most people
-   * stop for a look on the way). What counts against an exhibit is the walk
-   * it adds to the way out, so the day makes a loop: with most of the visit
-   * ahead a party is happy to head for the far exhibits first, and on the way
-   * back the ones near the gate cost little. How far people are happy to go
-   * differs, and crowded fence lines put them off.
+   * Head for the next exhibit on the party's route (planned on its first look round; see
+   * planVisit). Exhibits seen on the way, gone or cut off drop out of it. False once the
+   * route is done (or nothing could be planned).
    */
   private chooseHabitat(g: GuestSim): boolean {
+    if (!g.wants || (!g.route.length && !g.viewed.length)) this.planVisit(g);
+    const r = g.route;
+    while (r.length && (!this.worthSeeing(g, r[0]) || this.distance(`hab:${r[0]}`, g.tile) === FAR)) r.shift();
+    g.plan = r.length ? r[0] : 0;
+    if (!g.plan) return false;
+    this.setGoal(g, 'view', `hab:${g.plan}`, g.plan);
+    return true;
+  }
+
+  /**
+   * What the party came to see: a few exhibits, more in a bigger and better-rated zoo,
+   * picked at random by how appealing they are (not by how far away), then put in
+   * walking order (nearest next) so the far ones are reached on a loop rather than given
+   * up on. Half the parties walk the loop the other way round, which spreads the crowds.
+   * Stops are dropped, least appealing first, until the walk is over well before
+   * closing; the party then stays as long as its walk takes.
+   */
+  private planVisit(g: GuestSim) {
     const sim = this.sim;
-    // a party on its way to a far exhibit sees it through once it still has time to get
-    // there, even if a snack or a look at other animals made it a longer day than planned
-    if (g.plan && this.worthSeeing(g, g.plan) && this.tripTime(g, g.plan) <= g.visitLeft + PLAN_GRACE) {
-      this.setGoal(g, 'view', `hab:${g.plan}`, g.plan);
-      return true;
-    }
-    g.plan = 0;
-    // tiles of detour they shrug off; more with a long visit ahead (VISIT_AHEAD sim seconds ≈ 6 game hours)
-    const reach = (10 + 30 * hash01(g.seed, 23)) * Math.min(2, Math.max(0.6, g.visitLeft / VISIT_AHEAD));
-    const home = this.distance('exit', g.tile);
-    const fresh = !g.viewed.length || home === FAR;
-    let best = 0,
-      bestScore = 0;
+    const rng = sim.rng;
+    const pick = this.planPick;
+    pick.length = 0;
+    // time left to walk the route and be back at the gate well before closing (so the
+    // crowd does not all leave at once)
+    const untilClose = ((CLOSE_HOUR - 1.5) * 60 - sim.minuteOfDay) / GAME_MINUTES_PER_SECOND - PLAN_SLACK;
+    let onView = 0;
     for (const hab of sim.world.habitats.values()) {
       if (!hab.viewTiles.length) continue;
       const pop = sim.population(hab.id);
       if (!pop.count.size) continue;
+      onView++;
+      if (g.viewed.includes(hab.id) || this.tripTime(g, hab.id) > untilClose) continue;
       let appeal = 0;
-      let unseen = false;
-      for (const sid of pop.count.keys()) {
-        appeal = Math.max(appeal, SPECIES_BY_ID[sid]?.appeal ?? 5);
-        if (!g.seenSpecies.includes(sid)) unseen = true;
-      }
-      const viewed = g.viewed.includes(hab.id);
-      const d = this.distance(`hab:${hab.id}`, g.tile);
-      // with room for a snack or restroom stop on the way, so the party still makes it there
-      if (d === FAR || this.tripTime(g, hab.id) + PLAN_SLACK > g.visitLeft) continue;
-      const value = appeal * (viewed ? 0.1 : unseen ? 1 : 0.5) + this.sightsOnTheWay(g, hab.id);
-      const crowd = this.crowdAt(hab.id) / Math.max(4, hab.viewTiles.length * 0.5);
-      // a party that has seen nothing yet picks where to head mostly by what it would see there and
-      // on the way (the round trip counts as its share of the visit left; it can catch the near
-      // exhibits coming back); later picks weigh the walk they add to the way out
-      const far = fresh ? 1 + this.tripTime(g, hab.id) / g.visitLeft : 1 + Math.max(0, d + this.habExitDist(hab.id) - home) / (2 * reach);
-      const score = (value * (0.75 + 0.5 * sim.rng.float())) / (far * (1 + crowd * crowd));
-      if (score > bestScore) {
-        bestScore = score;
-        best = hab.id;
-      }
+      for (const sid of pop.count.keys()) appeal = Math.max(appeal, SPECIES_BY_ID[sid]?.appeal ?? 5);
+      // a weighted draw: each exhibit's chance of being picked is in proportion to its appeal
+      pick.push({ id: hab.id, score: Math.pow(Math.max(1e-6, rng.float()), 1 / appeal) });
     }
-    if (!best || bestScore < 0.25) return false;
-    // a favourite seen before is a one-off stroll back, not a plan to keep
-    if (!g.viewed.includes(best)) g.plan = best;
-    this.setGoal(g, 'view', `hab:${best}`, best);
-    return true;
+    // 1–2 exhibits in a small zoo, about 3 in a big, well-rated one: then it makes room for the next party
+    g.wants = Math.max(1, Math.min(onView, Math.round(1 + onView * 0.17 * (0.6 + (0.8 * sim.rating) / 100) + rng.range(-0.8, 0.8))));
+    pick.sort((a, b) => b.score - a.score);
+    pick.length = Math.min(pick.length, Math.max(0, g.wants - g.viewed.length));
+    const reverse = rng.chance(0.5);
+    for (;;) {
+      this.orderRoute(g, pick, reverse);
+      if (pick.length <= 1 || this.routeTime(g) <= untilClose) break;
+      // too long a day: leave out the least appealing stop
+      let worst = 0;
+      for (let i = 1; i < pick.length; i++) if (pick[i].score < pick[worst].score) worst = i;
+      pick.splice(worst, 1);
+    }
+    // stay for the whole walk (the needs and a snack on the way are the slack)
+    if (g.route.length) g.visitLeft = Math.max(g.visitLeft, Math.min(untilClose, this.routeTime(g)) + PLAN_SLACK);
+  }
+  private planPick: { id: number; score: number }[] = [];
+
+  /** g.route = the picked exhibits, each next one the nearest by path from the last. */
+  private orderRoute(g: GuestSim, pick: { id: number; score: number }[], reverse: boolean) {
+    const route = g.route;
+    route.length = 0;
+    let at = g.tile;
+    while (route.length < pick.length) {
+      let best = -1,
+        bd = Infinity;
+      for (const p of pick) {
+        if (route.includes(p.id)) continue;
+        const d = this.distance(`hab:${p.id}`, at);
+        if (d < bd) {
+          bd = d;
+          best = p.id;
+        }
+      }
+      if (best < 0) break;
+      route.push(best);
+      at = this.habEntryTile(best);
+    }
+    if (reverse) route.reverse();
   }
 
-  private routeSeen: number[] = [];
-
-  /**
-   * Expected appeal of the unseen exhibits the party would pass on its way to
-   * `habId`: follows the same downhill steps the walk will take.
-   */
-  private sightsOnTheWay(g: GuestSim, habId: number): number {
-    const field = this.field(`hab:${habId}`);
-    const views = this.viewHabitats();
-    const nav = this.sim.nav;
-    const seen = this.routeSeen;
-    seen.length = 0;
-    let value = 0;
-    for (let t = g.tile, steps = 0; t >= 0 && field[t] !== 0 && field[t] !== FAR && steps < 160; steps++) {
-      const h = views[t];
-      if (h && h !== habId && !seen.includes(h) && !g.viewed.includes(h)) {
-        seen.push(h);
-        if (this.wouldGlance(g, h)) value += this.viewAppealGrid[t] * 10;
-      }
-      t = nav.downhill(field, t, g.seed);
+  /** Seconds to walk the route from where the party is, watch at every stop and get back to the gate. */
+  private routeTime(g: GuestSim): number {
+    let tiles = 0;
+    let at = g.tile;
+    for (const h of g.route) {
+      tiles += this.distance(`hab:${h}`, at);
+      at = this.habEntryTile(h);
     }
-    return value;
+    if (g.route.length) tiles += this.habExitDist(g.route[g.route.length - 1]);
+    return (tiles * TILE) / Math.max(0.6, g.walkSpeed * BRISK) + g.route.length * WATCH_SECONDS;
+  }
+
+  private habEntry = new Map<number, number>();
+  private habEntryRev = -1;
+
+  /** The habitat's viewing tile nearest the gate, where a party's walk from it is measured. */
+  private habEntryTile(habId: number): number {
+    const w = this.sim.world;
+    if (this.habEntryRev !== w.revision) {
+      this.habEntryRev = w.revision;
+      this.habEntry.clear();
+    }
+    let t = this.habEntry.get(habId);
+    if (t === undefined) {
+      const exit = this.field('exit');
+      t = -1;
+      for (const v of w.habitats.get(habId)?.viewTiles ?? []) if (t < 0 || exit[v] < exit[t]) t = v;
+      this.habEntry.set(habId, t);
+    }
+    return t;
   }
 
   // ================================================================ arrival
@@ -2035,7 +2233,7 @@ export class GuestSystem {
     const hab = sim.world.habitats.get(g.goalRef);
     g.action = 'watch';
     // a stop on the way somewhere is a shorter look than the exhibit the party came for
-    g.timer = g.plan && g.plan !== hab?.id ? rng.range(5, GLANCE_SECONDS) : rng.range(9, 17);
+    g.timer = g.plan && g.plan !== hab?.id ? rng.range(4, GLANCE_SECONDS) : rng.range(6, 11);
     g.funRate = 0;
     if (!hab) return;
     let count = 0,
@@ -2083,7 +2281,7 @@ export class GuestSystem {
     const unseen = !g.seenSpecies.includes(star);
     const seeFactor = near > 0 ? 1 : 0.35;
     const quality = (appeal / 10) * (0.45 + 0.55 * avgHappy) * (0.35 + 0.65 * vis) * (info ? 1.25 : 1) * (unseen ? 1 : 0.55) * seeFactor;
-    g.funRate = 0.09 * quality;
+    g.funRate = 0.13 * quality;
     g.mood += 0.05 * quality;
     const plural = pluralName(star);
     if (near === 0) this.addThought(g, `The ${plural} are too far away to see properly.`);

@@ -9,7 +9,7 @@
 //    gesture for the first few uses.
 // Progress lives in localStorage (best effort: without storage the tour simply shows again).
 
-import type { ISimulation } from '../core/contracts';
+import type { GoalProgress, ISimulation } from '../core/contracts';
 import type { Objective, Tool } from '../core/types';
 import type { CategoryId } from './catalog';
 import { button, el, fmtMoney, setText, storageGet, storageSet, swallowPointer, toggleClass, type ScreenRect } from './dom';
@@ -40,6 +40,30 @@ const GOAL_CATEGORY: Record<string, CategoryId> = {
   species_6: 'animals',
   species_10: 'animals',
 };
+
+/**
+ * A goal's progress the way the goal states its target: "141 / 150", "$84,016 / $100,000",
+ * "62% / 75%".
+ */
+export function goalProgressText(goal: Pick<Objective, 'text'>, p: GoalProgress): string {
+  const money = goal.text.includes(fmtMoney(p.target));
+  const pct = new RegExp(`(^|\\D)${p.target}%`).test(goal.text);
+  const f = (v: number) => (money ? fmtMoney(v) : `${v.toLocaleString('en-US')}${pct ? '%' : ''}`);
+  return `${f(p.current)} / ${f(p.target)}`;
+}
+
+/** Share of a goal reached, 0..1. */
+export function goalFraction(p: GoalProgress): number {
+  return p.target > 0 ? Math.max(0, Math.min(1, p.current / p.target)) : 0;
+}
+
+/** The goal as the pill words it: without its parenthesised how-to, and (`short`) without the leading verb. */
+export function pillGoalText(text: string, short: boolean): string {
+  const t = text.replace(/\s*\(.*\)\s*$/, '');
+  if (!short) return t;
+  const rest = t.replace(/^(Welcome|Have|Reach|Exhibit|Build|Hire|Adopt|Make|Get)\s+/, '');
+  return rest[0].toUpperCase() + rest.slice(1);
+}
 
 /** Area (px²) two screen rects share, with `gap` added around the first. */
 function overlapArea(a: ScreenRect, b: ScreenRect, gap: number): number {
@@ -101,7 +125,8 @@ const STEPS: TourStep[] = [
     cat: 'paths',
     card: (k) => k.startsWith('path:'),
     tool: (t) => t.kind === 'path',
-    open: 'Guests only walk on paths. Tap Paths.',
+    // the gate stays shut until guests can see an animal from a path
+    open: 'Guests come once a path lets them see your animals. Tap Paths.',
     pick: 'Pick a path type.',
     use: 'Drag a path from the main path up to your fence so guests can watch.',
     confirm: 'Tap Build to lay it.',
@@ -160,7 +185,12 @@ export class Coach {
   readonly bubble: HTMLElement;
   private pillText = el('span', 'wh-goal-t');
   private pillReward = el('span', 'wh-goal-r');
+  private pillBar = el('i');
+  private pillTrack = el('span', 'wh-goal-bar', [this.pillBar]);
+  private pillProgress = el('span', 'wh-goal-p');
   private pillId = '';
+  /** Viewport width the pill's text was fitted to. */
+  private pillFitW = 0;
   private bubbleStep = el('span', 'wh-coach-n');
   private bubbleTitle = el('span', 'wh-coach-title');
   private bubbleText = el('div', 'wh-coach-text');
@@ -179,10 +209,10 @@ export class Coach {
   private docked = false;
 
   constructor(private host: CoachHost) {
+    // two lines: the goal, then how far along it is and the reward
     this.pill = el('div', { class: 'wh-goal wh-glass hidden', attrs: { role: 'button', 'aria-label': 'Next goal' }, onClick: () => this.pillTapped() }, [
       el('span', { class: 'wh-goal-k', html: `${icon('trophy')}<span>Next</span>` }),
-      this.pillText,
-      this.pillReward,
+      el('span', 'wh-goal-main', [this.pillText, el('span', 'wh-goal-sub', [this.pillTrack, this.pillProgress, this.pillReward])]),
     ]);
     swallowPointer(this.pill);
     const skip = button('wh-btn-ghost wh-coach-skip', 'close', null, () => this.finish(false), 'Skip the tour');
@@ -258,18 +288,33 @@ export class Coach {
   private updatePill(tourShowing: boolean): void {
     const goal = this.nextGoal();
     toggleClass(this.pill, 'hidden', !goal || tourShowing);
-    if (!goal || goal.id === this.pillId) return;
-    const first = this.pillId === '';
+    if (!goal) return;
+    this.updatePillProgress(goal);
+    const vw = window.innerWidth;
+    if (goal.id === this.pillId && vw === this.pillFitW) return;
+    const fresh = goal.id !== this.pillId && this.pillId !== '';
     this.pillId = goal.id;
-    // the objective without its parenthesised how-to (the tour and the build menus cover that)
-    setText(this.pillText, goal.text.replace(/\s*\(.*\)\s*$/, ''));
+    this.pillFitW = vw;
+    // the objective without its parenthesised how-to (the tour and the build menus cover that);
+    // where it does not fit, without its verb rather than cut off mid-word
+    setText(this.pillText, pillGoalText(goal.text, false));
+    if (this.pillText.scrollWidth > this.pillText.clientWidth + 1) setText(this.pillText, pillGoalText(goal.text, true));
     setText(this.pillReward, goal.reward ? fmtMoney(goal.reward, { sign: true }) : '');
     this.pill.title = goal.text;
-    if (first) return;
+    if (!fresh) return;
     // a new goal: a short glow draws the eye to it
     this.pill.classList.remove('fresh');
     void this.pill.offsetWidth;
     this.pill.classList.add('fresh');
+  }
+
+  /** Bar and "141 / 150" for a goal with a number to reach (hidden for one-step goals). */
+  private updatePillProgress(goal: Objective): void {
+    const p = this.host.sim.objectiveProgress(goal.id);
+    toggleClass(this.pillTrack, 'hidden', !p);
+    setText(this.pillProgress, p ? goalProgressText(goal, p) : '');
+    const w = p ? `${(goalFraction(p) * 100).toFixed(1)}%` : '0%';
+    if (this.pillBar.style.width !== w) this.pillBar.style.width = w;
   }
 
   private pillTapped(): void {

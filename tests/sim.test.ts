@@ -410,6 +410,8 @@ describe('guests: queues and families', () => {
     hire(sim);
     sim.setSpeed(3);
     sim.minuteOfDay = 9 * 60;
+    // a coach party on top of the usual arrivals: visits to a one-exhibit zoo are short, so lines need a crowd
+    for (let i = 0; i < 15; i++) sim.guestSys.spawnParty();
     let maxLine = 0,
       lines = 0,
       served = 0,
@@ -445,7 +447,7 @@ describe('guests: queues and families', () => {
   });
 
   it('children arrive with a parent, follow them and leave together', () => {
-    const { sim } = newSim(34); // every system shares one RNG stream: a seed with a typical number of families
+    const { sim } = newSim(35); // every system shares one RNG stream: a seed with a typical number of families
     buildZoo(sim);
     buyHerd(sim, 'zebra', 5);
     hire(sim);

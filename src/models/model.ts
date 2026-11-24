@@ -207,6 +207,14 @@ const BABY_BONES_TO = 0.95;
 
 type MutableCtx = { -readonly [K in keyof AnimCtx]: AnimCtx[K] };
 
+/**
+ * Selection highlight amount: breathes between 0.16 and 0.32 (full rim from
+ * ~0.31, see HIGHLIGHT_FN_GLSL) without fading out, so the rim reads at any moment.
+ */
+export function highlightPulse(): number {
+  return 0.24 + 0.08 * Math.sin(performance.now() * 0.006);
+}
+
 export class RiggedModel implements CreatureModel {
   readonly object = new THREE.Group();
   private _asset!: RigAsset;
@@ -520,7 +528,7 @@ export class RiggedModel implements CreatureModel {
 
   /** Per-frame batched work after the crowd placed the instance (highlight pulse …). */
   syncFrame(_world: THREE.Matrix4, _visible: boolean): void {
-    if (this.highlighted && this.batch) this.batch.data[this.batch.offset(this.slot)] = 0.18 + 0.14 * Math.sin(performance.now() * 0.006);
+    if (this.highlighted && this.batch) this.batch.data[this.batch.offset(this.slot)] = highlightPulse();
   }
 
   // ---------------------------------------------------------------- batching transitions
@@ -602,7 +610,7 @@ export class RiggedModel implements CreatureModel {
     }
     if (this.highlighted && sa.mesh.material === this.asset.highlightMaterial) {
       const u = this.asset.highlightMaterial.userData.creatureUniforms?.uHighlight as THREE.IUniform<number> | undefined;
-      if (u) u.value = 0.18 + 0.14 * Math.sin(performance.now() * 0.006);
+      if (u) u.value = highlightPulse();
     }
   }
 

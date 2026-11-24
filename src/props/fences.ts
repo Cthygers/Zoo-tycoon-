@@ -4,10 +4,14 @@
 // two corners, so vertical members stay vertical on slopes. Posts and walls
 // always reach the real ground (lake bed included) through a per-instance
 // "ground extension" that stretches only the vertices at local y = 0.
+// With the batched back-end, the opaque casters of every fence material cast
+// from one shadow-only batch per shadow side (position-only copies on
+// SHADOW_ONLY_LAYER), like the props: one shadow draw instead of one per material.
+// Three's depth pass never ran the ground extension, so the shadows are unchanged.
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { MAP_H, MAP_W, TILE, WATER_LEVEL } from '../core/constants';
+import { MAP_H, MAP_W, SHADOW_ONLY_LAYER, TILE, WATER_LEVEL } from '../core/constants';
 import type { EventBus } from '../core/events';
 import { hashFloat } from '../core/rng';
 import type { FenceDef } from '../core/types';
@@ -626,6 +630,11 @@ export class FenceRenderer {
   /** Batched back-end: one BatchedMesh per (patched) material, shared by every style. */
   private multi = new Map<string, MultiBatch>();
   private multiList: MultiBatch[] = [];
+  /** Batched back-end: shadow-only batches by shadow side (also in multiList). */
+  private shadowMulti = new Map<THREE.Side, MultiBatch>();
+  /** Position-only copies of style geometries for the shadow-only batches. */
+  private shadowGeos = new WeakMap<THREE.BufferGeometry, THREE.BufferGeometry>();
+  private readonly shadowInst: InstParams = { cull: Infinity, shadow: 0, lodOn: false, shadowOn: true, tint: null };
   private readonly ref: SlotRef = { id: -1, slot: { index: -1 } };
   private readonly ext = new THREE.Color();
   private readonly inst: InstParams = { cull: Infinity, shadow: 0, lodOn: true, tint: null };
@@ -670,9 +679,7 @@ export class FenceRenderer {
     if (changed) {
       for (const b of this.batches.values()) for (const x of [...b.posts, ...b.panel]) x.dispose();
       this.batches.clear();
-      for (const b of this.multiList) b.dispose();
-      this.multi.clear();
-      this.multiList = [];
+      this.disposeMulti();
       this.farWorth.clear();
       this.dirty = true;
       return;
@@ -729,21 +736,65 @@ export class FenceRenderer {
     return b;
   }
 
+  /**
+   * Shadow-only batch for a material's casters, or null when it must cast from
+   * its own batch (alpha-tested or transparent: the depth pass needs its maps).
+   */
+  private shadowMultiFor(mat: THREE.Material): MultiBatch | null {
+    if (mat.transparent || mat.alphaTest > 0 || mat.alphaHash || (mat as THREE.MeshStandardMaterial).alphaMap) return null;
+    // the depth pass draws back faces of single-sided materials (three's default shadow side)
+    const side = mat.shadowSide ?? (mat.side === THREE.DoubleSide ? THREE.DoubleSide : mat.side === THREE.BackSide ? THREE.FrontSide : THREE.BackSide);
+    let b = this.shadowMulti.get(side);
+    if (!b) {
+      const casters = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
+      casters.name = 'fence-shadow-casters';
+      casters.shadowSide = side;
+      b = new MultiBatch(casters, this.quality.shadows, this.group, true);
+      b.mesh.name = 'fence-shadow-casters';
+      b.mesh.layers.set(SHADOW_ONLY_LAYER);
+      this.shadowMulti.set(side, b);
+      this.multiList.push(b);
+    }
+    return b;
+  }
+
+  /** Position-only copy of a style geometry (attributes shared) for a shadow-only batch. */
+  private shadowGeometry(g: THREE.BufferGeometry): THREE.BufferGeometry {
+    let s = this.shadowGeos.get(g);
+    if (!s) {
+      s = new THREE.BufferGeometry();
+      s.setAttribute('position', g.getAttribute('position'));
+      s.setIndex(g.index);
+      if (!g.boundingSphere) g.computeBoundingSphere();
+      s.boundingSphere = g.boundingSphere;
+      this.shadowGeos.set(g, s);
+    }
+    return s;
+  }
+
   private pushMulti(st: FenceStyle, parts: FencePart[], m: THREE.Matrix4, extA: number, extB: number, cull = Infinity, minDist = 0): void {
     const p = this.inst;
+    const sp = this.shadowInst;
     this.ext.setRGB(extA, extB, 0);
     p.tint = this.ext;
-    p.cull = cull;
-    p.minDist = minDist;
-    p.band = cull !== Infinity || minDist > 0;
+    p.cull = sp.cull = cull;
+    p.minDist = sp.minDist = minDist;
+    p.band = sp.band = cull !== Infinity || minDist > 0;
     const see = st.postMode === 'all' && parts === st.panel;
     for (const part of parts) {
       // fences outline habitats: never distance-culled; shadows only near the focus
       // (see-through panels — bars, rails, mesh — alias in a distant shadow map anyway)
       let sh = st.def.height > 2.4 ? this.shadowFar * 0.6 : this.shadowNear;
       if (see) sh *= 0.65;
-      p.shadow = part.castShadow && this.quality.shadows ? sh : 0;
-      this.multiFor(part).add(part.geometry, m, this.ref, p);
+      sh = part.castShadow && this.quality.shadows ? sh : 0;
+      const batch = this.multiFor(part);
+      const casters = sh > 0 ? this.shadowMultiFor(batch.mesh.material as THREE.Material) : null;
+      p.shadow = casters ? 0 : sh;
+      batch.add(part.geometry, m, this.ref, p);
+      if (casters) {
+        sp.shadow = sh;
+        casters.add(this.shadowGeometry(part.geometry), m, this.ref, sp);
+      }
     }
   }
 
@@ -974,6 +1025,14 @@ export class FenceRenderer {
       }
   }
 
+  private disposeMulti(): void {
+    for (const b of this.multiList) b.dispose();
+    for (const b of this.shadowMulti.values()) (b.mesh.material as THREE.Material).dispose();
+    this.multi.clear();
+    this.shadowMulti.clear();
+    this.multiList = [];
+  }
+
   /** Draw-call relevant meshes (for stats / debugging). */
   meshes(): { count: number }[] {
     const out: { count: number }[] = [];
@@ -987,9 +1046,7 @@ export class FenceRenderer {
     this.unsub = [];
     for (const b of this.batches.values()) for (const x of [...b.posts, ...b.panel]) x.dispose();
     this.batches.clear();
-    for (const b of this.multiList) b.dispose();
-    this.multi.clear();
-    this.multiList = [];
+    this.disposeMulti();
     for (const m of this.patched.values()) m.dispose();
     this.patched.clear();
     this.group.removeFromParent();

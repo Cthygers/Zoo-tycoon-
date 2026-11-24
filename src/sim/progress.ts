@@ -1,6 +1,7 @@
 // Zoo rating (0..100, smoothed) and the progressive objective list.
 
 import { MAP_W, TILE } from '../core/constants';
+import type { GoalProgress } from '../core/contracts';
 import { fmtMoney } from '../core/format';
 import type { Objective } from '../core/types';
 import { OBJECTS_BY_ID } from '../data/objects';
@@ -12,26 +13,42 @@ interface ObjectiveDef {
   text: string;
   reward: number;
   check: (sim: Simulation, p: Progress) => boolean;
+  /** How far along it is (omitted for one-step goals). */
+  progress?: (sim: Simulation, p: Progress) => GoalProgress;
 }
 
+const of = (current: number, target: number): GoalProgress => ({ current: Math.min(target, Math.floor(current)), target });
+/** Guests on the best single day so far, today included. */
+const bestDay = (s: Simulation, p: Progress) => Math.max(p.bestDayGuests, s.guestsToday);
+
+// Rewards start small (the first week runs on ticket money with a little help) and grow
+// with the goals; the mid-game goals keep something to aim for while the zoo expands.
 const OBJECTIVES: ObjectiveDef[] = [
-  { id: 'build_habitat', text: 'Build your first habitat (enclose an area with fences)', reward: 2000, check: (s) => s.world.habitats.size > 0 },
-  { id: 'first_animal', text: 'Adopt your first animal', reward: 2500, check: (s) => s.animals.size > 0 },
-  { id: 'hire_keeper', text: 'Hire a keeper to feed your animals', reward: 1000, check: (s) => s.keeperCount() > 0 },
-  { id: 'food_stand', text: 'Build a snack or drinks kiosk', reward: 1500, check: (_s, p) => p.has.food || p.has.drink },
-  { id: 'restrooms', text: 'Build restrooms for your guests', reward: 1500, check: (_s, p) => p.has.restroom },
-  { id: 'guests_25', text: 'Welcome 25 guests in a single day', reward: 2500, check: (s) => s.guestsToday >= 25 },
-  { id: 'species_3', text: 'Exhibit 3 different species', reward: 5000, check: (_s, p) => p.speciesCount >= 3 },
-  { id: 'happy_10', text: 'Have 10 animals with happiness above 70%', reward: 5000, check: (_s, p) => p.happyAnimals >= 10 },
-  { id: 'guests_50', text: 'Welcome 50 guests in a single day', reward: 5000, check: (s) => s.guestsToday >= 50 },
-  { id: 'baby', text: 'Have a baby animal born in your zoo', reward: 5000, check: (_s, p) => p.counters.births > 0 },
-  { id: 'rating_60', text: 'Reach a zoo rating of 60', reward: 8000, check: (s) => s.rating >= 60 },
-  { id: 'species_6', text: 'Exhibit 6 different species', reward: 10000, check: (_s, p) => p.speciesCount >= 6 },
-  { id: 'guests_150', text: 'Welcome 150 guests in a single day', reward: 10000, check: (s) => s.guestsToday >= 150 },
-  { id: 'money_100k', text: 'Have $100,000 in the bank', reward: 15000, check: (s) => s.money >= 100000 },
-  { id: 'rating_80', text: 'Reach a zoo rating of 80', reward: 20000, check: (s) => s.rating >= 80 },
-  { id: 'species_10', text: 'Exhibit 10 different species', reward: 25000, check: (_s, p) => p.speciesCount >= 10 },
-  { id: 'visitors_5000', text: 'Welcome 5,000 visitors in total', reward: 30000, check: (s) => s.totalVisitors >= 5000 },
+  { id: 'build_habitat', text: 'Build your first habitat (enclose an area with fences)', reward: 1000, check: (s) => s.world.habitats.size > 0 },
+  { id: 'first_animal', text: 'Adopt your first animal', reward: 1500, check: (s) => s.animals.size > 0 },
+  { id: 'hire_keeper', text: 'Hire a keeper to feed your animals', reward: 500, check: (s) => s.keeperCount() > 0 },
+  { id: 'food_stand', text: 'Build a snack or drinks kiosk', reward: 1000, check: (_s, p) => p.has.food || p.has.drink },
+  { id: 'restrooms', text: 'Build restrooms for your guests', reward: 1000, check: (_s, p) => p.has.restroom },
+  { id: 'guests_25', text: 'Welcome 25 guests in a single day', reward: 1500, check: (s) => s.guestsToday >= 25, progress: (s, p) => of(bestDay(s, p), 25) },
+  { id: 'species_3', text: 'Exhibit 3 different species', reward: 2500, check: (_s, p) => p.speciesCount >= 3, progress: (_s, p) => of(p.speciesCount, 3) },
+  { id: 'happy_10', text: 'Have 10 animals with happiness above 70%', reward: 2500, check: (_s, p) => p.happyAnimals >= 10, progress: (_s, p) => of(p.happyAnimals, 10) },
+  { id: 'guests_50', text: 'Welcome 50 guests in a single day', reward: 2500, check: (s) => s.guestsToday >= 50, progress: (s, p) => of(bestDay(s, p), 50) },
+  { id: 'baby', text: 'Have a baby animal born in your zoo', reward: 3000, check: (_s, p) => p.counters.births > 0 },
+  { id: 'rating_60', text: 'Reach a zoo rating of 60', reward: 4000, check: (s) => s.rating >= 60, progress: (s) => of(s.rating, 60) },
+  { id: 'species_6', text: 'Exhibit 6 different species', reward: 5000, check: (_s, p) => p.speciesCount >= 6, progress: (_s, p) => of(p.speciesCount, 6) },
+  { id: 'visitors_1000', text: 'Welcome 1,000 visitors in total', reward: 3000, check: (s) => s.totalVisitors >= 1000, progress: (s) => of(s.totalVisitors, 1000) },
+  { id: 'gift_shop', text: 'Build a gift shop', reward: 2000, check: (_s, p) => p.has.gift },
+  { id: 'profit_3000', text: 'Make $3,000 running profit in one day', reward: 5000, check: (_s, p) => p.bestRunning >= 3000, progress: (_s, p) => of(Math.max(0, p.bestRunning), 3000) },
+  { id: 'guests_150', text: 'Welcome 150 guests in a single day', reward: 5000, check: (s) => s.guestsToday >= 150, progress: (s, p) => of(bestDay(s, p), 150) },
+  { id: 'species_8', text: 'Exhibit 8 different species', reward: 8000, check: (_s, p) => p.speciesCount >= 8, progress: (_s, p) => of(p.speciesCount, 8) },
+  { id: 'visitors_2500', text: 'Welcome 2,500 visitors in total', reward: 5000, check: (s) => s.totalVisitors >= 2500, progress: (s) => of(s.totalVisitors, 2500) },
+  { id: 'guest_happy_75', text: 'Reach 75% guest happiness for a day', reward: 6000, check: (_s, p) => p.bestDayHappiness >= 0.75, progress: (_s, p) => of(p.bestDayHappiness * 100, 75) },
+  { id: 'rating_70', text: 'Reach a zoo rating of 70', reward: 8000, check: (s) => s.rating >= 70, progress: (s) => of(s.rating, 70) },
+  { id: 'habitats_80', text: 'Get 8 habitats to 80% suitability', reward: 6000, check: (_s, p) => p.goodHabitats >= 8, progress: (_s, p) => of(p.goodHabitats, 8) },
+  { id: 'money_100k', text: 'Have $100,000 in the bank', reward: 10000, check: (s) => s.money >= 100000, progress: (s) => of(Math.max(0, s.money), 100000) },
+  { id: 'rating_80', text: 'Reach a zoo rating of 80', reward: 15000, check: (s) => s.rating >= 80, progress: (s) => of(s.rating, 80) },
+  { id: 'species_10', text: 'Exhibit 10 different species', reward: 20000, check: (_s, p) => p.speciesCount >= 10, progress: (_s, p) => of(p.speciesCount, 10) },
+  { id: 'visitors_5000', text: 'Welcome 5,000 visitors in total', reward: 20000, check: (s) => s.totalVisitors >= 5000, progress: (s) => of(s.totalVisitors, 5000) },
 ];
 
 export function createObjectives(): Objective[] {
@@ -48,8 +65,38 @@ export interface Complaints {
   price: number;
 }
 
+/** What Progress keeps in a save (fields added later are optional). */
+export interface ProgressSave {
+  births?: number;
+  ratingAcc?: number;
+  complaintAcc?: number;
+  /** Pregnancies announced so far. */
+  pregnancies?: number;
+  /** Most guests welcomed in one completed day. */
+  bestDayGuests?: number;
+  /** Species that have had a baby here. */
+  bredSpecies?: string[];
+  /** Best running result (tickets, shops, donations less running costs) of one closed day. */
+  bestRunning?: number;
+  /** Best average happiness (0..1) of the guests who left on one closed day. */
+  bestDayHappiness?: number;
+}
+
 export class Progress {
-  counters = { births: 0 };
+  counters = { births: 0, pregnancies: 0 };
+  /** Most guests welcomed in one completed day. */
+  bestDayGuests = 0;
+  /** Best running result of one closed day. */
+  bestRunning = 0;
+  /** Best average happiness of the guests leaving on one closed day (days with a handful of guests don't count). */
+  bestDayHappiness = 0;
+  /** Today's departing guests: summed happiness and head count. */
+  private leftHappy = 0;
+  private leftCount = 0;
+  /** Habitats whose animals all find it 80% suitable or better (refreshed with the rating). */
+  goodHabitats = 0;
+  /** Species that have had a baby in this zoo. */
+  readonly bredSpecies = new Set<string>();
   has = { food: false, drink: false, restroom: false, bench: false, bin: false, gift: false };
   speciesCount = 0;
   happyAnimals = 0;
@@ -65,18 +112,43 @@ export class Progress {
   constructor(private sim: Simulation) {}
 
   reset() {
-    this.counters = { births: 0 };
+    this.counters = { births: 0, pregnancies: 0 };
+    this.bestDayGuests = 0;
+    this.bestRunning = 0;
+    this.bestDayHappiness = 0;
+    this.leftHappy = this.leftCount = 0;
+    this.goodHabitats = 0;
+    this.bredSpecies.clear();
     this.ratingAcc = 0;
     this.complaintAcc = 0;
     this.facilitiesRev = -1;
     this.clearComplaints();
   }
 
-  serialize(): Record<string, number> {
-    return { births: this.counters.births, ratingAcc: this.ratingAcc, complaintAcc: this.complaintAcc };
+  serialize(): ProgressSave {
+    return {
+      births: this.counters.births,
+      ratingAcc: this.ratingAcc,
+      complaintAcc: this.complaintAcc,
+      pregnancies: this.counters.pregnancies,
+      bestDayGuests: this.bestDayGuests,
+      bredSpecies: Array.from(this.bredSpecies),
+      bestRunning: this.bestRunning,
+      bestDayHappiness: this.bestDayHappiness,
+    };
   }
-  load(d: Record<string, number>) {
+  /** `bestRunning`: the best closed day in the saved ledger, for saves that did not keep it. */
+  load(d: ProgressSave, bestRunning = 0) {
     this.counters.births = d.births ?? 0;
+    // older saves: every birth followed a pregnancy
+    this.counters.pregnancies = d.pregnancies ?? this.counters.births;
+    this.bestDayGuests = d.bestDayGuests ?? 0;
+    this.bestRunning = d.bestRunning ?? bestRunning;
+    this.bestDayHappiness = d.bestDayHappiness ?? 0;
+    this.leftHappy = this.leftCount = 0;
+    this.goodHabitats = 0;
+    this.bredSpecies.clear();
+    for (const id of d.bredSpecies ?? []) this.bredSpecies.add(id);
     this.ratingAcc = d.ratingAcc ?? 0;
     this.complaintAcc = d.complaintAcc ?? 0;
     this.facilitiesRev = -1;
@@ -89,6 +161,28 @@ export class Progress {
     this.litterParties.clear();
     this.worstLitterTile = -1;
     this.worstLitter = 0;
+  }
+
+  /** Midnight: remember the best day for the guest and profit goals. */
+  closeDay(guests: number, running: number) {
+    this.bestDayGuests = Math.max(this.bestDayGuests, guests);
+    this.bestRunning = Math.max(this.bestRunning, running);
+    if (this.leftCount >= 20) this.bestDayHappiness = Math.max(this.bestDayHappiness, this.leftHappy / this.leftCount);
+    this.leftHappy = this.leftCount = 0;
+  }
+
+  /** A guest went home this happy (0..1). */
+  noteDeparture(happiness: number) {
+    this.leftHappy += happiness;
+    this.leftCount++;
+  }
+
+  /** current / target of an objective (null for unknown or one-step goals). */
+  goalProgress(id: string): GoalProgress | null {
+    const def = OBJECTIVES.find((d) => d.id === id);
+    if (!def?.progress) return null;
+    this.refreshFacilities();
+    return def.progress(this.sim, this);
   }
 
   /** A party leader saw `trash` items around path tile `tile`. */
@@ -140,11 +234,13 @@ export class Progress {
     this.refreshFacilities();
     let ah = 0;
     let n = 0;
+    let held = 0;
     const species = new Set<string>();
     let appeal = 0;
     for (const a of sim.animals.values()) {
       ah += a.happiness * (0.6 + 0.4 * a.health);
       n++;
+      held += sim.collectionWeight(a);
       if (!species.has(a.speciesId)) {
         species.add(a.speciesId);
         appeal += SPECIES_BY_ID[a.speciesId]?.appeal ?? 5;
@@ -152,7 +248,8 @@ export class Progress {
     }
     const welfare = n ? ah / n : 0;
     const diversity = 1 - Math.exp(-species.size / 3.5);
-    const collection = 1 - Math.exp(-n / 18);
+    // cramming more animals into a full habitat adds nothing
+    const collection = 1 - Math.exp(-held / 18);
     const avgAppeal = species.size ? appeal / species.size / 10 : 0;
     const exhibits = 55 * (0.5 * diversity + 0.3 * collection + 0.2 * avgAppeal) * (0.4 + 0.6 * welfare);
 
@@ -203,15 +300,7 @@ export class Progress {
       const target = this.targetRating();
       sim.rating += (target - sim.rating) * Math.min(1, 2 / 40);
       sim.rating = Math.max(0, Math.min(100, sim.rating));
-      // counts for objectives
-      const species = new Set<string>();
-      let happy = 0;
-      for (const a of sim.animals.values()) {
-        species.add(a.speciesId);
-        if (a.happiness > 0.7) happy++;
-      }
-      this.speciesCount = species.size;
-      this.happyAnimals = happy;
+      this.refreshCounts();
       this.checkObjectives();
     }
     this.complaintAcc += dt;
@@ -219,6 +308,46 @@ export class Progress {
       this.complaintAcc -= 15;
       this.reportComplaints();
     }
+  }
+
+  /** Species, happy animals and well-suited habitats, for the objectives. */
+  private refreshCounts() {
+    const species = new Set<string>();
+    let happy = 0;
+    for (const a of this.sim.animals.values()) {
+      species.add(a.speciesId);
+      if (a.happiness > 0.7) happy++;
+    }
+    this.speciesCount = species.size;
+    this.happyAnimals = happy;
+    this.goodHabitats = this.countGoodHabitats();
+  }
+
+  /**
+   * A save from before these goals existed: the ones the zoo has already reached are
+   * marked done without a reward, so Continue doesn't pop a pile of goal cards.
+   */
+  settleNewGoals(ids: readonly string[]) {
+    const sim = this.sim;
+    this.refreshFacilities();
+    this.refreshCounts();
+    for (const o of sim.objectives) {
+      if (o.done || !ids.includes(o.id)) continue;
+      if (OBJECTIVES.find((d) => d.id === o.id)?.check(sim, this)) o.done = true;
+    }
+  }
+
+  private countGoodHabitats(): number {
+    const sim = this.sim;
+    let n = 0;
+    for (const hab of sim.world.habitats.values()) {
+      const pop = sim.population(hab.id);
+      if (!pop.count.size) continue;
+      let ok = true;
+      for (const sid of pop.count.keys()) if ((sim.evalFor(hab.id, sid)?.score ?? 0) < 0.8) ok = false;
+      if (ok) n++;
+    }
+    return n;
   }
 
   checkObjectives() {

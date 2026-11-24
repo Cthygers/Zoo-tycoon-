@@ -2,7 +2,7 @@
 // speed controls and the zoo menu button. Values refresh at ~4 Hz; only the
 // money counter animates per frame while it is catching up.
 
-import type { ISimulation, SimSpeed } from '../core/contracts';
+import type { ISimulation, SimSpeed, ZooStats } from '../core/contracts';
 import { button, el, fmtClock, fmtMoney, iconEl, setText, swallowPointer, toggleClass } from './dom';
 import { icon } from './icons';
 import { UnreadBadge, type MessageLog } from './notify';
@@ -15,6 +15,20 @@ export interface HudHost {
   setSpeed(s: SimSpeed): void;
 }
 
+/** The sim lets a party in only while this many more guests fit (see GuestSystem.trySpawn). */
+const PARTY_ROOM = 4;
+
+/** Guest chip: how many are in the zoo of how many fit, and whether arrivals are waiting for room. */
+export function guestChip(st: Pick<ZooStats, 'guestsInZoo' | 'guestCapacity'>): { count: string; cap: string; full: boolean; label: string } {
+  const full = st.guestsInZoo + PARTY_ROOM > st.guestCapacity;
+  return {
+    count: String(st.guestsInZoo),
+    cap: `/${st.guestCapacity}`,
+    full,
+    label: `Guests in the zoo: ${st.guestsInZoo} of ${st.guestCapacity}${full ? ' (full)' : ''}`,
+  };
+}
+
 export class Hud {
   readonly root: HTMLElement;
   private moneyChip: HTMLElement;
@@ -24,7 +38,9 @@ export class Hud {
   private dayText: HTMLElement;
   private timeText: HTMLElement;
   private openDot: HTMLElement;
+  private guestsChip: HTMLElement;
   private guestsText: HTMLElement;
+  private guestsCap: HTMLElement;
   private starsFg: HTMLElement;
   private ratingNum: HTMLElement;
   private speedBtns: HTMLButtonElement[] = [];
@@ -50,7 +66,12 @@ export class Hud {
     ]);
 
     this.guestsText = el('span');
-    const guests = el('div', { class: 'wh-chip wh-chip-guests wh-glass', title: 'Guests in the zoo', onClick: () => host.openMenu('stats') }, [iconEl('guests'), this.guestsText]);
+    this.guestsCap = el('span', 'wh-guests-cap');
+    const guests = el('div', { class: 'wh-chip wh-chip-guests wh-glass', title: 'Guests in the zoo', onClick: () => host.openMenu('stats') }, [
+      iconEl('guests'),
+      el('span', {}, [this.guestsText, this.guestsCap]),
+    ]);
+    this.guestsChip = guests;
 
     const starRow = (cls: string) => {
       const r = el('span', cls);
@@ -120,7 +141,11 @@ export class Hud {
     const open = sim.isOpen();
     toggleClass(this.openDot, 'closed', !open);
     this.openDot.title = open ? 'Zoo open' : 'Zoo closed';
-    setText(this.guestsText, String(sim.guests.size));
+    const g = guestChip(sim.stats());
+    setText(this.guestsText, g.count);
+    setText(this.guestsCap, g.cap);
+    toggleClass(this.guestsCap, 'full', g.full);
+    if (this.guestsChip.title !== g.label) this.guestsChip.title = g.label;
     const r = Math.max(0, Math.min(100, sim.rating));
     const w = `${(r / 100) * 100}%`;
     if (this.starsFg.style.width !== w) this.starsFg.style.width = w;

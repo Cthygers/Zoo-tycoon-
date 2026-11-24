@@ -3,9 +3,11 @@
 // Refreshes at ~2 Hz while open.
 
 import { QUALITY_KEY, SOUND_KEY } from '../core/constants';
-import type { IAudio, IRenderContext, ISimulation, QualityLevel } from '../core/contracts';
+import type { IAudio, IRenderContext, ISimulation, QualityLevel, RunningCostEstimate } from '../core/contracts';
 import type { LedgerEntry } from '../core/types';
 import { button, el, escapeHtml, fmtClock, fmtMoney, fmtPct, setText, storageSet, swallowPointer, toggleClass } from './dom';
+import { goalFraction, goalProgressText } from './coach';
+import { guestChip } from './hud';
 import { icon, type IconName } from './icons';
 import { UnreadBadge, type MessageLog } from './notify';
 import { logoSvg } from './screens';
@@ -43,8 +45,14 @@ export interface ZooPanelHost {
   focus(x: number, z: number): void;
 }
 
+/** Under Zoo stats: what makes room for more guests. */
+const CAPACITY_HINT = 'Paths and new exhibits make room for more guests.';
+
 const INCOME = '#70a24a';
 const EXPENSE = '#b85a40';
+/** One-offs stacked on the running bars: rewards and sales on income, building and animals on costs. */
+const INCOME_ONE_OFF = '#b5d494';
+const EXPENSE_ONE_OFF = '#e0b39e';
 
 const TABS: { id: ZooTab; name: string; icon: IconName }[] = [
   { id: 'finance', name: 'Finances', icon: 'coin' },
@@ -58,6 +66,7 @@ export class ZooPanel {
   readonly root: HTMLElement;
   private tabBtns = new Map<ZooTab, HTMLButtonElement>();
   private heading = el('h2');
+  private closeBtn: HTMLButtonElement;
   private body = el('div', 'wh-modal-body');
   private tab: ZooTab = 'finance';
   private refreshFn: (() => void) | null = null;
@@ -76,10 +85,8 @@ export class ZooPanel {
     }
     tabs.append(el('div', 'wh-tabs-spacer'));
     this.unread = new UnreadBadge(this.tabBtns.get('messages')!, host.log, 'Messages');
-    const modal = el('div', 'wh-modal wh-glass-2', [
-      tabs,
-      el('div', 'wh-modal-main', [el('div', 'wh-modal-head', [this.heading, button('wh-btn-ghost wh-btn-icon', 'close', null, () => this.close(), 'Close')]), this.body]),
-    ]);
+    this.closeBtn = button('wh-btn-ghost wh-btn-icon', 'close', null, () => this.close(), 'Close');
+    const modal = el('div', 'wh-modal wh-glass-2', [tabs, el('div', 'wh-modal-main', [el('div', 'wh-modal-head', [this.heading, this.closeBtn]), this.body])]);
     this.root = el('div', 'wh-modal-back hidden', [modal]);
     // closed: no taps, focus or key presses reach the menu's controls (see .wh-modal-back.hidden)
     this.root.inert = true;
@@ -91,6 +98,18 @@ export class ZooPanel {
 
   get isOpen(): boolean {
     return !this.root.classList.contains('hidden');
+  }
+
+  /**
+   * The free stretch of the title row (screen px), between the tab's name and the close
+   * button: toasts show there while the menu is open, so feedback (e.g. Save now) is seen.
+   */
+  headGap(): { x0: number; x1: number; top: number } {
+    const range = document.createRange();
+    range.selectNodeContents(this.heading);
+    const title = range.getBoundingClientRect();
+    const close = this.closeBtn.getBoundingClientRect();
+    return { x0: title.right + 12, x1: close.left - 12, top: close.top };
   }
 
   open(tab: ZooTab = this.tab): void {
@@ -176,37 +195,42 @@ export class ZooPanel {
     const chartWrap = el('div');
     const legend = el('div', {
       class: 'wh-legend',
-      html: `<span><i style="background:${INCOME}"></i>Income</span><span><i style="background:${EXPENSE}"></i>Expenses</span><span style="margin-left:auto" class="wh-chart-tip"></span>`,
+      html: `<span><i style="background:${INCOME}"></i>Income</span><span><i style="background:${EXPENSE}"></i>Running costs</span><span><i style="background:linear-gradient(90deg, ${INCOME_ONE_OFF} 50%, ${EXPENSE_ONE_OFF} 50%)"></i>One-off</span>`,
     });
-    const tip = legend.querySelector('.wh-chart-tip') as HTMLElement;
+    const tip = el('div', 'wh-chart-tip');
     const table = el('table', 'wh-ledger');
     this.body.append(
       el('div', 'wh-stat-grid', [cash.root, today.root, yday.root]),
       el('div', 'wh-two', [
-        el('div', 'wh-sect', [el('div', { class: 'wh-sect-h', text: 'Last 14 days' }), legend, chartWrap]),
+        el('div', 'wh-sect', [el('div', { class: 'wh-sect-h', text: 'Last 14 days' }), legend, chartWrap, tip]),
         el('div', 'wh-sect', [el('div', { class: 'wh-sect-h', text: 'Today' }), table]),
       ]),
       admission,
     );
     let chartKey = '';
     let lastTodaySub = '';
+    let lastRows = '';
     return () => {
       setText(cash.v, fmtMoney(sim.money));
       cash.v.className = `wh-stat-v ${sim.money < 0 ? 'bad' : ''}`;
       setText(cash.s, `Day ${sim.day}`);
+      // running profit as midnight will book it: today's income less the whole day's running costs
       const t = sim.today;
-      const net = t.income - t.expenses;
-      setText(today.v, fmtMoney(net, { sign: true }));
-      today.v.className = `wh-stat-v ${net < 0 ? 'bad' : 'good'}`;
+      const c = sim.runningCosts();
+      const td = { ...chartDay(t, c), day: sim.day };
+      const running = td.income - td.costs;
+      setText(today.v, fmtMoney(running, { sign: true }));
+      today.v.className = `wh-stat-v ${running < 0 ? 'bad' : 'good'}`;
       // wrap between the two amounts, never inside one
-      const sub = `<span style="white-space:nowrap">${fmtMoney(t.income)} in</span> · <span style="white-space:nowrap">${fmtMoney(t.expenses)} out</span>`;
+      const sub = `<span style="white-space:nowrap">${fmtMoney(td.income)} in</span> · <span style="white-space:nowrap">${fmtMoney(td.costs)} costs</span>`;
       if (sub !== lastTodaySub) {
         lastTodaySub = sub;
         today.s.innerHTML = sub;
       }
       const y = sim.ledger[sim.ledger.length - 1];
       if (y) {
-        const yn = y.income - y.expenses;
+        const yd = chartDay(y);
+        const yn = yd.income - yd.costs;
         setText(yday.v, fmtMoney(yn, { sign: true }));
         yday.v.className = `wh-stat-v ${yn < 0 ? 'bad' : 'good'}`;
         setText(yday.s, `${y.admissions ? fmtMoney(y.admissions) : '$0'} from tickets`);
@@ -214,28 +238,26 @@ export class ZooPanel {
         setText(yday.v, '—');
         setText(yday.s, 'First day');
       }
-      const rows: [string, number][] = [
-        ['Tickets', t.admissions],
-        ['Shops', t.shopIncome],
-        ['Donations', t.donations],
-        // one-offs (goal rewards, animal sales, removal refunds): the day-end message keeps them out of the running result too
-        ['Rewards & refunds', t.other],
-        ['Construction', -t.construction],
-        ['Animals', -t.animalPurchases],
-        ['Wages', -t.salaries],
-        ['Animal food', -(t.food ?? 0)],
-        ['Upkeep', -t.upkeep],
-      ];
-      table.innerHTML =
-        rows
-          .map(([k, v]) => `<tr><td>${k}</td><td class="${v > 0 ? 'pos' : v < 0 ? 'neg' : ''}">${v ? fmtMoney(v, { sign: true }) : '—'}</td></tr>`)
-          .join('') + `<tr class="total"><td>Net</td><td class="${net >= 0 ? 'pos' : 'neg'}">${fmtMoney(net, { sign: true })}</td></tr>`;
-      const days = [...sim.ledger.slice(-13), { ...t, day: sim.day }];
-      const key = days.map((d) => `${d.day}:${Math.round(d.income)}:${Math.round(d.expenses)}`).join('|');
+      const rows = todayRows(t, c)
+        .map((r) => {
+          const v = r.value || r.total ? fmtMoney(r.value, { sign: true }) : '—';
+          const cls = r.value > 0 ? 'pos' : r.value < 0 ? 'neg' : '';
+          const note = r.note ? ` <span class="wh-ledger-note">${r.note}</span>` : '';
+          return `<tr${r.total ? ' class="total"' : ''}><td>${r.label}${note}</td><td class="${cls}">${v}</td></tr>`;
+        })
+        .join('');
+      if (rows !== lastRows) {
+        lastRows = rows;
+        table.innerHTML = rows;
+      }
+      const days = [...sim.ledger.slice(-13).map((d) => chartDay(d)), td];
+      // drawn at its on-screen width, so its labels keep their size on any screen
+      const width = Math.round(chartWrap.clientWidth) || 360;
+      const key = `${width}|${days.map((d) => `${d.day}:${Math.round(d.income)}:${Math.round(d.costs)}:${Math.round(d.oneOffIn)}:${Math.round(d.invest)}`).join('|')}`;
       if (key !== chartKey) {
         chartKey = key;
         chartWrap.innerHTML = '';
-        chartWrap.append(barChart(days, sim.day, tip));
+        chartWrap.append(barChart(days, sim.day, tip, width));
       }
       if (document.activeElement !== slider) setSlider(Math.round(sim.admissionPrice));
       const fairPrice = sim.stats().fairAdmission;
@@ -264,7 +286,18 @@ export class ZooPanel {
       const done = obj.filter((o) => o.done).length;
       setText(summary, `${done} of ${obj.length} goals complete`);
       prog.style.width = `${obj.length ? (done / obj.length) * 100 : 0}%`;
-      const key = obj.map((o) => `${o.id}:${o.done}`).join(',');
+      // how far along each open goal is (best day so far for the one-day goals)
+      const progress = new Map<string, string>();
+      for (const o of obj) {
+        const p = o.done ? null : sim.objectiveProgress(o.id);
+        if (!p) continue;
+        const best = /single day|one day|for a day/.test(o.text) ? ' · best day' : '';
+        progress.set(
+          o.id,
+          `<div class="wh-obj-prog"><span class="wh-obj-bar"><i style="width:${(goalFraction(p) * 100).toFixed(1)}%"></i></span><span>${escapeHtml(goalProgressText(o, p))}${best}</span></div>`,
+        );
+      }
+      const key = obj.map((o) => `${o.id}:${o.done}:${progress.get(o.id) ?? ''}`).join(',');
       if (key !== last) {
         last = key;
         // open goals first, then completed
@@ -272,9 +305,9 @@ export class ZooPanel {
         list.innerHTML = sorted
           .map(
             (o) =>
-              `<div class="wh-obj ${o.done ? 'done' : ''}"><div class="wh-obj-check">${o.done ? icon('check') : ''}</div><div class="wh-obj-text">${escapeHtml(o.text)}</div><div class="wh-obj-reward">${
-                o.reward ? fmtMoney(o.reward, { sign: true }) : ''
-              }</div></div>`,
+              `<div class="wh-obj ${o.done ? 'done' : ''}"><div class="wh-obj-check">${o.done ? icon('check') : ''}</div><div class="wh-obj-text">${escapeHtml(o.text)}${
+                progress.get(o.id) ?? ''
+              }</div><div class="wh-obj-reward">${o.reward ? fmtMoney(o.reward, { sign: true }) : ''}</div></div>`,
           )
           .join('') || '<div class="wh-note">No goals right now.</div>';
       }
@@ -292,11 +325,14 @@ export class ZooPanel {
   private statsTab(): () => void {
     const sim = this.host.sim;
     const grid = el('div', 'wh-stat-grid');
-    this.body.append(grid);
+    this.body.append(grid, el('div', { class: 'wh-note', attrs: { style: 'margin-top:10px' }, text: CAPACITY_HINT }));
     return () => {
       const st = sim.stats();
+      const g = guestChip(st);
       grid.innerHTML = [
         statHtml('Guests in zoo', String(st.guestsInZoo), 'guests'),
+        statHtml('Capacity', String(st.guestCapacity), 'guests', g.full ? 'warn' : ''),
+        statHtml('Turned away today', String(st.turnedAwayToday), 'home', st.turnedAwayToday > 0 ? 'warn' : ''),
         statHtml('Visitors today', String(st.guestsToday), 'ticket'),
         statHtml('All-time visitors', st.totalVisitors.toLocaleString('en-US'), 'chart'),
         statHtml('Animals', String(st.animalCount), 'paw'),
@@ -307,7 +343,8 @@ export class ZooPanel {
         statHtml('Litter', String(st.litterCount), 'trash', st.litterCount > 30 ? 'bad' : ''),
         statHtml('Habitats', String(sim.world.habitats.size), 'fence'),
         statHtml('Admission', fmtMoney(sim.admissionPrice), 'ticket'),
-        statHtml('Status', sim.isOpen() ? 'Open' : 'Closed', 'clock'),
+        // why nobody gets in (the entrance path cut, no animals on view) outranks the opening hours
+        statHtml('Status', st.gateClosed ?? (sim.isOpen() ? 'Open' : 'Closed'), 'clock', st.gateClosed ? 'bad' : ''),
       ].join('');
     };
   }
@@ -425,22 +462,94 @@ function statHtml(k: string, v: string, ic: IconName, cls = ''): string {
   return `<div class="wh-stat"><div class="wh-stat-k">${icon(ic)}${escapeHtml(k)}</div><div class="wh-stat-v ${cls}">${escapeHtml(v)}</div></div>`;
 }
 
-/** Grouped income/expense bars for recent days (today striped as partial). */
-function barChart(days: LedgerEntry[], today: number, tip: HTMLElement): SVGSVGElement {
-  const W = 360,
-    H = 150,
+/** A day's money split as the day-close message splits it: running income and costs, and one-offs. */
+export interface ChartDay {
+  day: number;
+  /** Tickets, shops and donations. */
+  income: number;
+  /** Wages, animal food and upkeep. */
+  costs: number;
+  /** Goal rewards, animal sales and removal refunds. */
+  oneOffIn: number;
+  /** Building and animal purchases. */
+  invest: number;
+}
+
+/**
+ * Split a ledger day. Today's running costs are booked at midnight, so `estimate` (the sim's
+ * whole-day figure) stands in for them.
+ */
+export function chartDay(d: LedgerEntry, estimate?: RunningCostEstimate): ChartDay {
+  return {
+    day: d.day,
+    income: d.admissions + d.shopIncome + d.donations,
+    costs: estimate ? estimate.day.total : d.salaries + (d.food ?? 0) + d.upkeep,
+    oneOffIn: d.other,
+    invest: d.construction + d.animalPurchases,
+  };
+}
+
+/** One row of the Today table; `total` rows sum up what is above them. */
+export interface FinanceRow {
+  label: string;
+  value: number;
+  /** E.g. "at midnight": a running cost still to be booked. */
+  note?: string;
+  total?: boolean;
+}
+
+/**
+ * Today's ledger with the running costs midnight will book (so the profit doesn't climb all
+ * day and drop at midnight), then the one-offs that the day-close message keeps apart.
+ */
+export function todayRows(t: LedgerEntry, c: RunningCostEstimate): FinanceRow[] {
+  const d = chartDay(t, c);
+  const running = d.income - d.costs;
+  // part of it may be booked already (staff dismissed today are paid on the spot)
+  const due = (whole: number, booked: number) => (whole - booked > 0.5 ? 'due at midnight' : undefined);
+  const rows: FinanceRow[] = [
+    { label: 'Tickets', value: t.admissions },
+    { label: 'Shops', value: t.shopIncome },
+    { label: 'Donations', value: t.donations },
+    { label: 'Wages', value: -c.day.wages, note: due(c.day.wages, t.salaries) },
+    { label: 'Animal food', value: -c.day.food, note: due(c.day.food, t.food ?? 0) },
+    { label: 'Upkeep', value: -c.day.upkeep, note: due(c.day.upkeep, t.upkeep) },
+    { label: 'Running profit', value: running, total: true },
+  ];
+  // one-offs only when there are any (then the net of everything closes the table)
+  const oneOffs: FinanceRow[] = [
+    { label: 'Rewards & refunds', value: d.oneOffIn },
+    { label: 'Construction', value: -t.construction },
+    { label: 'Animals', value: -t.animalPurchases },
+  ].filter((r) => Math.round(r.value) !== 0);
+  if (!oneOffs.length) return rows;
+  return [...rows, ...oneOffs, { label: 'Net', value: running + d.oneOffIn - d.invest, total: true }];
+}
+
+/** Top of the chart's scale: running income and costs only, so one big building day doesn't flatten the rest. */
+export function chartTop(days: readonly ChartDay[]): number {
+  return niceMax(Math.max(100, ...days.map((d) => Math.max(d.income, d.costs))));
+}
+
+/**
+ * Grouped bars for recent days: income (with one-off rewards stacked on top) and running costs
+ * (with building stacked on top). Today's running bars are striped as partial; bars past the
+ * scale are cut at the top with a break mark.
+ */
+function barChart(days: ChartDay[], today: number, tip: HTMLElement, W: number): SVGSVGElement {
+  const H = 150,
     padB = 18,
     padT = 8;
-  const max = Math.max(100, ...days.map((d) => Math.max(d.income, d.expenses)));
-  const nice = niceMax(max);
-  // room for the widest axis label ("$2.5M", "$250k" …) at 10 px
-  const padL = 12 + Math.max(shortMoney(nice).length, shortMoney(nice / 2).length) * 6;
+  const nice = chartTop(days);
+  // room for the widest axis label ("$2.5M", "$250k" …) at 10.5 px
+  const padL = 12 + Math.max(shortMoney(nice).length, shortMoney(nice / 2).length) * 6.5;
   const plotW = W - padL - 4,
     plotH = H - padB - padT;
   const n = Math.max(days.length, 7);
   const slot = plotW / n;
   const bw = Math.max(3, Math.min(10, slot * 0.34));
-  const y = (v: number) => padT + plotH - (v / nice) * plotH;
+  const base = padT + plotH;
+  const y = (v: number) => base - (Math.min(v, nice) / nice) * plotH;
   const parts: string[] = [];
   parts.push(
     `<defs><pattern id="wh-hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="${INCOME}"/><rect width="2" height="5" fill="rgba(0,0,0,.28)"/></pattern><pattern id="wh-hatch2" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="${EXPENSE}"/><rect width="2" height="5" fill="rgba(0,0,0,.28)"/></pattern></defs>`,
@@ -451,19 +560,29 @@ function barChart(days: LedgerEntry[], today: number, tip: HTMLElement): SVGSVGE
     parts.push(`<line x1="${padL}" x2="${W - 2}" y1="${gy.toFixed(1)}" y2="${gy.toFixed(1)}" stroke="rgba(255,255,255,${g === 0 ? 0.18 : 0.07})" stroke-width="1"/>`);
     parts.push(`<text x="${padL - 6}" y="${(gy + 3).toFixed(1)}" text-anchor="end">${shortMoney(v)}</text>`);
   }
-  const bar = (x: number, v: number, fill: string) => {
-    const top = y(v);
-    const h = Math.max(0, padT + plotH - top);
-    if (h < 0.5) return '';
-    const r = Math.min(3, bw / 2, h);
-    // rounded data-end, square baseline
-    return `<path d="M${x.toFixed(1)} ${(padT + plotH).toFixed(1)}V${(top + r).toFixed(1)}q0 ${-r} ${r} ${-r}h${(bw - 2 * r).toFixed(1)}q${r} 0 ${r} ${r}V${(padT + plotH).toFixed(1)}z" fill="${fill}"/>`;
+  /** A bar of `run` with `extra` stacked on it; the data end is rounded, the baseline square. */
+  const bar = (x: number, run: number, extra: number, fill: string, extraFill: string) => {
+    const mid = y(run);
+    const top = y(run + extra);
+    if (base - top < 0.5) return '';
+    const r = Math.min(3, bw / 2, base - top);
+    const out: string[] = [];
+    // the one-off part first, rounded at its top; the running part over its square bottom edge
+    if (mid - top >= 0.5)
+      out.push(`<path d="M${x.toFixed(1)} ${mid.toFixed(1)}V${(top + r).toFixed(1)}q0 ${-r} ${r} ${-r}h${(bw - 2 * r).toFixed(1)}q${r} 0 ${r} ${r}V${mid.toFixed(1)}z" fill="${extraFill}"/>`);
+    if (base - mid >= 0.5) {
+      const rr = mid - top >= 0.5 ? 0 : r;
+      out.push(`<path d="M${x.toFixed(1)} ${base.toFixed(1)}V${(mid + rr).toFixed(1)}q0 ${-rr} ${rr} ${-rr}h${(bw - 2 * rr).toFixed(1)}q${rr} 0 ${rr} ${rr}V${base.toFixed(1)}z" fill="${fill}"/>`);
+    }
+    // off the scale: a gap near the top says the bar goes on
+    if (run + extra > nice) out.push(`<rect x="${(x - 1).toFixed(1)}" y="${(padT + 5).toFixed(1)}" width="${(bw + 2).toFixed(1)}" height="2.5" fill="#141a16"/>`);
+    return out.join('');
   };
   days.forEach((d, i) => {
     const cx = padL + slot * (i + 0.5) + (n - days.length) * slot;
     const isToday = d.day === today;
-    parts.push(bar(cx - bw - 1, d.income, isToday ? 'url(#wh-hatch)' : INCOME));
-    parts.push(bar(cx + 1, d.expenses, isToday ? 'url(#wh-hatch2)' : EXPENSE));
+    parts.push(bar(cx - bw - 1, d.income, d.oneOffIn, isToday ? 'url(#wh-hatch)' : INCOME, INCOME_ONE_OFF));
+    parts.push(bar(cx + 1, d.costs, d.invest, isToday ? 'url(#wh-hatch2)' : EXPENSE, EXPENSE_ONE_OFF));
     if (i === days.length - 1 || i % 2 === (days.length - 1) % 2)
       parts.push(`<text x="${cx.toFixed(1)}" y="${H - 4}" text-anchor="middle">${isToday ? 'Today' : d.day}</text>`);
     // generous hit target per day
@@ -475,12 +594,13 @@ function barChart(days: LedgerEntry[], today: number, tip: HTMLElement): SVGSVGE
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   svg.setAttribute('class', 'wh-chart');
   svg.setAttribute('role', 'img');
-  svg.setAttribute('aria-label', 'Income and expenses for recent days');
+  svg.setAttribute('aria-label', 'Income and costs for recent days');
   svg.innerHTML = parts.join('');
   const show = (i: number) => {
     const d = days[i];
     if (!d) return;
-    tip.textContent = `${d.day === today ? 'Today' : `Day ${d.day}`}: ${fmtMoney(d.income)} in · ${fmtMoney(d.expenses)} out`;
+    const oneOffs = [d.oneOffIn ? `rewards ${fmtMoney(d.oneOffIn, { sign: true })}` : '', d.invest ? `building ${fmtMoney(-d.invest, { sign: true })}` : ''].filter(Boolean);
+    tip.textContent = `${d.day === today ? 'Today' : `Day ${d.day}`}: ${fmtMoney(d.income)} in · ${fmtMoney(d.costs)} running costs${oneOffs.length ? ` · ${oneOffs.join(' · ')}` : ''}`;
   };
   svg.addEventListener('pointerover', (e) => {
     const t = e.target as Element;

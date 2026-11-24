@@ -285,6 +285,8 @@ export class RenderContext implements IRenderContext {
   private envSunElev = -999;
   private envAge = 1e9;
   private envDirty = true;
+  /** Re-capture suspended (see holdEnvironment). */
+  private envHeld = false;
   /** Sky irradiance luminance when the environment was captured (see applyEnvIntensity). */
   private envSkyLum = 0;
   private lutSunElev = -999;
@@ -857,6 +859,7 @@ export class RenderContext implements IRenderContext {
    * skip, settle) refreshes at once. Both render targets are reused.
    */
   private updateEnvironment() {
+    if (this.envHeld && this.envRT) return;
     if (!this.envDirty && this.envAge < ENV_MAX_AGE) return;
     const jump = Math.abs(Math.asin(this.sunDirection.y) - this.envSunElev) > 10 * DEG;
     if (this.envRT && this.envAge < ENV_MIN_INTERVAL && !jump) return;
@@ -875,6 +878,24 @@ export class RenderContext implements IRenderContext {
     this.envDirty = false;
     this.envAge = 0;
     this.applyEnvIntensity();
+  }
+
+  /**
+   * Keep the current environment map while the clock moves away and back (the
+   * loading screen draws night-only objects at night after capturing the play
+   * time's sky): no re-capture until the returned release is called. Released
+   * with the sun back where the map was captured, the map counts as fresh, so
+   * a settle() in between does not force another capture.
+   */
+  holdEnvironment(): () => void {
+    this.envHeld = true;
+    return () => {
+      this.envHeld = false;
+      if (this.envRT && Math.abs(Math.asin(this.sunDirection.y) - this.envSunElev) <= ENV_SUN_STEP) {
+        this.envDirty = false;
+        this.envAge = 0;
+      }
+    };
   }
 
   private disposeEnvironment() {

@@ -2,7 +2,7 @@
 // remembered, the next-goal pill, and the build-mode camera tip count. A tiny fake DOM
 // stands in for the few element methods the coach touches.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ISimulation } from '../src/core/contracts';
+import type { GoalProgress, ISimulation } from '../src/core/contracts';
 import type { Objective, Tool } from '../src/core/types';
 import { Coach, type CoachHost } from '../src/ui/coach';
 
@@ -13,6 +13,8 @@ class FakeEl {
   title = '';
   offsetWidth = 200;
   offsetHeight = 50;
+  /** A pill text this wide (or less) fits on the pill. */
+  clientWidth = 260;
   style: Record<string, string> = {};
   classList = {
     add: (c: string) => {
@@ -30,6 +32,10 @@ class FakeEl {
   setAttribute(): void {}
   addEventListener(): void {}
   append(): void {}
+  /** Width the text would need: about 7 px a character. */
+  get scrollWidth(): number {
+    return this.textContent.length * 7;
+  }
   getBoundingClientRect() {
     return { left: 300, top: 340, width: 60, height: 56, right: 360, bottom: 396 };
   }
@@ -37,6 +43,8 @@ class FakeEl {
 
 interface FakeSim {
   objectives: Objective[];
+  progress: Record<string, GoalProgress>;
+  objectiveProgress(id: string): GoalProgress | null;
   animals: Map<number, unknown>;
   staff: Map<number, { role: string }>;
   world: { habitats: Map<number, { viewTiles: number[] }>; habitatAt(): unknown };
@@ -48,6 +56,10 @@ function setup(opts: { animals?: number } = {}) {
       { id: 'build_habitat', text: 'Build your first habitat (enclose an area with fences)', done: false, reward: 2000 },
       { id: 'first_animal', text: 'Adopt your first animal', done: false, reward: 2500 },
     ],
+    progress: {},
+    objectiveProgress(id: string) {
+      return this.progress[id] ?? null;
+    },
     animals: new Map(Array.from({ length: opts.animals ?? 0 }, (_, i) => [i + 1, {}])),
     staff: new Map(),
     world: { habitats: new Map(), habitatAt: () => ({ id: 1 }) },
@@ -192,6 +204,34 @@ describe('Coach', () => {
     coach.update(1);
     expect(bubbleTexts(coach)[0]).toBe('3/5');
     expect(host.endTool).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows how far along the next goal is, and drops the goal's verb rather than cut it off", () => {
+    const { sim, coach } = setup({ animals: 1 });
+    const priv = coach as unknown as { pillText: FakeEl; pillProgress: FakeEl; pillReward: FakeEl; pillTrack: FakeEl; pillBar: FakeEl };
+    sim.objectives = [{ id: 'guests_150', text: 'Welcome 150 guests in a single day', done: false, reward: 5000 }];
+    sim.progress.guests_150 = { current: 141, target: 150 };
+    coach.update(1);
+    expect(priv.pillText.textContent).toBe('Welcome 150 guests in a single day'); // 34 × 7 px fits in 260
+    expect(priv.pillProgress.textContent).toBe('141 / 150');
+    expect(priv.pillBar.style.width).toBe('94.0%');
+    expect(priv.pillReward.textContent).toBe('+$5,000');
+    expect(priv.pillTrack.classList.contains('hidden')).toBe(false);
+    // progress moves on without the goal changing
+    sim.progress.guests_150 = { current: 146, target: 150 };
+    coach.update(1);
+    expect(priv.pillProgress.textContent).toBe('146 / 150');
+    // a goal too long for the pill loses its verb, not the end of a word
+    sim.objectives = [{ id: 'happy_10', text: 'Have 10 animals with happiness above 70%', done: false, reward: 2500 }];
+    sim.progress.happy_10 = { current: 4, target: 10 };
+    coach.update(1);
+    expect(priv.pillText.textContent).toBe('10 animals with happiness above 70%');
+    expect(priv.pillProgress.textContent).toBe('4 / 10');
+    // a one-step goal: no bar, just the reward
+    sim.objectives = [{ id: 'gift_shop', text: 'Build a gift shop', done: false, reward: 2000 }];
+    coach.update(1);
+    expect(priv.pillTrack.classList.contains('hidden')).toBe(true);
+    expect(priv.pillProgress.textContent).toBe('');
   });
 
   it('opens the build category for a goal, or the Goals tab', () => {

@@ -3,6 +3,7 @@
 // and the live cost label that follows a build drag.
 
 import * as THREE from 'three';
+import type { SimMessage } from '../core/contracts';
 import type { NotifyKind } from '../core/events';
 import { el, escapeHtml, fmtMoney, setText, swallowPointer, toggleClass } from './dom';
 import { icon, type IconName } from './icons';
@@ -61,6 +62,14 @@ export class MessageLog {
     }
     this.entries.unshift({ text, kind, focus, day, minute, count: 1 });
     if (this.entries.length > LOG_SIZE) this.entries.length = LOG_SIZE;
+  }
+
+  /** Rebuild the log from the simulation's saved messages (oldest first), e.g. after Continue: nothing in it is new. */
+  restore(messages: readonly SimMessage[]): void {
+    this.entries.length = 0;
+    this.version++;
+    for (const m of messages) this.add(m.text, m.kind, m.focus, m.day, m.minute);
+    this.markRead();
   }
 
   /** The player is looking at the Messages tab. */

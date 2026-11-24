@@ -260,7 +260,8 @@ describe('warnings name the real cause (GAME-9)', () => {
     sim.setSpeed(3);
     runUntil(sim, 16 * 60);
     const all = texts(log);
-    expect(all.some((t) => /can’t reach .* — connect/.test(t))).toBe(true);
+    expect(all.some((t) => /entrance path is cut — reconnect it/.test(t))).toBe(true);
+    expect(all.some((t) => /can’t reach .* — connect/.test(t))).toBe(false);
     expect(all.some((t) => /nowhere to buy food|no restrooms|build a drinks kiosk/.test(t))).toBe(false);
   }, 30_000);
 });

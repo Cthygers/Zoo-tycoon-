@@ -10,8 +10,8 @@ import type { EdgeRef, EnclosureProblem } from '../core/world';
 import { FENCES_BY_ID, PATHS_BY_TYPE, fenceAdvice } from '../data/fences';
 import { OBJECTS_BY_ID, rotatedSize } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
-import { evaluateSpecies } from './habitat';
-import { STAFF_SALARY, STAFF_TITLE } from './names';
+import { MIN_FOOTING, evaluateSpecies, footingShare } from './habitat';
+import { STAFF_SALARY, STAFF_TITLE, pluralName } from './names';
 
 /** Price to repaint one tile with `terrain` (0 for unknown terrain). */
 export function terrainCost(terrain: Terrain): number {
@@ -58,6 +58,8 @@ const NOT_A_HABITAT: Record<EnclosureProblem, string> = {
 /** Longest habitat name (characters). */
 export const MAX_HABITAT_NAME = 32;
 export const SELL_FRACTION = 0.5;
+/** An adoption or move that packs a habitat past this many times what it holds asks first. */
+const MAX_CROWDING = 1.5;
 
 
 export class Commands {
@@ -207,18 +209,49 @@ export class Commands {
       }
       return true;
     };
+    // terrain counts of each habitat the paint reaches, as they would be afterwards
+    const after = new Map<number, number[]>();
     for (let z = r.z0; z <= r.z1; z++)
       for (let x = r.x0; x <= r.x1; x++) {
-        if (allowed(x, z)) count++;
-        else if (w.terrain[w.idx(x, z)] !== terrain) blocked++;
+        if (allowed(x, z)) {
+          count++;
+          const i = w.idx(x, z);
+          const h = w.habitatOf[i];
+          if (!h || !water) continue;
+          let counts = after.get(h);
+          if (!counts) after.set(h, (counts = w.habitats.get(h)!.terrainCounts.slice()));
+          counts[w.terrain[i]]--;
+          counts[terrain]++;
+        } else if (w.terrain[w.idx(x, z)] !== terrain) blocked++;
       }
     const cost = count * terrainCost(terrain);
     if (count === 0) return this.result(false, 0, blocked ? blockReason : 'Already that terrain', dryRun, at);
     if (!this.sim.canAfford(cost)) return this.result(false, cost, this.noMoney(cost), dryRun, at);
-    if (dryRun) return this.result(true, cost, blocked ? `${blocked} tile(s) skipped: ${blockReason}` : undefined, true, at);
+    const warning = this.floodWarning(after);
+    const extra: Partial<CommandResult> | undefined = warning ? { severity: 'confirm' } : undefined;
+    if (dryRun) return this.result(true, cost, blocked ? `${blocked} tile(s) skipped: ${blockReason}` : undefined, true, at, warning, extra);
     w.setTerrainRect(r, terrain, allowed);
     this.sim.spend('construction', cost);
-    return this.result(true, cost, undefined, false, at);
+    return this.result(true, cost, undefined, false, at, warning, extra);
+  }
+
+  /** Warning when water would leave animals that can't swim too little ground to stand on. */
+  private floodWarning(after: Map<number, number[]>): string | undefined {
+    const sim = this.sim;
+    for (const [h, counts] of after) {
+      const hab = sim.world.habitats.get(h)!;
+      for (const sid of sim.population(h).count.keys()) {
+        const sp = SPECIES_BY_ID[sid];
+        if (!sp || sp.swims) continue;
+        const now = footingShare(sp, hab.terrainCounts, hab.tiles.length);
+        const then = footingShare(sp, counts, hab.tiles.length);
+        if (then < MIN_FOOTING && then < now) {
+          const who = pluralName(sid);
+          return `${who[0].toUpperCase()}${who.slice(1)} can’t swim — leave dry land in ${hab.name}`;
+        }
+      }
+    }
+    return undefined;
   }
 
   // -------------------------------------------------------------- paths
@@ -677,14 +710,19 @@ export class Commands {
     }
     if (!objs.size && !paths.length && !fences.length && !trash.length)
       return this.result(false, 0, protectedHit ? 'The entrance cannot be removed' : 'Nothing to remove here', dryRun, at);
-    const cut = paths.length ? this.pathTilesCutOff(paths) : 0;
+    const { cut, cutsEntrance } = paths.length ? this.pathTilesCutOff(paths) : { cut: 0, cutsEntrance: false };
     const warnings = [
+      cutsEntrance
+        ? 'Cuts the entrance off from every exhibit — the gate closes until you reconnect it'
+        : cut
+          ? `Cuts ${cut} path tile${cut > 1 ? 's' : ''} off from the entrance — guests can’t get there`
+          : undefined,
       fences.length ? this.openingWarning(fences) : undefined,
-      cut ? `Cuts ${cut} path tile${cut > 1 ? 's' : ''} off from the entrance — guests can’t get there` : undefined,
     ].filter(Boolean);
     const warning = warnings.length ? warnings.join('; ') : undefined;
     const refund = acc.refund;
-    if (dryRun) return this.result(true, -refund, undefined, true, at, warning, this.refundShare(acc));
+    const extra: Partial<CommandResult> = { ...this.refundShare(acc), ...(cutsEntrance ? { cutsEntrance, severity: 'confirm' as const } : {}) };
+    if (dryRun) return this.result(true, -refund, undefined, true, at, warning, extra);
     for (const id of objs) this.sim.guestSys.releaseObject(id);
     for (const id of objs) {
       w.removeObject(id);
@@ -704,22 +742,35 @@ export class Commands {
     for (const id of trash) this.sim.removeLitter(id);
     this.sim.earn('other', refund);
     this.sim.markPopulationDirty();
-    return this.result(true, -refund, undefined, false, at, warning, this.refundShare(acc));
+    return this.result(true, -refund, undefined, false, at, warning, extra);
   }
 
   /**
    * How many path tiles that guests can walk to from the entrance today would be
-   * stranded if the `removed` tiles went (the removed ones themselves not counted).
+   * stranded if the `removed` tiles went (the removed ones themselves not counted), and
+   * whether no exhibit could be reached from the entrance any more.
    */
-  private pathTilesCutOff(removed: { x: number; z: number }[]): number {
+  private pathTilesCutOff(removed: { x: number; z: number }[]): { cut: number; cutsEntrance: boolean } {
     const w = this.sim.world;
     const gone = this.scratchGone;
     gone.fill(0);
     for (const t of removed) gone[w.idx(t.x, t.z)] = 1;
     const before = this.walkPaths(null);
+    const exhibitBefore = this.exhibitWalkedTo(null);
     let goneReached = 0;
     for (const t of removed) if (this.scratchSeen[w.idx(t.x, t.z)]) goneReached++;
-    return before - goneReached - this.walkPaths(gone);
+    const cut = before - goneReached - this.walkPaths(gone);
+    return { cut, cutsEntrance: exhibitBefore && !this.exhibitWalkedTo(gone) };
+  }
+
+  /** Did the last walkPaths reach a viewing tile (one not in `gone`) of a habitat with animals? */
+  private exhibitWalkedTo(gone: Uint8Array | null): boolean {
+    const sim = this.sim;
+    for (const hab of sim.world.habitats.values()) {
+      if (!sim.population(hab.id).count.size) continue;
+      for (const t of hab.viewTiles) if (this.scratchSeen[t] && !gone?.[t]) return true;
+    }
+    return false;
   }
 
   /** Path tiles reachable from the entrance as guests walk (4-neighbours, no fence between), skipping `gone` tiles. */
@@ -761,12 +812,13 @@ export class Commands {
     const spot = this.animalSpot(sp, wx, wz, null);
     if (spot.why) return this.result(false, sp.cost, spot.why, dryRun, at);
     if (!sim.canAfford(sp.cost)) return this.result(false, sp.cost, this.noMoney(sp.cost), dryRun, at);
-    if (dryRun) return this.result(true, sp.cost, undefined, true, at, spot.warning);
+    const extra = spot.confirm ? { severity: 'confirm' as const } : undefined;
+    if (dryRun) return this.result(true, sp.cost, undefined, true, at, spot.warning, extra);
     const a = sim.animalSys.create(speciesId, wx, wz, { adult: true, sex: this.adoptSex(sp, w.habitatOf[w.idx(Math.floor(wx / TILE), Math.floor(wz / TILE))]) });
     sim.spend('animalPurchases', sp.cost);
     sim.events.emit('animalAdded', { id: a.id });
     sim.markPopulationDirty();
-    return this.result(true, sp.cost, undefined, false, at, spot.warning);
+    return this.result(true, sp.cost, undefined, false, at, spot.warning, extra);
   }
 
   /** Zoos pair animals up: a newcomer is of the sex its species is short of in that habitat. */
@@ -785,7 +837,7 @@ export class Commands {
    * Can an animal of `sp` be put down at (wx, wz)? `why` = it can't; `warning` = it can, but
    * the habitat is risky or poor for it. `mover` is the animal being moved (null = a new one).
    */
-  private animalSpot(sp: SpeciesDef, wx: number, wz: number, mover: AnimalState | null): { why?: string; warning?: string } {
+  private animalSpot(sp: SpeciesDef, wx: number, wz: number, mover: AnimalState | null): { why?: string; warning?: string; confirm?: boolean } {
     const sim = this.sim;
     const w = sim.world;
     const t = w.tileOfWorld(wx, wz);
@@ -804,8 +856,13 @@ export class Commands {
     // an animal moved within its own habitat is already part of the population
     const adding = !mover || mover.habitatId !== hab.id;
     const ev = evaluateSpecies(w, hab, sp, sim.population(hab.id), sim.keeperCount(), adding);
+    // past ~150% of what the habitat holds: worth asking before doing it
+    const packed = adding && ev.space < 1 / MAX_CROWDING;
     if (ev.compat < 0.5) warn.push(ev.issues.find((i) => i.includes('predators')) ?? 'it does not get along with the other animals here');
-    else if (ev.score < 0.45) {
+    else if (packed) {
+      const crowded = ev.issues.find((i) => i.startsWith('Too crowded'));
+      warn.push(`it would be far too crowded here${crowded ? ` ${crowded.slice('Too crowded '.length)}` : ''}`);
+    } else if (ev.score < 0.45) {
       // the fence advice is already given above: name the next problem instead of repeating it
       const issue = ev.issues.find((i) => !(weakFence && i.startsWith('Fence too weak')));
       warn.push(`this habitat suits it poorly (${Math.round(ev.score * 100)}%)${issue ? `: ${issue}` : ''}`);
@@ -816,7 +873,8 @@ export class Commands {
     }
     if (!warn.length) return {};
     const text = warn.join('; ');
-    return { warning: text[0].toUpperCase() + text.slice(1) };
+    const warning = text[0].toUpperCase() + text.slice(1);
+    return packed ? { warning, confirm: true } : { warning };
   }
 
   /** Carry an animal to a spot inside a habitat (its own or another one), free of charge. */
@@ -831,9 +889,10 @@ export class Commands {
     if (a.escaped) return this.result(false, 0, `${a.name} is on the loose — a keeper or vet has to catch it first`, dryRun, at);
     const spot = this.animalSpot(sp, wx, wz, a);
     if (spot.why) return this.result(false, 0, spot.why, dryRun, at);
-    if (dryRun) return this.result(true, 0, undefined, true, at, spot.warning);
+    const extra = spot.confirm ? { severity: 'confirm' as const } : undefined;
+    if (dryRun) return this.result(true, 0, undefined, true, at, spot.warning, extra);
     sim.animalSys.relocate(a, wx, wz);
-    return this.result(true, 0, undefined, false, at, spot.warning);
+    return this.result(true, 0, undefined, false, at, spot.warning, extra);
   }
 
   /** What an animal fetches when rehomed: part of its price, more for grown, healthy animals. */

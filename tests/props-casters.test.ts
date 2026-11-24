@@ -33,7 +33,7 @@ describe('shadow casters on the low tier', () => {
     expect(casts('tree_pine', 40, 40)).toBe(true);
     expect(casts('bush_savanna', 40, 40)).toBe(false);
     expect(casts('lamp', 40, 40)).toBe(false);
-  });
+  }, 20000); // four props layers: ~3 s alone, far more while the full suite runs
 });
 
 describe('shadow-only caster batch (batched back-end)', () => {
@@ -68,6 +68,40 @@ describe('shadow-only caster batch (batched back-end)', () => {
     world.removeObject(shelter.id);
     layer.update(0, 0, camera);
     expect(casters[0].castShadow).toBe(false);
+    layer.dispose();
+  });
+});
+
+describe('fence shadow-only caster batch (batched back-end)', () => {
+  it('opaque fence parts of every material cast from one shadow-only batch', () => {
+    const events = new EventBus();
+    const world = new World(events, 3);
+    for (const o of [...world.objects.values()]) world.removeObject(o.id);
+    // a pen with four fence styles (wood, chain-link, stone, glass) around tiles 40..43
+    const ids = [1, 2, 3, 4];
+    for (let i = 0; i < 4; i++) {
+      world.setFence({ dir: 'h', x: 40 + i, z: 40 }, ids[i]);
+      world.setFence({ dir: 'h', x: 40 + i, z: 44 }, ids[i]);
+      world.setFence({ dir: 'v', x: 40, z: 40 + i }, ids[i]);
+      world.setFence({ dir: 'v', x: 44, z: 40 + i }, ids[i]);
+    }
+    const scene = new THREE.Scene();
+    const layer = new PropsLayer(world, events, scene, QUALITY, { backend: 'batched' });
+    const camera = new THREE.PerspectiveCamera();
+    camera.position.set(84, 25, 104);
+    camera.lookAt(84, 0, 84);
+    layer.update(0, 0, camera);
+    const fences = scene.getObjectByName('fences')!;
+    const meshes = (name: string) => fences.children.filter((o) => o.name === name) as THREE.Mesh[];
+    const casters = meshes('fence-shadow-casters');
+    const drawn = meshes('fence-multibatch');
+    expect(drawn.length).toBeGreaterThan(3);
+    expect(casters.length).toBeGreaterThan(0);
+    expect(casters.length).toBeLessThanOrEqual(2); // one per shadow side
+    expect(casters.every((m) => m.castShadow)).toBe(true);
+    expect(drawn.some((m) => m.castShadow)).toBe(false);
+    const main = new THREE.Layers();
+    expect(casters.some((m) => m.layers.test(main))).toBe(false);
     layer.dispose();
   });
 });

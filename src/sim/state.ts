@@ -157,6 +157,14 @@ export interface GuestSim extends GuestState, Walker {
   /** A shop whose queue was too long, avoided until `avoidUntil` (simulated seconds). */
   avoidObj: number;
   avoidUntil: number;
+  /** Admission this guest paid (refunded if the gate closes before they see anything). */
+  paid: number;
+  /**
+   * Leaders: how many exhibits the party came to see (0 = not planned yet), and the ones
+   * still to see in walking order. The party heads home once the route is done.
+   */
+  wants: number;
+  route: number[];
 }
 
 export type StaffJob = 'none' | 'service' | 'litter' | 'heal' | 'recapture' | 'patrol';

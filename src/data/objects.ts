@@ -35,7 +35,7 @@ export const OBJECTS: ObjectDef[] = [
   { id: 'climbing_frame', name: 'Climbing Frame', category: 'enrichment', size: [2, 2], cost: 1100, upkeep: 3, appeal: 3, solid: true, habitatOnly: true, serves: 'play', description: 'Timber poles, platforms and ropes for climbers.' },
   // ------------------------------------------------------------- feeders
   { id: 'feeder_hay', name: 'Hay Feeder', category: 'feeder', size: [1, 1], cost: 250, upkeep: 4, appeal: 0, solid: true, solidSize: [1.36, 0.96], habitatOnly: true, serves: 'food', description: 'Raised hay rack for grazers and browsers. Keepers refill it.' },
-  { id: 'feeder_meat', name: 'Meat Platform', category: 'feeder', size: [1, 1], cost: 300, upkeep: 6, appeal: 0, solid: false, habitatOnly: true, serves: 'food', description: 'Feeding platform for carnivores. Keepers refill it.' },
+  { id: 'feeder_meat', name: 'Meat & Fish Platform', category: 'feeder', size: [1, 1], cost: 300, upkeep: 6, appeal: 0, solid: false, habitatOnly: true, serves: 'food', description: 'Feeding platform for meat- and fish-eaters: big cats, bears, penguins and flamingos. Keepers refill it.' },
   { id: 'water_trough', name: 'Water Trough', category: 'feeder', size: [1, 1], cost: 200, upkeep: 1, appeal: 0, solid: true, solidSize: [1.7, 0.8], habitatOnly: true, serves: 'water', description: 'Stone drinking trough (animals can also drink from ponds).' },
   // --------------------------------------------------------------- shops
   { id: 'shop_snack', name: 'Snack Kiosk', category: 'shop', size: [2, 2], cost: 2500, upkeep: 12, appeal: 1, solid: true, guestOnly: true, needsPathAccess: true, light: true, shop: { kind: 'food', price: 6, stockCost: 2 }, description: 'Sells hot snacks to hungry guests.' },

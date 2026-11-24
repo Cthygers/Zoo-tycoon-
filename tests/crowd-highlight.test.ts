@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { batchedAnimalMaterials } from '../src/models/crowd/materials';
 import { createAnimalMaterial } from '../src/models/material/animalMaterial';
 import { createHumanBatchMaterial, createHumanMaterial, type HumanMarks } from '../src/models/humans/material';
+import { highlightPulse } from '../src/models/model';
 
 const MARKS: HumanMarks = { collarY: 1.4, waistY: 1, shoeTop: 0.08, eyeL: [0.03, 1.6, 0.09], mouth: [0, 1.55, 0.1] };
 
@@ -50,5 +51,32 @@ describe('creature selection highlight', () => {
     );
     expect(person.emissive.getHex()).toBe(0);
     expectRim(fragment(person), 'uHighlight');
+  });
+});
+
+describe('selection rim brightness', () => {
+  it('follows the scene light: sky plus the key light on level ground, when there is one', () => {
+    const fs = fragment(batchedAnimalMaterials({ skin: 'fur' }, 1).material);
+    expect(fs).toContain('#if NUM_DIR_LIGHTS > 0');
+    expect(fs).toMatch(/#define crKeyLevel\(\) \(directionalLights\[0\]\.color \* saturate/);
+    expect(fs).toContain('irradiance + iblIrradiance + 0.6 * crKeyLevel()');
+  });
+});
+
+describe('selection highlight pulse', () => {
+  it('breathes without fading the rim out (h 0.16 … 0.32, rim strength = 3.2 h)', () => {
+    const real = performance.now;
+    const seen: number[] = [];
+    try {
+      for (let t = 0; t < 1100; t += 25) {
+        performance.now = () => t;
+        seen.push(highlightPulse());
+      }
+    } finally {
+      performance.now = real;
+    }
+    expect(Math.min(...seen)).toBeGreaterThanOrEqual(0.16 - 1e-9);
+    expect(Math.max(...seen)).toBeLessThanOrEqual(0.32 + 1e-9);
+    expect(Math.max(...seen) * 3.2).toBeGreaterThan(1);
   });
 });

@@ -17,7 +17,7 @@ import { el, setStyle, toggleClass, type ScreenRect } from './dom';
 import { Hud } from './hud';
 import { InputController } from './input';
 import { CostLabel, Celebration, MoneyPopups, Toasts } from './notify';
-import { InfoPanel, SpeciesCard, closeTopDialog, dialogOpen, habitatCentre } from './panels';
+import { InfoPanel, SpeciesCard, closeTopDialog, dialogOpen, habitatCentre, showDialog } from './panels';
 import { bindAudio, cue } from './sound';
 import { ensureStyles } from './styles';
 import { ThumbnailService } from './thumbs';
@@ -52,6 +52,8 @@ const TOAST_COL_MAX = 460;
 const TOAST_COL_MIN = 300;
 /** Gap (px) between the toast column and the goal pill / tour bubble. */
 const TOAST_GAP = 8;
+/** Height (px) the toasts may fill over the zoo menu's title row: one toast of up to two lines. */
+const MENU_TOAST_ROOM = 76;
 
 const _corner = new Vector3();
 
@@ -142,7 +144,12 @@ class GameUI implements GameUIHandle {
     this.popups = new MoneyPopups(ctx.camera, (x, z) => sim.world.heightAt(x, z));
     this.costLabel = new CostLabel(ctx.camera);
     const focusEvent = (x: number, z: number) => this.focusClear(x, z, Math.min(this.camera.distance, 34));
-    this.toasts = new Toasts(focusEvent, () => ({ day: sim.day, minute: sim.minuteOfDay }));
+    // toasts show over the zoo menu too: one tapped there closes the menu to show its place
+    const toastFocus = (x: number, z: number) => {
+      this.zoo.close();
+      focusEvent(x, z);
+    };
+    this.toasts = new Toasts(toastFocus, () => ({ day: sim.day, minute: sim.minuteOfDay }));
     this.hud = new Hud({ sim, log: this.toasts.log, openMenu: (tab) => this.openZooPanel(tab), setSpeed: (s) => this.setSpeed(s) });
     this.dock = new Dock({
       sim,
@@ -242,6 +249,8 @@ class GameUI implements GameUIHandle {
         if (!r.ok && this.dock.confirmVisible) this.dock.shake();
       }),
       ev.on('worldReset', () => {
+        // a loaded zoo brings its messages along (a new one starts with none)
+        this.toasts.log.restore(sim.messages());
         this.select(null);
         this.setTool({ kind: 'select' });
         this.resetView();
@@ -357,6 +366,16 @@ class GameUI implements GameUIHandle {
    */
   private layoutToasts(): void {
     const col = this.toasts.root;
+    if (this.zoo.isOpen) {
+      // over the menu's title row: one toast at a time, the rest wait until it closes
+      const g = this.zoo.headGap();
+      setStyle(col, 'left', `${Math.round((g.x0 + g.x1) / 2)}px`);
+      setStyle(col, 'width', `${Math.round(Math.max(0, Math.min(TOAST_COL_MAX, g.x1 - g.x0)))}px`);
+      setStyle(col, 'top', `${Math.round(g.top)}px`);
+      this.cele.setRoom(MENU_TOAST_ROOM);
+      this.toasts.setRoom(MENU_TOAST_ROOM);
+      return;
+    }
     const a = this.viewArea();
     let { x0, x1 } = a;
     let top = a.y0 + 4;
@@ -568,7 +587,19 @@ class GameUI implements GameUIHandle {
     this.dock.showPending(p);
   }
 
+  /** The confirm bar's button: a serious outcome asks first (a dialog), then it is committed. */
   private confirm(): void {
+    const ask = this.tools.pendingQuestion;
+    if (!ask) {
+      this.commitPending();
+      return;
+    }
+    void showDialog(this.root, { ...ask, danger: true }).then((ok) => {
+      if (ok && !this.disposed) this.commitPending();
+    });
+  }
+
+  private commitPending(): void {
     const world = this.deps.sim.world;
     const log = this.toasts.log;
     const before = new Set(world.habitats.keys());
@@ -694,9 +725,15 @@ class GameUI implements GameUIHandle {
     toggleClass(this.root, 'sheet-open', this.info.sheet.open);
     toggleClass(this.root, 'card-open', this.species.visible);
     toggleClass(this.root, 'drawer-open', this.dock.drawerOpen);
+    toggleClass(this.root, 'menu-open', this.zoo.isOpen);
     // a panel opened or closed: re-fit the toast column right away (else a few times a second)
     const panels =
-      (this.info.sheet.open ? 1 : 0) | (this.species.visible ? 2 : 0) | (this.dock.drawerOpen ? 4 : 0) | (this.tools.active ? 8 : 0) | (this.dock.confirmVisible ? 16 : 0);
+      (this.info.sheet.open ? 1 : 0) |
+      (this.species.visible ? 2 : 0) |
+      (this.dock.drawerOpen ? 4 : 0) |
+      (this.tools.active ? 8 : 0) |
+      (this.dock.confirmVisible ? 16 : 0) |
+      (this.zoo.isOpen ? 32 : 0);
     if (panels !== this.panelsKey) {
       this.panelsKey = panels;
       this.layoutToasts();

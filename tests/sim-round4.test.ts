@@ -209,7 +209,8 @@ describe('guests watching an exhibit (PT-9)', () => {
       worstKopje = Math.max(worstKopje, standing.filter((g) => Math.hypot(g.x - KOPJE.x, g.z - KOPJE.z) < 6).length);
     }
     // before: up to 12 watchers within 3 m of one another and 10 people by the Kopje wall, 15 overlapping pairs
-    expect(watchers / samples).toBeGreaterThan(10);
+    // (round 6: a stop at an exhibit is 6–11 s, not 9–17, now that a visit is a planned round of a few exhibits)
+    expect(watchers / samples).toBeGreaterThan(7);
     // (10 since round 5: parties no longer loop at the plaza's ice cream kiosk, so more of them watch the Kopje)
     expect(worstCluster).toBeLessThanOrEqual(10);
     expect(worstKopje).toBeLessThanOrEqual(7);

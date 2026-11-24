@@ -2,7 +2,7 @@
 // liked scenery, space, fence, water, food, social group, mixed-species
 // compatibility) plus per-habitat cached tile lists the animal AI uses.
 
-import { MAP_W } from '../core/constants';
+import { MAP_W, SHALLOW_DEPTH } from '../core/constants';
 import type { SpeciesSuitability } from '../core/contracts';
 import { Terrain, TERRAIN_COUNT, type Habitat, type SpeciesDef } from '../core/types';
 import type { World } from '../core/world';
@@ -67,6 +67,28 @@ export function terrainWant(sp: SpeciesDef, out: number[]): number[] {
   }
   if (sum > 0) for (let t = 0; t < TERRAIN_COUNT; t++) out[t] /= sum;
   return out;
+}
+
+/** Below this share of the room its animals need a habitat is crowded enough to stress them (see crowding). */
+export const CROWDED_SPACE = 0.7;
+
+/** 0 with room enough (space ≥ CROWDED_SPACE), rising to 1 as a habitat gets packed. */
+export function crowding(space: number): number {
+  return Math.max(0, Math.min(1, (CROWDED_SPACE - space) / CROWDED_SPACE));
+}
+
+/** Below this share of ground to stand on, a habitat is too wet for a species that can't swim. */
+export const MIN_FOOTING = 0.3;
+
+/**
+ * Share of a habitat (by terrain counts) a species that can't swim can stand on: dry
+ * ground, and shallow water only if it is tall enough to wade the middle of a pond.
+ */
+export function footingShare(sp: SpeciesDef, terrainCounts: ArrayLike<number>, area: number): number {
+  if (sp.swims || area <= 0) return 1;
+  const wades = 0.35 * sp.height >= 0.6 * SHALLOW_DEPTH; // as AnimalSystem's wadeDepth
+  const wet = terrainCounts[Terrain.DeepWater] + (wades ? 0 : terrainCounts[Terrain.Water]);
+  return Math.max(0, 1 - wet / area);
 }
 
 export function feederFor(sp: SpeciesDef): string[] {
@@ -152,7 +174,13 @@ export function evaluateSpecies(
   }
   if (adding || !pop.count.get(sp.id)) required += sp.spacePerAnimal;
   const space = required <= 0 ? 1 : Math.min(1, area / required);
-  if (space < 0.95) issues.push(`Too crowded (${area} tiles, needs ${Math.ceil(required)})`);
+  // packed animals get stressed and sick and stop breeding: then it is the first thing to fix
+  if (space < CROWDED_SPACE) urgent.push(`Too crowded (${area} tiles, needs ${Math.ceil(required)}) — the animals get stressed and sick`);
+  else if (space < 0.95) issues.push(`Too crowded (${area} tiles, needs ${Math.ceil(required)})`);
+
+  // ---- footing for animals that can't swim
+  const footing = footingShare(sp, hab.terrainCounts, area);
+  if (footing < MIN_FOOTING) urgent.push(`Too little dry land (${pct(footing)}) — ${pluralName(sp.id)} can’t swim`);
 
   // ---- fence
   const fenceOk = hab.minFenceStrength >= sp.danger;
@@ -203,7 +231,7 @@ export function evaluateSpecies(
   social *= compat;
 
   const base = 0.3 * terrain + 0.17 * foliage + 0.18 * space + 0.15 * social + 0.1 * (hasWater ? 1 : 0) + 0.1 * (hasFood ? 1 : 0);
-  const score = Math.max(0, Math.min(1, base * (compat < 1 ? 0.5 + 0.5 * compat : 1) * (fenceOk ? 1 : 0.9)));
+  const score = Math.max(0, Math.min(1, base * (compat < 1 ? 0.5 + 0.5 * compat : 1) * (fenceOk ? 1 : 0.9) * (1 - 0.45 * crowding(space))));
 
   return {
     speciesId: sp.id,

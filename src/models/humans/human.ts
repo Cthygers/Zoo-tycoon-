@@ -12,7 +12,7 @@ import type { QualitySettings } from '../../core/contracts';
 import type { HumanAppearance, StaffRole } from '../../core/types';
 import { buildGeometry, type SampleImpl, type VertexBaker } from '../build/geometry';
 import { resolveRoles } from '../rig/roles';
-import { RiggedModel, jointMatrix, type AssetPicker, type CrowdHost, type RigAsset } from '../model';
+import { RiggedModel, highlightPulse, jointMatrix, type AssetPicker, type CrowdHost, type RigAsset } from '../model';
 import { disposeAsset } from '../assets';
 import { driver, hash1, unwrapDriver } from '../anim/util';
 import { humanDriver } from '../anim/human';
@@ -260,7 +260,7 @@ export class HumanModel extends RiggedModel implements BatchedModel {
   syncFrame(world: THREE.Matrix4, visible: boolean): void {
     const b = this.batch;
     if (!b) return;
-    if (this.highlighted) b.data[b.offset(this.slot) + HUMAN_HIGHLIGHT_INDEX] = 0.18 + 0.14 * Math.sin(performance.now() * 0.006);
+    if (this.highlighted) b.data[b.offset(this.slot) + HUMAN_HIGHLIGHT_INDEX] = highlightPulse();
     const crowd = this.crowd;
     if (!crowd) return;
     const kind = this.itemKind;
@@ -326,7 +326,7 @@ export class HumanModel extends RiggedModel implements BatchedModel {
     if (want !== this.itemKind) this.setItem(want);
     if (this.handIdx >= 0) jointMatrix(this.handIdx, this.handM);
     if (this.itemKind === 'balloon') this.updateBalloon(dt);
-    if (this.highlighted && this.material) this.material.userData.human.uHighlight.value = 0.18 + 0.14 * Math.sin(performance.now() * 0.006);
+    if (this.highlighted && this.material) this.material.userData.human.uHighlight.value = highlightPulse();
   }
 
   private setItem(kind: string): void {

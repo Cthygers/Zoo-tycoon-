@@ -25,9 +25,9 @@
 // veil (render/water.ts) then lies over legs and bed alike. The waterline is
 // blended over a few cm under a darker wet band.
 //
-// The selection highlight (look texel x) is a warm Fresnel rim plus a slight
-// lift of the lit colour (HIGHLIGHT_FN_GLSL), relative to the light on the
-// creature, so a selected animal keeps its coat readable day and night.
+// The selection highlight (look texel x) is a warm Fresnel rim scaled to the
+// scene light plus a slight lift of the lit colour (HIGHLIGHT_FN_GLSL), so a
+// selected animal stands out and keeps its coat readable day and night.
 
 import * as THREE from 'three';
 import { LAKE_BED_WET_ALBEDO, WATER_ABSORPTION, WATER_LEVEL } from '../../core/constants';

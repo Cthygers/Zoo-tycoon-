@@ -87,6 +87,19 @@ export function guestViewText(viewable: boolean, quality: number): { text: strin
   return quality < 0.75 ? { text: 'Partial', kind: 'good' } : { text: 'Good', kind: 'good' };
 }
 
+/** Below this share of the room its animals need, crowding stresses them and makes them sick (as the sim's CROWDED_SPACE). */
+const STRESS_SPACE = 0.7;
+
+/** Habitat room from the lowest Space of its species (1 = room for everyone): text and how it reads. */
+export function roomText(space: number, area: number): { text: string; kind: 'good' | 'warn' | 'bad' } {
+  if (space >= 0.95) return { text: 'Enough room', kind: 'good' };
+  // space = area / tiles needed (the sim's ceil of a fractional need; the epsilon absorbs float noise)
+  const needs = Math.ceil(area / Math.max(0.01, space) - 1e-6);
+  return space < STRESS_SPACE
+    ? { text: `Too crowded — needs ${needs} tiles`, kind: 'bad' }
+    : { text: `A bit crowded — needs ${needs} tiles`, kind: 'warn' };
+}
+
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 /** A staff member's work today, in their role's terms. */
@@ -777,14 +790,14 @@ export class InfoPanel {
     const kvAnimals = kvItem('Animals');
     const kvFence = kvItem('Weakest fence');
     const kvView = kvItem('Guest view');
-    // full width: mixed fence names and the view text need the room
-    kvFence.root.style.gridColumn = '1 / -1';
-    kvView.root.style.gridColumn = '1 / -1';
+    const kvRoom = kvItem('Room');
+    // full width: mixed fence names and the view and room texts need the room
+    for (const kv of [kvFence, kvView, kvRoom]) kv.root.style.gridColumn = '1 / -1';
     const comp = compositionBar(new Array(TERRAIN_COUNT).fill(0));
     const residents = el('div', 'wh-list');
     const suitWrap = el('div');
     s.body.append(
-      el('div', 'wh-kv', [kvArea.root, kvAnimals.root, kvFence.root, kvView.root]),
+      el('div', 'wh-kv', [kvArea.root, kvAnimals.root, kvRoom.root, kvFence.root, kvView.root]),
       sect('Terrain', comp.bar, comp.legend),
       sect('Suitability', suitWrap),
       sect('Residents', residents),
@@ -821,6 +834,11 @@ export class InfoPanel {
         const view = guestViewText(rep ? rep.viewable : h.viewTiles.length > 0, h.viewQuality);
         setText(kvView.v, view.text);
         kvView.v.className = `wh-kv-v ${view.kind}`;
+        // crowding is what hurts animals most: say it plainly (empty habitats have room by definition)
+        const space = Math.min(1, ...(rep?.suitability ?? []).map((su) => su.space));
+        const room = roomText(space, h.tiles.length);
+        setText(kvRoom.v, room.text);
+        kvRoom.v.className = `wh-kv-v ${room.kind}`;
         if (rep) comp.set(rep.terrainFractions);
         else {
           const tot = Math.max(1, h.tiles.length);

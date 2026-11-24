@@ -80,8 +80,9 @@ Look texels:
   under a darker wet band. It hooks `#include <project_vertex>` and
   `#include <opaque_fragment>` (keep them) and declares the vertex stage's
   `directionalShadowMatrix` in the fragment shader.
-* **Selection highlight**: `HIGHLIGHT_FN_GLSL` (a warm Fresnel rim and a ≤10 %
-  lift relative to the light on the creature), applied at `#include
+* **Selection highlight**: `HIGHLIGHT_FN_GLSL` (a warm Fresnel rim scaled to
+  the scene light — sky plus the key light on level ground — and a 4 % lift of
+  the lit colour), applied at `#include
   <opaque_fragment>` by the batched animal and human materials and the
   standalone animal highlight material. Never an emissive: absolute radiance
   washes the coat out under the bright day exposure.

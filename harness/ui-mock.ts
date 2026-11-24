@@ -10,6 +10,7 @@ import {
   SPEED_MULTIPLIERS,
   type CreatureAnim,
   type CreatureModel,
+  type GoalProgress,
   type HabitatReport,
   type IAudio,
   type ICreatureFactory,
@@ -19,6 +20,8 @@ import {
   type ISimulation,
   type QualityLevel,
   type QualitySettings,
+  type RunningCostEstimate,
+  type SimMessage,
   type SimSave,
   type SimSpeed,
   type SpeciesSuitability,
@@ -305,7 +308,27 @@ export class MockSim implements ISimulation {
       staffCount: this.staff.size,
       litterCount: this.litter.size,
       fairAdmission: 24,
+      guestCapacity: 141,
+      turnedAwayToday: 12,
+      gateClosed: null,
     };
+  }
+
+  objectiveProgress(objectiveId: string): GoalProgress | null {
+    const o = this.objectives.find((x) => x.id === objectiveId);
+    return o && !o.done ? { current: 141, target: 150 } : null;
+  }
+
+  runningCosts(): RunningCostEstimate {
+    const fraction = this.minuteOfDay / (24 * 60);
+    const day = { wages: 490, food: 180, upkeep: 70, total: 740 };
+    const soFar = { wages: Math.round(490 * fraction), food: Math.round(180 * fraction), upkeep: Math.round(70 * fraction), total: 0 };
+    soFar.total = soFar.wages + soFar.food + soFar.upkeep;
+    return { fraction, soFar, day };
+  }
+
+  messages(): readonly SimMessage[] {
+    return [{ day: this.day, minute: 9 * 60, text: 'Welcome to your new zoo!', kind: 'info' }];
   }
 
   update(realDt: number): void {

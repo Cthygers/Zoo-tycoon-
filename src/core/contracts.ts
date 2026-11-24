@@ -12,7 +12,7 @@
 //  src/main.ts  → wires everything together and runs the loop
 
 import type * as THREE from 'three';
-import type { EventBus, TileRect } from './events';
+import type { EventBus, NotifyKind, TileRect } from './events';
 import type { EdgeRef, World } from './world';
 import type {
   AnimalState,
@@ -76,6 +76,39 @@ export interface ZooStats {
   litterCount: number;
   /** Ticket price guests currently think is fair for this zoo. */
   fairAdmission: number;
+  /** Guests the zoo holds at once (grows with paths and habitats); arrivals wait while it is full. */
+  guestCapacity: number;
+  /** People turned away today because the zoo was full. */
+  turnedAwayToday: number;
+  /** Why the gate lets nobody in right now (no animals on view, the entrance path cut), or null. */
+  gateClosed: string | null;
+}
+
+/** A message the simulation sent (a `notify` event), kept in the save for the Messages log. */
+export interface SimMessage {
+  day: number;
+  /** Game minute of the day it was sent. */
+  minute: number;
+  text: string;
+  kind: NotifyKind;
+  focus?: { x: number; z: number };
+  logOnly?: boolean;
+}
+
+/** How far along a goal is, e.g. 141 of 150 guests (best day so far for the guest goals). */
+export interface GoalProgress {
+  current: number;
+  target: number;
+}
+
+/** Wages, animal food and upkeep: booked at midnight, accruing through the day. */
+export interface RunningCostEstimate {
+  /** Share of the day gone since midnight (0..1). */
+  fraction: number;
+  /** Costs incurred so far today (pro rata; wages of staff dismissed today in full). */
+  soFar: { wages: number; food: number; upkeep: number; total: number };
+  /** What midnight will book for the whole day at the current staff, animals and buildings. */
+  day: { wages: number; food: number; upkeep: number; total: number };
 }
 
 export type SimSpeed = 0 | 1 | 2 | 3; // paused, 1x, 2x, 4x
@@ -167,6 +200,12 @@ export interface ISimulation {
   pregnancy(animalId: number): { day: number; of: number } | null;
   /** How well a habitat suits a species with one more of it there (adopt / move preview). */
   suitability(speciesId: string, habitatId: number, opts?: SuitabilityOptions): SpeciesSuitability;
+  /** Progress towards an objective (null for one-step goals such as "build restrooms"). */
+  objectiveProgress(objectiveId: string): GoalProgress | null;
+  /** Today's running costs so far and for the whole day (they are booked at midnight). */
+  runningCosts(): RunningCostEstimate;
+  /** The latest messages (oldest first, up to ~50), kept in saves so the Messages log survives Continue. */
+  messages(): readonly SimMessage[];
 
   // ---- persistence
   serialize(): SimSave;

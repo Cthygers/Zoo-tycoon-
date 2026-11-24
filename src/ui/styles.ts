@@ -117,6 +117,9 @@ const CSS = /* css */ `
 .wh-chip-clock .wh-open { width: 7px; height: 7px; border-radius: 50%; background: var(--wh-leaf); box-shadow: 0 0 8px var(--wh-leaf); }
 .wh-chip-clock .wh-open.closed { background: #8b8578; box-shadow: none; }
 .wh-chip-guests .wh-ico { color: var(--wh-sky); }
+/* "138/141": guests in the zoo of how many fit (amber while arrivals wait for room) */
+.wh-guests-cap { font-size: 12.5px; font-weight: 600; color: var(--wh-muted); margin-left: 1px; }
+.wh-guests-cap.full { color: var(--wh-amber); }
 .wh-stars { display: inline-flex; gap: 1px; position: relative; }
 .wh-stars .wh-ico { width: 15px; height: 15px; }
 .wh-stars-bg { color: rgba(255, 255, 255, 0.18); display: inline-flex; gap: 1px; }
@@ -154,8 +157,9 @@ const CSS = /* css */ `
   .wh-top-speed { order: 4; }
   .wh-stars .wh-star-x { display: none; }
 }
-/* narrow landscape (≤ 760 px): one star + the number, like portrait */
-@media (orientation: landscape) and (max-width: 760px) {
+/* narrow landscape (≤ 860 px): one star + the number, like portrait (with "138/141" guests and
+   six-digit money the full star row pushed the menu button off an 800 px screen) */
+@media (orientation: landscape) and (max-width: 860px) {
   .wh-stars .wh-star-x { display: none; }
 }
 @media (orientation: landscape) and (max-width: 680px) {
@@ -196,6 +200,8 @@ const CSS = /* css */ `
 .wh-toast-status { pointer-events: none; cursor: default; }
 .wh-toast-status.hidden { display: none; }
 /* (GameUI.layoutToasts keeps the column over the clear part of the view: beside open side sheets, the goal pill and the tour's bubble) */
+/* over the zoo menu's title row while it is open (feedback such as Save now), under a confirm dialog */
+.wh-ui.menu-open .wh-toasts { z-index: 45; }
 @keyframes wh-toast-in { from { opacity: 0; transform: translateY(-12px) scale(.96); } to { opacity: 1; transform: none; } }
 @keyframes wh-toast-out { to { opacity: 0; transform: translateY(-8px) scale(.97); } }
 
@@ -254,7 +260,7 @@ const CSS = /* css */ `
 .wh-row::-webkit-scrollbar { display: none; }
 .wh-sec {
   flex: none; writing-mode: vertical-rl; transform: rotate(180deg); text-transform: uppercase; letter-spacing: .14em;
-  font-size: 10px; font-weight: 700; color: var(--wh-faint); text-align: center; padding: 0 2px; border-left: 1px solid var(--wh-line);
+  font-size: 10.5px; font-weight: 700; color: var(--wh-faint); text-align: center; padding: 0 2px; border-left: 1px solid var(--wh-line);
   margin-left: 2px; scroll-margin-left: 2px; scroll-snap-align: start; /* else the row snaps past the first section label */
 }
 .wh-card {
@@ -272,10 +278,10 @@ const CSS = /* css */ `
 .wh-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; filter: drop-shadow(0 3px 4px rgba(0,0,0,.35)); animation: wh-fade .35s ease both; }
 .wh-thumb img.swatch { object-fit: cover; filter: none; border-radius: 9px; }
 .wh-thumb .wh-ico { width: 30px; height: 30px; color: var(--wh-faint); }
-.wh-thumb-biome { position: absolute; left: 4px; top: 4px; font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; padding: 1px 5px; border-radius: 6px; background: rgba(0,0,0,.45); color: var(--wh-sand); }
+.wh-thumb-biome { position: absolute; left: 4px; top: 4px; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; padding: 1px 5px; border-radius: 6px; background: rgba(0,0,0,.45); color: var(--wh-sand); }
 .wh-fstats {
   position: absolute; left: 2px; right: 2px; bottom: 2px; display: flex; align-items: center; justify-content: space-between; gap: 2px;
-  padding: 2px 3px; border-radius: 7px; background: rgba(0,0,0,.55); font-size: 9.5px; font-weight: 700; line-height: 1; color: var(--wh-sand);
+  padding: 2px; border-radius: 7px; background: rgba(0,0,0,.55); font-size: 10.5px; font-weight: 700; line-height: 1; color: var(--wh-sand);
 }
 .wh-fstats .wh-ico { width: 10px; height: 10px; flex: none; margin-right: 1px; }
 .wh-fbars, .wh-fview { display: inline-flex; align-items: flex-end; gap: 1px; white-space: nowrap; }
@@ -347,19 +353,26 @@ const CSS = /* css */ `
 /* ------------------------------------------------------------ next-goal pill + first-run tour */
 .wh-goal {
   position: absolute; top: calc(var(--wh-gt) + var(--wh-top-h) + 6px); left: var(--wh-gl); z-index: 8;
-  pointer-events: auto; display: flex; align-items: center; gap: 7px; height: 32px; padding: 0 11px 0 9px; border-radius: 16px;
-  max-width: min(380px, 42vw); font-size: 12.5px; cursor: pointer; transition: opacity .25s ease, transform .12s ease;
+  pointer-events: auto; display: flex; align-items: center; gap: 9px; min-height: 42px; padding: 4px 12px 4px 10px; border-radius: 16px;
+  max-width: min(400px, 46vw); font-size: 12.5px; cursor: pointer; transition: opacity .25s ease, transform .12s ease;
 }
-.wh-goal::after { content: ""; position: absolute; inset: -6px 0; } /* 44 px tall touch target */
+.wh-goal::after { content: ""; position: absolute; inset: -2px 0; } /* 46 px tall touch target */
 .wh-goal:active { transform: scale(.97); }
 /* hidden, and under the species card that opens in the same corner */
 /* also while a build drawer is open: the tool bar then sits where the pill is */
 .wh-goal.hidden, .wh-ui.card-open .wh-goal, .wh-ui.drawer-open .wh-goal { opacity: 0; visibility: hidden; pointer-events: none; }
-.wh-goal-k { display: inline-flex; align-items: center; gap: 4px; flex: none; color: var(--wh-sand); font-size: 10.5px; font-weight: 750; text-transform: uppercase; letter-spacing: .08em; }
-.wh-goal-k .wh-ico { width: 15px; height: 15px; }
-.wh-goal-t { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wh-goal-r { flex: none; color: var(--wh-leaf-2); font-weight: 700; }
+/* left: the trophy over "NEXT"; right: the goal, then its progress bar, "141 / 150" and the reward */
+.wh-goal-k { display: flex; flex-direction: column; align-items: center; gap: 1px; flex: none; color: var(--wh-sand); font-size: 10.5px; font-weight: 750; text-transform: uppercase; letter-spacing: .08em; line-height: 1.1; }
+.wh-goal-k .wh-ico { width: 16px; height: 16px; }
+.wh-goal-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.wh-goal-t { font-weight: 600; line-height: 1.25; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wh-goal-sub { display: flex; align-items: center; gap: 7px; font-size: 11.5px; line-height: 1.2; color: var(--wh-muted); white-space: nowrap; }
+.wh-goal-bar { flex: none; width: 52px; height: 5px; border-radius: 3px; background: rgba(255,255,255,.14); overflow: hidden; }
+.wh-goal-bar > i { display: block; height: 100%; border-radius: inherit; background: var(--wh-leaf); transition: width .5s ease; }
+.wh-goal-bar.hidden, .wh-goal-p:empty { display: none; }
+.wh-goal-r { flex: none; margin-left: auto; color: var(--wh-leaf-2); font-weight: 700; }
 .wh-goal-r:empty { display: none; }
+.wh-goal-p:empty + .wh-goal-r { margin-left: 0; } /* a one-step goal: just the reward, under the goal */
 .wh-goal.fresh { animation: wh-goal-glow 1.6s ease; }
 @keyframes wh-goal-glow { 25% { box-shadow: 0 0 0 3px rgba(151, 196, 108, .6), 0 10px 28px rgba(0, 0, 0, .28); } }
 .wh-coach {
@@ -535,16 +548,19 @@ const CSS = /* css */ `
 .wh-stat-k { font-size: 11.5px; color: var(--wh-muted); display: flex; align-items: center; gap: 6px; }
 .wh-stat-k .wh-ico { width: 15px; height: 15px; }
 .wh-stat-v { font-size: 20px; font-weight: 800; margin-top: 2px; letter-spacing: -.005em; }
-.wh-stat-v.bad { color: #ffab90; } .wh-stat-v.good { color: var(--wh-leaf-2); }
+.wh-stat-v.bad { color: #ffab90; } .wh-stat-v.good { color: var(--wh-leaf-2); } .wh-stat-v.warn { color: var(--wh-amber); }
 .wh-stat-s { font-size: 11.5px; color: var(--wh-faint); }
 .wh-chart { width: 100%; height: 150px; display: block; }
-.wh-chart text { fill: rgba(243,238,226,.55); font-size: 10px; font-family: inherit; }
+.wh-chart text { fill: rgba(243,238,226,.55); font-size: 10.5px; font-family: inherit; }
 .wh-legend { display: flex; gap: 14px; font-size: 12px; color: var(--wh-muted); margin: 2px 0 6px; flex-wrap: wrap; }
 .wh-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
 .wh-ledger { width: 100%; border-collapse: collapse; font-size: 13px; }
 .wh-ledger td { padding: 6px 4px; border-bottom: 1px solid var(--wh-line); }
 .wh-ledger td:last-child { text-align: right; font-weight: 650; }
 .wh-ledger tr.total td { border-bottom: 0; font-weight: 800; font-size: 14px; }
+.wh-ledger tr.total:not(:last-child) td { border-bottom: 1px solid var(--wh-line-2); } /* running profit, before the one-offs */
+.wh-ledger-note { font-size: 11px; color: var(--wh-faint); white-space: nowrap; }
+.wh-chart-tip { font-size: 11.5px; color: var(--wh-muted); min-height: 2.6em; margin-top: 2px; }
 .wh-ledger .pos { color: var(--wh-leaf-2); } .wh-ledger .neg { color: #ffab90; }
 .wh-two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 @media (max-width: 640px) { .wh-two { grid-template-columns: 1fr; } }
@@ -561,7 +577,11 @@ const CSS = /* css */ `
 .wh-obj.done .wh-obj-check { background: var(--wh-leaf); border-color: var(--wh-leaf); color: #142010; }
 .wh-obj.done .wh-obj-text { color: var(--wh-muted); text-decoration: line-through; text-decoration-color: rgba(243,238,226,.35); }
 .wh-obj-check .wh-ico { width: 16px; height: 16px; stroke-width: 2.6; }
-.wh-obj-text { flex: 1; font-weight: 600; }
+.wh-obj-text { flex: 1; min-width: 0; font-weight: 600; }
+/* how far along an open goal is: a thin bar and "141 / 150" under its text */
+.wh-obj-prog { display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 11.5px; font-weight: 600; color: var(--wh-muted); }
+.wh-obj-bar { flex: 0 1 140px; height: 5px; border-radius: 3px; background: rgba(255,255,255,.1); overflow: hidden; }
+.wh-obj-bar > i { display: block; height: 100%; border-radius: inherit; background: var(--wh-leaf); }
 .wh-obj-reward { font-weight: 800; color: var(--wh-sand); font-size: 13px; }
 .wh-progress { height: 10px; border-radius: 5px; background: rgba(255,255,255,.08); overflow: hidden; margin: 6px 0 14px; }
 .wh-progress > div { height: 100%; background: linear-gradient(90deg, var(--wh-leaf-deep), var(--wh-leaf)); border-radius: inherit; transition: width .5s ease; }

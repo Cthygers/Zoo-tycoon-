@@ -15,7 +15,7 @@ import { createSimulation } from './sim';
 import { createGameUI, showLoadingScreen, showMainMenu } from './ui';
 import { createEntityViews } from './views';
 import { buildDemoZoo } from './demo';
-import { warmUpShaders } from './loader';
+import { renderEmptyFrame, warmUpShaders } from './loader';
 
 function storageGet(k: string): string | null {
   try {
@@ -212,6 +212,13 @@ async function boot() {
     ctx.update(0);
   };
   await nextFrame();
+  // Capture the sky environment for the loaded time in a frame of its own (a
+  // long GPU job) and keep it through the warm-up at night: one capture per
+  // load, never stacked on a full frame.
+  updateLayers(sim.minuteOfDay);
+  renderEmptyFrame(ctx);
+  await nextFrame();
+  const releaseEnvironment = ctx.holdEnvironment();
   try {
     updateLayers(22 * 60);
     await warmUpShaders(ctx, nextFrame, gates(0.83, 0.99));
@@ -220,6 +227,9 @@ async function boot() {
   }
   // Start with exposure and sky lighting already adapted to the loaded time.
   updateLayers(sim.minuteOfDay);
+  releaseEnvironment();
+  // the first game frame, with its own shadow map (low refreshes it every other frame)
+  ctx.renderer.shadowMap.needsUpdate = true;
   ctx.render();
 
   loader.setProgress(1, 'Welcome to Wildhaven!');

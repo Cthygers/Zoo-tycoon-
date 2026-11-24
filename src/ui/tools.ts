@@ -27,9 +27,38 @@ export interface PendingAction {
   noteKind?: 'bad' | 'warn';
   /** Allowed, but probably not what the player wants (the confirm button says so). */
   risky?: boolean;
+  /** So serious (the sim's severity 'confirm') that a dialog asks before it goes ahead. */
+  ask?: ConfirmQuestion | null;
   /** Removals: share of the price paid back (1 = full refund, just built). */
   refundFraction?: number;
   commit(): CommandResult;
+}
+
+/** A dialog asking the player before a serious outcome. */
+export interface ConfirmQuestion {
+  title: string;
+  text: string;
+  ok: string;
+}
+
+const sentence = (s: string) => `${s[0].toUpperCase()}${s.slice(1)}${/[.!?]$/.test(s) ? '' : '.'}`;
+
+/**
+ * The question to ask before a command whose dry run the sim flags with severity 'confirm'
+ * (cutting the entrance off, packing a habitat far past what it holds), or null. `verb` is
+ * the confirm bar's verb ("Remove", "Adopt", "Move").
+ */
+export function confirmQuestion(r: CommandResult, verb: string): ConfirmQuestion | null {
+  if (!r.ok || r.severity !== 'confirm' || !r.warning) return null;
+  const ok = `${verb} anyway`;
+  if (r.cutsEntrance) {
+    // the sim's warning names the cut first; anything after it (e.g. a habitat opened) still matters
+    const rest = r.warning.split('; ').slice(1).map(sentence).join(' ');
+    const text = `This cuts the entrance off from the whole zoo. Guests can’t get in until you reconnect it.${rest ? ` ${rest}` : ''}`;
+    return { title: 'Cut off the entrance?', text, ok };
+  }
+  if (/crowded/i.test(r.warning)) return { title: 'Overcrowd this habitat?', text: sentence(r.warning), ok };
+  return { title: 'Are you sure?', text: sentence(r.warning), ok };
 }
 
 /** Bulldoze tool: clear everything in a rectangle, or only fence runs. */
@@ -178,6 +207,11 @@ export class ToolManager implements ToolInput {
 
   get hasPending(): boolean {
     return this.pending !== null;
+  }
+
+  /** The question to ask before the pending action goes ahead, if it is that serious. */
+  get pendingQuestion(): ConfirmQuestion | null {
+    return this.pending?.ask ?? null;
   }
 
   // ------------------------------------------------------------ tool selection
@@ -613,11 +647,20 @@ export class ToolManager implements ToolInput {
     }
   }
 
-  /** Confirm-bar note: why it fails, else the sim's warning (outranks a plain remark), else its remark. */
-  private note(r: CommandResult): { note?: string; noteKind?: 'bad' | 'warn' } {
-    if (r.ok && r.warning) return { note: r.warning, noteKind: 'warn' };
+  /**
+   * Confirm-bar note: why it fails, else the sim's warning (outranks a plain remark), else its
+   * remark. A warning the sim wants confirmed shows as `confirmKind` and marks the action risky
+   * (the button then says "… anyway").
+   */
+  private note(r: CommandResult, confirmKind: 'bad' | 'warn' = 'bad'): { note?: string; noteKind?: 'bad' | 'warn'; risky?: boolean } {
+    if (r.ok && r.warning) return r.severity === 'confirm' ? { note: r.warning, noteKind: confirmKind, risky: true } : { note: r.warning, noteKind: 'warn' };
     if (!r.reason) return {};
     return { note: r.reason, noteKind: r.ok ? 'warn' : 'bad' };
+  }
+
+  /** The confirm bar's verb, with "anyway" when the sim asks to confirm the outcome. */
+  private verb(base: string, r: CommandResult, risky = `${base} anyway`): string {
+    return r.ok && r.severity === 'confirm' ? risky : base;
   }
 
   // ---- fences
@@ -813,10 +856,11 @@ export class ToolManager implements ToolInput {
     const rect = { ...r };
     this.setPending({
       title: `${name} · ${n} tile${n > 1 ? 's' : ''}`,
-      verb: 'Paint',
+      // flooding the dry land of animals that can't swim: an amber warning and "Paint anyway"
+      verb: this.verb('Paint', res),
       cost: res.cost,
       ok: res.ok,
-      ...this.note(res),
+      ...this.note(res, 'warn'),
       commit: () => sim.paintTerrain(rect, t),
     });
   }
@@ -871,11 +915,12 @@ export class ToolManager implements ToolInput {
     if (edges.length) parts.push(`${edges.length * TILE} m fence`);
     this.setPending({
       title: parts.length ? `Clear ${parts.join(' · ')}` : `Clear ${r.x1 - r.x0 + 1}×${r.z1 - r.z0 + 1} area`,
-      verb: 'Remove',
+      verb: this.verb('Remove', res),
       cost: res.cost,
       ok: res.ok,
       refundFraction: res.refundFraction,
       ...this.note(res),
+      ask: confirmQuestion(res, 'Remove'),
       commit: () => sim.bulldoze(rect),
     });
   }
@@ -1191,10 +1236,11 @@ export class ToolManager implements ToolInput {
     const moverId = mover?.id ?? 0;
     this.setPending({
       title: `${mover ? `Move ${mover.name}` : sp.name}${hab ? ` · ${hab.name}` : ''}`,
-      verb: mover ? 'Move here' : 'Adopt',
+      verb: mover ? this.verb('Move here', r, 'Move anyway') : this.verb('Adopt', r),
       cost: r.cost,
       ok: r.ok,
       ...this.note(r),
+      ask: confirmQuestion(r, mover ? 'Move' : 'Adopt'),
       commit: () => (moverId ? sim.moveAnimal(moverId, px, pz) : sim.buyAnimal(speciesId, px, pz)),
     });
   }

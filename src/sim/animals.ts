@@ -8,7 +8,7 @@ import { Terrain, type AnimalState, type ObjectDef, type PlacedObject, type Spec
 import { OBJECTS_BY_ID, rotatedSize } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
 import type { OpenEnclosure } from './enclosures';
-import { evaluateSpecies, feederFor, type SpeciesEval } from './habitat';
+import { crowding, evaluateSpecies, feederFor, type SpeciesEval } from './habitat';
 import { animalName, pluralName, singularName } from './names';
 import { type Passable } from './nav';
 import type { Simulation } from './simulation';
@@ -28,6 +28,8 @@ const STUCK_REPLAN = 1.2;
 const STUCK_GIVE_UP = 3;
 /** Hourly chance that a happy, settled female with a mate and room conceives (~75% a day). */
 const CONCEIVE_PER_HOUR = 0.06;
+/** Water deeper than this many times its wading depth is too deep for a non-swimmer to stand in. */
+const TOO_DEEP = 1.35;
 
 function wrapAngle(a: number): number {
   a = (a + Math.PI) % TWO_PI;
@@ -171,6 +173,11 @@ export class AnimalSystem {
   private solid: Uint8Array = new Uint8Array(0);
   /** Path searches still allowed this step (spreads planning spikes over frames). */
   private routeBudget = 0;
+  /**
+   * Non-swimmers with nowhere in their habitat to stand (flooded): the world revision when
+   * that was found, so they are not searched for again every step until the world changes.
+   */
+  private stranded = new Map<number, number>();
 
   constructor(private sim: Simulation) {
     this.pass = (a, b) => this.passable(a, b);
@@ -258,6 +265,7 @@ export class AnimalSystem {
 
   remove(id: number) {
     if (!this.sim.animals.delete(id)) return;
+    this.stranded.delete(id);
     for (const a of this.sim.animals.values()) if (a.mother === id) a.mother = 0;
     this.sim.emitAnimalRemoved(id);
     this.sim.markPopulationDirty();
@@ -484,8 +492,9 @@ export class AnimalSystem {
     this.setCtx(a, sp);
     this.ctxLoose = true;
     const deep = this.ctxWade === Infinity ? 0 : this.depthAt(a.x, a.z) / this.ctxWade;
-    const ok = this.enterable(t) && deep <= 1.35;
+    const ok = this.enterable(t) && deep <= TOO_DEEP;
     this.ctxLoose = false;
+    if (this.stranded.get(a.id) === w.revision) return; // held where it is until the world changes
     if (!ok) this.unstick(a, sp, t);
     // standing about in water a little too deep (terrain repainted, old save): wade out
     else if (deep > 1.02 && !a.moving && a.goal !== 'breakout') this.think(a, sp);
@@ -504,13 +513,37 @@ export class AnimalSystem {
     );
     this.ctxZone = savedZone;
     if (free >= 0) {
-      this.tileCentre(free, this.tc);
-      a.x = this.tc.x;
-      a.z = this.tc.z;
-      a.moving = false;
-      a.route.length = 0;
-      this.placeY(a, sp);
+      this.stranded.delete(a.id);
+      this.placeAt(a, sp, free);
+      return;
     }
+    // nowhere it can stand (its habitat was flooded): hold it on the nearest ground that is
+    // not deep water, where it treads water if that is still too deep (see placeY)
+    if (this.ctxSwims || !zone) return;
+    this.stranded.set(a.id, w.revision);
+    const solid = this.solid;
+    const hold = this.sim.search.nearest(
+      t,
+      (_f, to) => w.habitatOf[to] === zone,
+      (to) => w.habitatOf[to] === zone && !solid[to] && w.terrain[to] !== Terrain.DeepWater,
+      2000,
+    );
+    if (hold >= 0 && hold !== t) this.placeAt(a, sp, hold);
+    else this.placeY(a, sp);
+  }
+
+  private placeAt(a: AnimalSim, sp: SpeciesDef, tile: number) {
+    this.tileCentre(tile, this.tc);
+    a.x = this.tc.x;
+    a.z = this.tc.z;
+    a.moving = false;
+    a.route.length = 0;
+    this.placeY(a, sp);
+  }
+
+  /** A non-swimmer in water deeper than it can stand in (its habitat was flooded): it treads water. */
+  private treadingWater(a: AnimalState, sp: SpeciesDef): boolean {
+    return !sp.swims && this.depthAt(a.x, a.z) > wadeDepth(sp, a.growth) * TOO_DEEP;
   }
 
   private becomeLoose(a: AnimalSim, msg: string) {
@@ -543,6 +576,7 @@ export class AnimalSystem {
       if (a.growth >= 1) {
         a.mother = 0;
         this.sim.markPopulationDirty();
+        if (a.habitatId && !a.escaped) this.warnCrowded(a.habitatId, sp);
       }
     }
     if (a.pregnantDays > 0) {
@@ -581,7 +615,8 @@ export class AnimalSystem {
           const enrT = 0.3 + 0.35 * e.foliage + (e.toys > 0 ? 0.3 : 0) + 0.05 * e.terrain;
           if (n.enrichment > enrT) n.enrichment += (enrT - n.enrichment) * Math.min(1, hoursDt * 0.15);
           else n.enrichment += (enrT - n.enrichment) * Math.min(1, hoursDt * 0.3);
-          const stressT = e.predators > 0 ? 1 : 0;
+          // predators next door are terrifying; a packed habitat wears them down
+          const stressT = e.predators > 0 || this.treadingWater(a, sp) ? 1 : 0.85 * crowding(e.space);
           a.stress += (stressT - a.stress) * Math.min(1, hoursDt * (stressT > a.stress ? 2 : 0.5));
         }
       }
@@ -595,9 +630,11 @@ export class AnimalSystem {
       // health
       let dh = 0;
       if (n.hunger < 0.06 || n.thirst < 0.06) dh -= 0.012;
+      if (this.treadingWater(a, sp)) dh -= 0.02; // worn out by treading water
       if (a.sick) dh -= 0.004;
       if (a.ageDays > sp.lifespanDays) dh -= 0.003;
-      if (!a.sick && n.hunger > 0.35 && n.thirst > 0.35 && a.ageDays <= sp.lifespanDays) dh += 0.006;
+      // recovery is slower in a crowded habitat
+      if (!a.sick && n.hunger > 0.35 && n.thirst > 0.35 && a.ageDays <= sp.lifespanDays) dh += 0.006 * (1 - 0.7 * this.crowdingOf(a));
       a.health = Math.max(0, Math.min(1, a.health + dh * hoursDt));
       if (a.health <= 0) dead.push(a);
       this.warn(a, sp);
@@ -653,6 +690,10 @@ export class AnimalSystem {
     const hab = sim.world.habitats.get(hid);
     const where = hab?.name ?? 'their habitat';
     const focus = { x: a.x, z: a.z };
+    if (this.treadingWater(a, sp)) {
+      sim.notify(`dryland:${hid}`, `${where} has no dry land for the ${pluralName(sp.id)} — paint some ground they can stand on.`, 'bad', focus, 150);
+      return;
+    }
     if (a.needs.hunger < 0.15) {
       const rt = sim.habitatRuntime(hid);
       const grazer = sp.diet === 'herbivore' && a.goal === 'graze';
@@ -686,6 +727,7 @@ export class AnimalSystem {
     if (n.thirst < 0.2) return e && !e.hasWater ? 'it has nothing to drink — paint a pond or add a Water Trough' : 'it is very thirsty';
     if (n.hunger < 0.2) return this.sim.keeperCount() ? 'it is very hungry' : 'it is very hungry — hire a keeper';
     if (a.sick) return 'it is sick';
+    if (e && crowding(e.space) > 0) return e.issues.find((i) => i.startsWith('Too crowded'))?.replace(/^Too crowded/, 'its habitat is too crowded');
     if (a.stress > 0.5 && !e?.predators) return 'it is frightened';
     return e?.issues[0];
   }
@@ -705,10 +747,11 @@ export class AnimalSystem {
         if (!a.escaped && a.habitatId) this.dropDung(a, sp);
       }
       if (a.escaped || !a.habitatId) continue;
-      // sickness
+      const crowd = this.crowdingOf(a);
+      // sickness: unhappy, dirty and crowded animals catch more
       if (!a.sick) {
         const dirt = sim.habitatDirt(a.habitatId);
-        const p = 0.0004 + (1 - a.happiness) * 0.0012 + dirt * 0.0012;
+        const p = 0.0004 + (1 - a.happiness) * 0.0012 + dirt * 0.0012 + crowd * 0.003;
         if (rng.chance(p)) {
           a.sick = true;
           let vets = 0;
@@ -721,14 +764,19 @@ export class AnimalSystem {
         if (this.canBreed(a, sp) && rng.chance(CONCEIVE_PER_HOUR)) {
           a.pregnantDays = 0.001;
           const due = Math.max(1, Math.round(sp.gestationDays));
-          sim.notify(null, `${a.name} the ${sp.name} is expecting! The baby is due in about ${due} day${due === 1 ? '' : 's'}.`, 'good', { x: a.x, z: a.z });
+          const text = `${a.name} the ${sp.name} is expecting! The baby is due in about ${due} day${due === 1 ? '' : 's'}.`;
+          // the zoo's first pregnancy is news; later ones only go in the log
+          if (sim.progress.counters.pregnancies++ === 0) sim.notify(null, text, 'good', { x: a.x, z: a.z });
+          else sim.logMessage(text, 'good', { x: a.x, z: a.z });
         }
       }
-      // escape attempts through a fence that is too weak
+      // a badly packed herd squabbles: now and then one gets hurt
+      if (crowd > 0.4 && a.growth >= 1 && !a.sick && a.action !== 'sleep' && rng.chance(0.002 * crowd)) this.scuffle(a, sp);
+      // escape attempts through a fence that is too weak (more often from a crowded habitat)
       if (a.goal !== 'breakout' && a.growth >= 0.8 && a.happiness < 0.5) {
         const hab = sim.world.habitats.get(a.habitatId);
         if (hab && hab.minFenceStrength < sp.danger) {
-          const p = (0.5 - a.happiness) * 0.02 * (sp.danger - hab.minFenceStrength);
+          const p = (0.5 - a.happiness) * 0.02 * (sp.danger - hab.minFenceStrength) * (1 + 2 * crowd);
           if (rng.chance(p)) this.startBreakout(a, sp);
         }
       }
@@ -761,18 +809,66 @@ export class AnimalSystem {
   private canBreed(a: AnimalSim, sp: SpeciesDef): boolean {
     const sim = this.sim;
     const hid = a.habitatId!;
+    const hab = sim.world.habitats.get(hid);
     const pop = sim.population(hid);
     const e = sim.evalFor(hid, sp.id);
-    if (!e || e.space < 0.9 || e.compat < 0.9) return false;
-    // babies on the way count too, so the group doesn't outgrow its limit
+    if (!hab || !e || e.compat < 0.9) return false;
+    // babies on the way count too, so the group doesn't outgrow its limit, and there must be
+    // room for everyone once grown (young and unborn included) plus this baby: births alone
+    // never make a habitat crowded
     let count = pop.count.get(sp.id) ?? 0;
     let mate = false;
+    let room = sp.spacePerAnimal;
     for (const b of sim.animals.values()) {
-      if (b.speciesId !== sp.id || b.habitatId !== hid || b.escaped) continue;
+      if (b.habitatId !== hid || b.escaped) continue;
+      const bsp = SPECIES_BY_ID[b.speciesId];
+      const need = bsp?.spacePerAnimal ?? 0;
+      room += b.pregnantDays > 0 ? 2 * need : need;
+      if (b.speciesId !== sp.id) continue;
       if (b.pregnantDays > 0) count++;
       if (b.sex === 'M' && b.growth >= 1 && b.health > 0.5) mate = true;
     }
-    return mate && count < sp.groupMax;
+    return mate && count < sp.groupMax && room <= hab.tiles.length;
+  }
+
+  /** 0..1 how packed the animal's habitat is (0 = room enough, see crowding()). */
+  private crowdingOf(a: AnimalSim): number {
+    if (a.escaped || !a.habitatId) return 0;
+    const e = this.sim.evalFor(a.habitatId, a.speciesId);
+    return e ? crowding(e.space) : 0;
+  }
+
+  /** Hurt in a squabble over room: the vet treats it like a sick animal. */
+  private scuffle(a: AnimalSim, sp: SpeciesDef) {
+    const sim = this.sim;
+    a.health = Math.max(0.05, a.health - sim.rng.range(0.08, 0.18));
+    a.sick = true;
+    a.stress = 1;
+    const hab = sim.world.habitats.get(a.habitatId!);
+    sim.notify(
+      `scuffle:${a.habitatId}`,
+      `${a.name} the ${sp.name} was hurt in a scuffle — ${hab?.name ?? 'its habitat'} is far too crowded. Make it bigger or move some animals.`,
+      'bad',
+      { x: a.x, z: a.z },
+      300,
+    );
+  }
+
+  /** Tell the player (now and then) when a new animal leaves a habitat short of room. */
+  private warnCrowded(hid: number, sp: SpeciesDef) {
+    const sim = this.sim;
+    const hab = sim.world.habitats.get(hid);
+    const e = sim.evalFor(hid, sp.id);
+    if (!hab || !e || e.space >= 0.95) return;
+    const crowded = e.issues.find((i) => i.startsWith('Too crowded'));
+    const need = crowded?.match(/\(([^)]*)\)/)?.[1];
+    sim.notify(
+      `crowded:${hid}`,
+      `${hab.name} is getting crowded${need ? ` (${need})` : ''} — make it bigger or move some animals.`,
+      'warn',
+      { x: ((hab.minX + hab.maxX + 1) / 2) * TILE, z: ((hab.minZ + hab.maxZ + 1) / 2) * TILE },
+      600,
+    );
   }
 
   /** How far along a pregnancy is: day `day` (1-based) of `of`, or null when not expecting. */
@@ -794,11 +890,14 @@ export class AnimalSystem {
     baby.needs.thirst = 0.9;
     sim.events.emit('animalAdded', { id: baby.id });
     sim.markPopulationDirty();
+    if (baby.habitatId) this.warnCrowded(baby.habitatId, sp);
     sim.progress.counters.births++;
-    sim.notify(null, `${mother.name} the ${sp.name} gave birth to a baby ${baby.sex === 'F' ? 'girl' : 'boy'}, ${baby.name}!`, 'good', {
-      x: mother.x,
-      z: mother.z,
-    });
+    const text = `${mother.name} the ${sp.name} gave birth to a baby ${baby.sex === 'F' ? 'girl' : 'boy'}, ${baby.name}!`;
+    // a species' first baby here is news; later births only go in the log
+    const first = !sim.progress.bredSpecies.has(sp.id);
+    sim.progress.bredSpecies.add(sp.id);
+    if (first) sim.notify(null, text, 'good', { x: mother.x, z: mother.z });
+    else sim.logMessage(text, 'good', { x: mother.x, z: mother.z });
   }
 
   private dropDung(a: AnimalSim, sp: SpeciesDef) {
@@ -1393,6 +1492,11 @@ export class AnimalSystem {
       this.setGoal(a, 'drink', rng.range(6, 12), true);
       return true;
     }
+    // no drinking spot to walk to, but water within reach where it stands
+    if (this.atWater(a, sp)) {
+      this.setGoal(a, 'drink', rng.range(6, 12));
+      return true;
+    }
     return false;
   }
 
@@ -1508,6 +1612,7 @@ export class AnimalSystem {
     const tiles = this.sim.habitatTiles(hid);
     const hab = w.habitats.get(hid);
     if (!tiles || !hab) return false;
+    if (this.atWater(a, sp)) return true;
     const spots = new Set(tiles.drink);
     for (const oid of hab.objects) {
       const o = w.objects.get(oid);
@@ -2153,15 +2258,20 @@ export class AnimalSystem {
     this.placeY(a, sp);
   }
 
-  /** Ground height, or the water surface for a swimmer in water deeper than it can stand in. */
+  /**
+   * Ground height, or the water surface for a swimmer in water deeper than it can stand
+   * in, and for a non-swimmer stranded in such water (it treads water rather than stand
+   * on the pond bed).
+   */
   private placeY(a: AnimalSim, sp: SpeciesDef) {
     const g = this.sim.world.heightAt(a.x, a.z);
-    a.y = sp.swims && WATER_LEVEL - g > swimDepth(sp, a.growth) ? WATER_LEVEL : g;
+    const depth = WATER_LEVEL - g;
+    a.y = depth > (sp.swims ? swimDepth(sp, a.growth) : wadeDepth(sp, a.growth) * TOO_DEEP) ? WATER_LEVEL : g;
   }
 
   private updateAction(a: AnimalSim, sp: SpeciesDef, dt: number) {
     let act = a.action;
-    const swimming = sp.swims && a.y === WATER_LEVEL;
+    const swimming = a.y === WATER_LEVEL && (sp.swims || this.treadingWater(a, sp));
     if (swimming) act = 'swim';
     else if (a.moving && a.speed > 0.05) act = a.speed > sp.walkSpeed * 1.45 ? 'run' : 'walk';
     else if (a.moving) act = 'idle';

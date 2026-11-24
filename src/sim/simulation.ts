@@ -17,15 +17,18 @@ import {
 } from '../core/constants';
 import {
   SPEED_MULTIPLIERS,
+  type GoalProgress,
   type HabitatReport,
   type ISimulation,
+  type RunningCostEstimate,
+  type SimMessage,
   type SimSave,
   type SimSpeed,
   type SpeciesSuitability,
   type SuitabilityOptions,
   type ZooStats,
 } from '../core/contracts';
-import type { EventBus, NotifyKind, TileRect } from '../core/events';
+import type { EventBus, GameEvents, NotifyKind, TileRect } from '../core/events';
 import { fmtMoney } from '../core/format';
 import {
   TERRAIN_COUNT,
@@ -50,7 +53,7 @@ import { EnclosureMemory, type OpenEnclosureSave } from './enclosures';
 import { buildHabitatTiles, evaluateSpecies, type HabitatPopulation, type HabitatTiles, type SpeciesEval } from './habitat';
 import { GuestSystem } from './guests';
 import { N_TILES, PathNav, TileSearch } from './nav';
-import { Progress, createObjectives } from './progress';
+import { Progress, createObjectives, type ProgressSave } from './progress';
 import { packRows, rleDecode, rleEncode, unpackRows, type PackedRows } from './savepack';
 import { SimRng } from './rng';
 import { StaffSystem } from './staff';
@@ -63,6 +66,8 @@ export const MAX_LITTER = 450;
 const SAVE_VERSION = 1;
 /** Guest satisfaction a new zoo starts with (it then follows departing guests' happiness). */
 const START_SATISFACTION = 0.5;
+/** Messages kept for the Messages log (and in saves). */
+const MESSAGE_LOG_SIZE = 50;
 
 export type IncomeKind = 'admissions' | 'shopIncome' | 'donations' | 'other';
 export type ExpenseKind = 'upkeep' | 'food' | 'salaries' | 'construction' | 'animalPurchases';
@@ -117,7 +122,7 @@ interface SimSaveData extends SimSave {
   guestsToday: number;
   totalVisitors: number;
   satisfaction: number;
-  progress: Record<string, number>;
+  progress: ProgressSave;
   debtWarned: boolean;
   /** Habitats whose fence is open (remembered so re-closing restores them). */
   openEnclosures?: OpenEnclosureSave[];
@@ -127,6 +132,10 @@ interface SimSaveData extends SimSave {
   starterPath?: number[];
   /** Today's shop / restroom tallies by object id (older saves: none). */
   serviceDay?: [number, ServiceTally][];
+  /** People turned away today because the zoo was full (older saves: none). */
+  turnedAwayToday?: number;
+  /** The latest messages, oldest first (older saves: none). */
+  messages?: SimMessage[];
 }
 
 export class Simulation implements ISimulation {
@@ -159,6 +168,8 @@ export class Simulation implements ISimulation {
   /** Accumulator for the 30 Hz crowd separation pass. */
   crowdAcc = 0;
   guestsToday = 0;
+  /** People turned away today because the zoo was full. */
+  turnedAwayToday = 0;
   totalVisitors = 0;
   /** Smoothed happiness of departing guests (0..1). */
   satisfaction = START_SATISFACTION;
@@ -204,6 +215,8 @@ export class Simulation implements ISimulation {
   /** Dung count per habitat id (refreshed each slow tick). */
   readonly dungByHab = new Map<number, number>();
   private notifyLast = new Map<string, number>();
+  /** The latest notify events, oldest first (see messages()). */
+  private messageLog: SimMessage[] = [];
   private pendingDelta = 0;
   private pendingNewSeed: number | undefined;
   /** Set while load / newGame replace the world (habitats are not "changed" then, but new). */
@@ -238,6 +251,7 @@ export class Simulation implements ISimulation {
       events.on('habitatsChanged', () => {
         if (!this.replacingWorld) this.enclosures.onHabitatsChanged();
       }),
+      events.on('notify', (n) => this.recordMessage(n)),
     );
   }
 
@@ -312,20 +326,48 @@ export class Simulation implements ISimulation {
     this.progress.tick(0.5);
   }
 
-  private endOfDay() {
+  /** Upkeep of buildings, scenery and fences for one day. */
+  private dailyUpkeep(): number {
     let upkeep = 0;
     for (const o of this.world.objects.values()) upkeep += OBJECTS_BY_ID[o.defId]?.upkeep ?? 0;
     // fences: small upkeep scaled by strength
     let fenceUpkeep = 0;
     for (let i = 0; i < this.world.hFence.length; i++) if (this.world.hFence[i]) fenceUpkeep += 0.1 * (FENCES_BY_ID[this.world.hFence[i]]?.strength ?? 1);
     for (let i = 0; i < this.world.vFence.length; i++) if (this.world.vFence[i]) fenceUpkeep += 0.1 * (FENCES_BY_ID[this.world.vFence[i]]?.strength ?? 1);
-    upkeep += Math.round(fenceUpkeep);
-    // the animals' food is a daily running cost of its own
+    return upkeep + Math.round(fenceUpkeep);
+  }
+
+  /** The animals' food for one day (a running cost of its own). */
+  private dailyFood(): number {
     let food = 0;
     for (const a of this.animals.values()) {
       const sp = SPECIES_BY_ID[a.speciesId];
       if (sp) food += dailyFoodCost(sp, a.growth);
     }
+    return food;
+  }
+
+  runningCosts(): RunningCostEstimate {
+    const fraction = Math.max(0, Math.min(1, this.minuteOfDay / MINUTES_PER_DAY));
+    // staff dismissed today were paid off already; the others accrue from midnight (or hiring)
+    let wagesDay = this.today.salaries,
+      wagesSoFar = this.today.salaries;
+    for (const s of this.staff.values()) {
+      wagesDay += s.salary * s.payShare;
+      wagesSoFar += s.salary * Math.max(0, s.payShare - (1 - fraction));
+    }
+    const food = this.dailyFood(),
+      upkeep = this.dailyUpkeep();
+    const day = { wages: Math.round(wagesDay), food, upkeep, total: 0 };
+    day.total = day.wages + food + upkeep;
+    const soFar = { wages: Math.round(wagesSoFar), food: Math.round(food * fraction), upkeep: Math.round(upkeep * fraction), total: 0 };
+    soFar.total = soFar.wages + soFar.food + soFar.upkeep;
+    return { fraction, soFar, day };
+  }
+
+  private endOfDay() {
+    const upkeep = this.dailyUpkeep();
+    const food = this.dailyFood();
     let salaries = 0;
     for (const s of this.staff.values()) {
       salaries += s.salary * s.payShare;
@@ -342,7 +384,9 @@ export class Simulation implements ISimulation {
     while (this.ledger.length > 30) this.ledger.shift();
     this.day++;
     this.today = emptyLedger(this.day);
+    this.progress.closeDay(this.guestsToday, runningResult(done));
     this.guestsToday = 0;
+    this.turnedAwayToday = 0;
     this.animalSys.daily();
     this.debtWarned = false;
     this.events.emit('dayChanged', { day: this.day });
@@ -409,8 +453,20 @@ export class Simulation implements ISimulation {
   }
 
   /** A message for the log only, no toast: something on screen already shows it. */
-  logMessage(text: string, kind: NotifyKind) {
-    this.events.emit('notify', { text, kind, logOnly: true });
+  logMessage(text: string, kind: NotifyKind, focus?: { x: number; z: number }) {
+    this.events.emit('notify', focus ? { text, kind, focus: { x: focus.x, z: focus.z }, logOnly: true } : { text, kind, logOnly: true });
+  }
+
+  private recordMessage(n: GameEvents['notify']) {
+    const m: SimMessage = { day: this.day, minute: Math.floor(this.minuteOfDay), text: n.text, kind: n.kind };
+    if (n.focus) m.focus = { x: n.focus.x, z: n.focus.z };
+    if (n.logOnly) m.logOnly = true;
+    this.messageLog.push(m);
+    if (this.messageLog.length > MESSAGE_LOG_SIZE) this.messageLog.splice(0, this.messageLog.length - MESSAGE_LOG_SIZE);
+  }
+
+  messages(): readonly SimMessage[] {
+    return this.messageLog;
   }
 
   // ================================================================= litter
@@ -522,6 +578,15 @@ export class Simulation implements ISimulation {
     this.evalDirty = false;
     this.evalCache.clear();
     this.refreshPopulations();
+  }
+
+  /**
+   * How much an animal counts towards the collection (rating, the zoo's draw): animals
+   * packed past what their habitat holds count only for the room there is.
+   */
+  collectionWeight(a: AnimalSim): number {
+    if (a.escaped || !a.habitatId) return 1;
+    return this.evalFor(a.habitatId, a.speciesId)?.space ?? 1;
   }
 
   keeperCount(): number {
@@ -766,6 +831,9 @@ export class Simulation implements ISimulation {
       staffCount: this.staff.size,
       litterCount: this.litter.size,
       fairAdmission: Math.round(this.guestSys.fairPrice),
+      guestCapacity: this.guestSys.capacity,
+      turnedAwayToday: Math.round(this.turnedAwayToday),
+      gateClosed: this.guestSys.gateNote(),
     };
     this.statsCache = out;
     this.statsTime = this.time;
@@ -797,6 +865,10 @@ export class Simulation implements ISimulation {
     const adding = !mover || mover.escaped || mover.habitatId !== habitatId;
     const e = evaluateSpecies(this.world, hab, sp, this.population(habitatId), this.keeperCount(), adding);
     return this.describeSuitability(e, habitatId);
+  }
+
+  objectiveProgress(objectiveId: string): GoalProgress | null {
+    return this.progress.goalProgress(objectiveId);
   }
 
   /** How the habitat suits the animals of a species already living there (habitat report). */
@@ -892,6 +964,7 @@ export class Simulation implements ISimulation {
       hourAcc: this.hourAcc,
       crowdAcc: this.crowdAcc,
       guestsToday: this.guestsToday,
+      turnedAwayToday: this.turnedAwayToday,
       totalVisitors: this.totalVisitors,
       satisfaction: this.satisfaction,
       progress: this.progress.serialize(),
@@ -900,6 +973,7 @@ export class Simulation implements ISimulation {
       starterObjectMaxId: this.starterObjectMaxId,
       starterPath: rleEncode(this.starterPath),
       serviceDay: Array.from(this.serviceDay),
+      messages: this.messageLog,
     };
     // deep copy (so later simulation never mutates a save that is still being written),
     // with fractional numbers rounded to 1/1000 — positions to the millimetre — which
@@ -937,6 +1011,7 @@ export class Simulation implements ISimulation {
     this.speed = s.speed;
     this.rating = s.rating;
     this.objectives = mergeObjectives(s.objectives ?? []);
+    const newGoals = this.objectives.filter((o) => !(s.objectives ?? []).some((so) => so.id === o.id)).map((o) => o.id);
     // older saves have no 'food' field (food was booked under upkeep)
     this.ledger = (s.ledger ?? []).map((e) => upgradeLedger({ ...emptyLedger(e.day), ...e }));
     this.today = upgradeLedger({ ...emptyLedger(this.day), ...(s.today ?? {}) });
@@ -950,9 +1025,12 @@ export class Simulation implements ISimulation {
     this.hourAcc = s.hourAcc ?? 0;
     this.crowdAcc = s.crowdAcc ?? 0;
     this.guestsToday = s.guestsToday ?? 0;
+    this.turnedAwayToday = s.turnedAwayToday ?? 0;
     this.totalVisitors = s.totalVisitors ?? 0;
     this.satisfaction = s.satisfaction ?? START_SATISFACTION;
-    this.progress.load(s.progress ?? {});
+    this.progress.load(s.progress ?? {}, Math.max(0, ...this.ledger.map(runningResult)));
+    // before the world: the UI rebuilds its Messages log from these on worldReset
+    this.messageLog = (s.messages ?? []).slice(-MESSAGE_LOG_SIZE);
     this.debtWarned = s.debtWarned ?? false;
     // older saves did not track free starter scenery: everything counts as bought
     this.starterObjectMaxId = s.starterObjectMaxId ?? 0;
@@ -975,6 +1053,7 @@ export class Simulation implements ISimulation {
     this.dropStaleHabitatRefs();
     this.resetCaches();
     this.guestSys.afterLoad();
+    if ((s.objectives ?? []).length) this.progress.settleNewGoals(newGoals);
     this.events.emit('moneyChanged', { money: this.money, delta: 0 });
   }
 
@@ -1036,8 +1115,10 @@ export class Simulation implements ISimulation {
     this.hourAcc = 0;
     this.crowdAcc = 0;
     this.guestsToday = 0;
+    this.turnedAwayToday = 0;
     this.totalVisitors = 0;
     this.satisfaction = START_SATISFACTION;
+    this.messageLog = [];
     this.nextIds = { animal: 1, guest: 1, staff: 1, litter: 1 };
     this.debtWarned = false;
     this.progress.reset();
@@ -1154,6 +1235,9 @@ function upgradeGuest(g: GuestSim): GuestSim {
   d.avoidUntil ??= 0;
   d.plan ??= 0;
   d.ticketValue ??= 0;
+  d.paid ??= 0;
+  d.wants ??= 0;
+  d.route ??= [];
   return g;
 }
 
