@@ -416,7 +416,8 @@ function makeDriver(height: number, walkSpeed: number, runSpeed: number) {
     hindToeCurl: 0.8,
     push: 0.45,
     scapSwing: 0.22,
-    lie: { hipsY: 0.92, chestY: 1.28, front: 'tuck', hindSplay: 0.1, headRest: 1.0 },
+    // legs folded under the body: carpus under the shoulder, hock beside the belly
+    lie: { hipsY: 0.85, chestY: 1.2, front: 'tuck', hindSplay: 0.25, headRest: 1.0, carpusZ: -0.05, hockZ: -0.06 },
     grazeReach: 0.4,
     headCarry: -0.12,
     look: 0.42,

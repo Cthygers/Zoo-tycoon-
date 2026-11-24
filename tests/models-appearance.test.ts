@@ -60,6 +60,13 @@ describe('guest outfits', () => {
     const mid = { ...pale, skin: 0x5c3a25, hair: 0x7a5a3c };
     fitOutfit(mid);
     expect(mid.hair).toBe(0x241912); // very dark brown, not dark blonde
+    // light-tan skins keep their blondes: dark blond stays, light blond darkens to dark blond
+    const tan = { ...pale, skin: 0xdcab86, hair: 0xa0804f };
+    fitOutfit(tan);
+    expect(tan.hair).toBe(0xa0804f);
+    const light = { ...pale, skin: 0xe9c2a2, hair: 0xc4a46e };
+    fitOutfit(light);
+    expect(light.hair).toBe(0xa0804f);
   });
 
   it('halves the bald share on the two palest skins', () => {

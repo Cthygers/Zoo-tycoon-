@@ -7,13 +7,21 @@ import * as THREE from 'three';
 import type { QualitySettings } from '../src/core/contracts';
 import { PROP_SPECS } from '../src/props/registry';
 import '../src/props/nature';
-import { applyFade, fadeModeOf, updateFade, fadeUniforms } from '../src/props/lod/fade';
+import { applyFade, fadeModeOf, updateFade, fadeUniforms, TREE_GONE, TREE_KEEP_R, TREE_SHADOW_R } from '../src/props/lod/fade';
+import { windDepthMaterial } from '../src/props/wind';
 import { addCrownFade, barkRanks, connectedPieces } from '../src/props/nature/geo';
 
 const QUALITY: QualitySettings = { level: 'low', pixelRatio: 1, antialias: false, shadows: true, shadowMapSize: 1024, grassDensity: 0.25, postFX: false, detailDistance: 26, creatureDetail: 0 };
 
 function compile(m: THREE.Material): { vertexShader: string; fragmentShader: string } {
   const src = THREE.ShaderLib.standard;
+  const shader = { vertexShader: src.vertexShader, fragmentShader: src.fragmentShader, uniforms: {}, defines: {} };
+  m.onBeforeCompile(shader as unknown as THREE.WebGLProgramParametersWithUniforms, {} as THREE.WebGLRenderer);
+  return shader;
+}
+
+function compileDepth(m: THREE.Material): { vertexShader: string; fragmentShader: string } {
+  const src = THREE.ShaderLib.depth;
   const shader = { vertexShader: src.vertexShader, fragmentShader: src.fragmentShader, uniforms: {}, defines: {} };
   m.onBeforeCompile(shader as unknown as THREE.WebGLProgramParametersWithUniforms, {} as THREE.WebGLRenderer);
   return shader;
@@ -155,15 +163,61 @@ describe('near-camera fade shader', () => {
     applyFade(treeBark, 'crownSolid');
     const tb = compile(treeBark).vertexShader;
     expect(tb).toContain('#define PROP_FADE_CROWN');
+    expect(tb).toContain('#define PROP_FADE_BARK');
+    expect(crown.vertexShader).not.toContain('#define PROP_FADE_BARK');
     expect(tb).not.toContain('#define PROP_FADE_SOLID');
     expect(treeBark.customProgramCacheKey()).not.toBe(bark.customProgramCacheKey());
     // leaves and bark of a tree: one decision per instance (no per-vertex hole, lens or limb cut)
     for (const sh of [crown.vertexShader, tb]) {
-      expect(sh).toContain('float tree = smoothstep( 0.45, 0.55, max( instF, propTreeF( M, uFadeCam + dir * max( tEnd, 0.0 ), grow ) * uFadeCrown ) );');
-      // never held in the second half of the dissolve (a bare trunk with a few limbs)
-      expect(sh).toContain('return tree < 0.5 ? tree : 1.0;');
+      expect(sh).toContain('float tree = max( instF, propTreeF( M, uFadeCam + dir * max( tEnd, 0.0 ), grow ) * uFadeCrown * between );');
+      // the crown thins by at most half over a wide band, then the tree goes whole
+      expect(sh).toContain(`float fade = tree < ${TREE_GONE.toFixed(2)} ? 0.5 * smoothstep( 0.15, ${TREE_GONE.toFixed(2)}, tree ) : 1.0;`);
+      // bark stays whole until the tree goes (no bare trunk or skeleton)
+      expect(sh).toContain(`fade = step( ${TREE_GONE.toFixed(2)}, tree );`);
       expect(sh.indexOf('float propTreeF( mat4 M')).toBeGreaterThan(sh.indexOf('attribute vec2 aCrownR;'));
     }
+  });
+
+  it('keeps the tree the camera looks at and only removes trees clearly between camera and subject', () => {
+    const leaf = new THREE.MeshStandardMaterial();
+    leaf.userData.foliage = true;
+    leaf.userData.crownFade = true;
+    applyFade(leaf, 'crown');
+    const sh = compile(leaf).vertexShader;
+    // trunk within TREE_KEEP_R (3 m, 1 m band) of the focus: the subject's own tree, kept
+    expect(sh).toContain(`smoothstep( ${TREE_KEEP_R.toFixed(1)}, ${(TREE_KEEP_R + 1).toFixed(1)}, length( o.xz - uFadeFocus.xz ) )`);
+    // crown centre within TREE_KEEP_R of the line's end (at or beyond the subject): kept
+    expect(sh).toContain(`( 1.0 - smoothstep( -0.04, 0.04, tc - 1.0 + ${TREE_KEEP_R.toFixed(1)} / len ) )`);
+    expect(TREE_KEEP_R).toBeGreaterThanOrEqual(2);
+    // a tree 6 m in front of the subject (through-tree views) is no longer the subject's own
+    expect(TREE_KEEP_R + 1).toBeLessThan(6);
+  });
+
+  it("drops a removed tree's shadow near the camera only, and no other prop's", () => {
+    const leaf = new THREE.MeshStandardMaterial({ alphaTest: 0.5 });
+    leaf.userData.foliage = true;
+    leaf.userData.crownFade = true;
+    leaf.userData.sway = 0.011;
+    const depth = windDepthMaterial(leaf)!;
+    const dsh = compileDepth(depth);
+    expect(dsh.vertexShader).toContain('#define PROP_FADE_SHADOW');
+    expect(dsh.vertexShader).toContain('#define PROP_FADE_CROWN');
+    expect(dsh.vertexShader).toContain(`fade *= 1.0 - smoothstep( ${TREE_SHADOW_R.toFixed(1)}, ${(TREE_SHADOW_R + 4).toFixed(1)}, length( uFadeCam.xz - o.xz ) );`);
+    // the wind sway is kept, and the fade runs on the swayed vertex
+    expect(dsh.vertexShader.indexOf('windOffset( wO')).toBeLessThan(dsh.vertexShader.indexOf('vPropFade = propFadeAt('));
+    expect(dsh.fragmentShader).toContain('if ( vPropFade > vPropRank ) discard;');
+    expect(depth.customProgramCacheKey()).toBe('props-wind-depth|treeshadow-crown');
+    // the visible pass never carries the shadow gate
+    applyFade(leaf, 'crown');
+    expect(compile(leaf).vertexShader).not.toContain('#define PROP_FADE_SHADOW');
+
+    // other swaying props (bushes, reeds) keep plain swaying shadows
+    const bush = new THREE.MeshStandardMaterial({ alphaTest: 0.5 });
+    bush.userData.foliage = true;
+    bush.userData.sway = 0.065;
+    const bd = windDepthMaterial(bush)!;
+    expect(compileDepth(bd).vertexShader).not.toContain('propFadeAt');
+    expect(bd.customProgramCacheKey()).toBe('props-wind-depth');
   });
 
   it('removes whole crowns only in close views', () => {

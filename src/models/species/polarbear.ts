@@ -172,7 +172,7 @@ function design(ctx: DesignContext): CreatureDesign {
     legs: LEGS,
     tailR: 0.055,
     coat: polarCoat(eye),
-    look: { skin: 'fur', grain: 0.012, bump: 0.45, sheen: 0.5, roughness: 0.93, mottle: 0.07 },
+    look: { skin: 'fur', grain: 0.012, bump: 0.45, sheen: 0.5, roughness: 0.93, mottle: 0.07, wets: true },
     eyes: [{ bone: 'head', pos: eye, radius: 0.0125, color: 0x0e0a08 }],
     resolution: 0.95,
     regions: {
@@ -190,7 +190,7 @@ function design(ctx: DesignContext): CreatureDesign {
     anim: {
       rear: { pitch: 1.2, hipsY: 1.0, hipsDZ: 0.2, neck: 0.85 },
       sit: { hipsY: 0.38, pitch: 0.95, hipsDZ: 0.15, legFwd: 0.6 },
-      side: { hipsY: 0.36, roll: 1.35, curl: 0.45, reach: 0.62, neckDrop: 0.25 },
+      side: { hipsY: 0.36, roll: 1.35, curl: 0.45, reach: 0.62, neckDrop: 0.25, bend: 1 },
       call: 'roar',
       headSwing: 0.14,
       reach: { front: 0.08, head: 0.3, maxPitch: 2.0, neckLift: 0.5 },

@@ -1,5 +1,6 @@
 // Grass tuft field placement (render/grass.ts): tufts go where the shader can
-// show them, so the instance capacity is spent near the focus.
+// show them, so the instance capacity is spent near the focus. Dry tufts near
+// the camera read as thin, matte straw blades.
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { MAP_H, MAP_W, WATER_LEVEL } from '../src/core/constants';
@@ -45,5 +46,52 @@ describe('grass tuft field', () => {
     const onMud = tufts(w, 3000, 71, 71).filter((t) => w.terrain[w.idx(Math.floor(t.x / 2), Math.floor(t.z / 2))] === Terrain.Mud);
     expect(onMud.length).toBeGreaterThan(0);
     for (const t of onMud) expect(t.y + 0.01).toBeGreaterThan(WATER_LEVEL + 0.12);
+  });
+});
+
+describe('dry tufts', () => {
+  it('know each vertex\'s offset from its blade\'s centre line, so near straw blades can be thinned', () => {
+    const gf = new GrassField(lawnWorld(), new THREE.Texture(), 64, { blades: 6, segs: 2 });
+    const g = gf.mesh.geometry;
+    const pos = g.getAttribute('position');
+    const side = g.getAttribute('aSide');
+    const blade = g.getAttribute('aBlade');
+    expect(side.count).toBe(pos.count);
+    // each blade: a left / right pair per segment, then the tip
+    const perBlade = 2 * 2 + 1;
+    expect(pos.count % perBlade).toBe(0);
+    for (let b = 0; b < pos.count; b += perBlade) {
+      const tip = b + perBlade - 1;
+      expect(blade.getX(tip)).toBe(1);
+      expect([side.getX(tip), side.getY(tip)]).toEqual([0, 0]);
+      for (let i = b; i < tip; i += 2) {
+        // the same centre point, opposite half widths
+        expect(pos.getX(i + 1) - side.getX(i + 1)).toBeCloseTo(pos.getX(i) - side.getX(i), 6);
+        expect(pos.getZ(i + 1) - side.getY(i + 1)).toBeCloseTo(pos.getZ(i) - side.getY(i), 6);
+        expect(side.getX(i + 1)).toBeCloseTo(-side.getX(i), 6);
+        expect(Math.hypot(side.getX(i), side.getY(i))).toBeGreaterThan(0.002);
+      }
+    }
+    gf.dispose();
+  });
+
+  it('are thin straw-toned blades without white sheen close to the camera', () => {
+    const gf = new GrassField(lawnWorld(), new THREE.Texture(), 64, { blades: 6, segs: 2 });
+    const mat = gf.mesh.material as THREE.Material;
+    const shader = { vertexShader: THREE.ShaderLib.standard.vertexShader, fragmentShader: THREE.ShaderLib.standard.fragmentShader, uniforms: {}, defines: {} };
+    mat.onBeforeCompile(shader as unknown as THREE.WebGLProgramParametersWithUniforms, {} as THREE.WebGLRenderer);
+    const vs = shader.vertexShader;
+    // near the camera (3-9 m) dry blades keep their own width instead of the clump's 1.35x spread,
+    // tapering further toward the tip; lush blades keep theirs
+    expect(vs).toContain('float gNear = 1.0 - smoothstep(3.0, 9.0, distance(cameraPosition, iPos.xyz));');
+    expect(vs).toContain('float gWidth = mix(1.0, mix(gSpread.x, 0.85 * (1.0 - 0.3 * aBlade.x), gNear), iPar.y);');
+    // straw tips no paler than the dry-grass ground's pale straw (sRGB 180, 163, 118 ≈ 0.46, 0.37, 0.18 linear)
+    const tip = /vec3 tip = mix\(vec3\([^)]*\), vec3\(([\d.]+), ([\d.]+), ([\d.]+)\), iPar\.y\);/.exec(vs)!;
+    const [r, gr, b] = tip.slice(1).map(Number);
+    expect(0.2126 * r + 0.7152 * gr + 0.0722 * b).toBeLessThan(0.35);
+    expect(r).toBeGreaterThan(b * 1.8);
+    // matte straw
+    expect(shader.fragmentShader).toContain('reflectedLight.indirectSpecular *= 1.0 - 0.6 * vGDry;');
+    gf.dispose();
   });
 });

@@ -42,6 +42,19 @@ export interface LieParams {
   front: 'tuck' | 'extend';
   /** Extra lateral offset of the hind feet when lying (m). */
   hindSplay: number;
+  /**
+   * Front 'tuck': where the folded carpus rests, in leg reaches ahead of the
+   * shoulder joint. Default 0.42 (just in front of the chest); long-legged
+   * species ≈ 0 fold the forearm under the chest with the cannon lying back
+   * beneath it instead of sticking out in front.
+   */
+  carpusZ?: number;
+  /**
+   * Where the hock rests, in leg reaches ahead of the hip joint. Default −0.3
+   * (behind the hip); long-legged species ≈ 0 fold the hind leg beside the
+   * belly instead of trailing it behind the rump.
+   */
+  hockZ?: number;
   /** Muzzle height when the head rests (m). */
   headRest: number;
 }
@@ -599,14 +612,14 @@ export function lie(ctx: AnimCtx, st: QuadState, pose: Pose, headMode: 'up' | 'd
     const reach = leg.reach;
     if (leg.front) {
       if (L.front === 'tuck') {
-        _A.set(H.x * 1.05, Math.max(0.04, leg.footVec.length() * 0.18), H.z + reach * 0.42);
+        _A.set(H.x * 1.05, Math.max(0.04, leg.footVec.length() * 0.18), H.z + reach * (L.carpusZ ?? 0.42));
         placeLeg(ctx, st, pose, leg, _A, Math.PI * 0.52, Math.PI * 0.75);
       } else {
         _A.set(H.x * 0.95, Math.max(0.03, leg.footVec.length() * 0.25), H.z + reach * 0.62);
         placeLeg(ctx, st, pose, leg, _A, -Math.PI * 0.5, -Math.PI * 0.42);
       }
     } else {
-      _A.set(H.x + leg.side * L.hindSplay, Math.max(0.04, leg.footVec.length() * 0.14), H.z - reach * 0.3);
+      _A.set(H.x + leg.side * L.hindSplay, Math.max(0.04, leg.footVec.length() * 0.14), H.z + reach * (L.hockZ ?? -0.3));
       placeLeg(ctx, st, pose, leg, _A, -Math.PI * 0.47, -Math.PI * 0.4);
     }
   }

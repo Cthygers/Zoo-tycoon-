@@ -184,7 +184,7 @@ function design(ctx: DesignContext): CreatureDesign {
     legs: LEGS,
     tailR: 0.05,
     coat: grizzlyCoat(eye),
-    look: { skin: 'fur', grain: 0.011, bump: 0.5, sheen: 0.45, roughness: 0.92, mottle: 0.22 },
+    look: { skin: 'fur', grain: 0.011, bump: 0.5, sheen: 0.45, roughness: 0.92, mottle: 0.22, wets: true },
     eyes: [{ bone: 'head', pos: eye, radius: 0.014, color: 0x1a0f08 }],
     resolution: 1.0,
     regions: { head: { scale: 0.52 }, FL: { scale: 0.5, aniso: [1, 1.5, 1] }, FR: { scale: 0.5, aniso: [1, 1.5, 1] }, HL: { scale: 0.5, aniso: [1, 1.5, 1] }, HR: { scale: 0.5, aniso: [1, 1.5, 1] } },
@@ -195,7 +195,7 @@ function design(ctx: DesignContext): CreatureDesign {
     anim: {
       rear: { pitch: 1.25, hipsY: 0.8, hipsDZ: 0.16, neck: 0.95 },
       sit: { hipsY: 0.3, pitch: 0.95, hipsDZ: 0.12, legFwd: 0.6 },
-      side: { hipsY: 0.3, roll: 1.35, curl: 0.4, reach: 0.62, neckDrop: 0.3 },
+      side: { hipsY: 0.3, roll: 1.35, curl: 0.4, reach: 0.62, neckDrop: 0.3, bend: 1 },
       call: 'rear',
       headSwing: 0.1,
       reach: { front: 0.2, head: 0.35, maxPitch: 1.5, neckLift: 0.15 },

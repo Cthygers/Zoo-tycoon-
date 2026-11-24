@@ -11,7 +11,7 @@ import { EventBus } from './core/events';
 import { createCreatureFactory } from './models';
 import { createPropsLayer, paintAtlasesOffThread } from './props';
 import { createRenderContext, detectQuality } from './render';
-import { createSimulation } from './sim';
+import { NEW_ZOO_START_MINUTE, createSimulation } from './sim';
 import { createGameUI, showLoadingScreen, showMainMenu } from './ui';
 import { createEntityViews } from './views';
 import { buildDemoZoo } from './demo';
@@ -100,7 +100,7 @@ async function boot() {
         : 'Your saved zoo could not be loaded. This new zoo will not be saved, so the old save is kept.';
     }
   }
-  if (!loaded) sim.newGame();
+  if (!loaded) sim.newGame(undefined, demo ? undefined : { startMinute: NEW_ZOO_START_MINUTE });
   const timeParam = params.get('time');
   const paramMinute = timeParam
     ? (() => {
@@ -167,7 +167,7 @@ async function boot() {
     }
   };
   const newGame = () => {
-    sim.newGame();
+    sim.newGame(undefined, { startMinute: NEW_ZOO_START_MINUTE });
     events.emit('worldReset', {});
     save();
   };

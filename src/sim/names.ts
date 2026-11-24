@@ -122,9 +122,16 @@ const SKIN_DELTA_E = 15;
  * Minimum ΔE from the skin for a woman's top and bottom (either may be worn
  * as a dress or skirt over bare legs, one garment from collar to knee: a coral
  * dress on brown skin reads as one clay-coloured figure) and for hair (dark red
- * hair on brown skin, pale grey hair on pale skin: a blank head).
+ * hair on brown skin: a blank head).
  */
 const DRESS_DELTA_E = 25;
+/**
+ * The same for blond and grey hair (L* above PALE_HAIR_L) on the paler skins,
+ * which it is always darker than: at 25 dark-blond hair on light-tan skin was
+ * always re-dyed brown, so those skins had no blondes. Pale grey on the palest
+ * skin (ΔE 18) still does not pass.
+ */
+const PALE_HAIR_DELTA_E = 20;
 /** Dark hair (L* at most DARK_HAIR_MAX_L) at least DARK_HAIR_L darker than the skin always reads as hair (black hair on the darkest skins). */
 const DARK_HAIR_L = 14;
 const DARK_HAIR_MAX_L = 25;
@@ -190,7 +197,9 @@ function skinHued(cloth: number, skin: number): boolean {
 
 /** Hair that stands apart from the skin: a clear colour difference, or clearly darker. */
 export function hairReads(hair: number, skin: number): boolean {
-  return deltaE(hair, skin) >= DRESS_DELTA_E || hexToLab(hair)[0] <= Math.min(hexToLab(skin)[0] - DARK_HAIR_L, DARK_HAIR_MAX_L);
+  const hairL = hexToLab(hair)[0];
+  const minDE = hairL > PALE_HAIR_L ? PALE_HAIR_DELTA_E : DRESS_DELTA_E;
+  return deltaE(hair, skin) >= minDE || hairL <= Math.min(hexToLab(skin)[0] - DARK_HAIR_L, DARK_HAIR_MAX_L);
 }
 
 /**

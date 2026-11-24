@@ -43,7 +43,8 @@ interface Ptr {
   type: string;
 }
 
-type Mode = 'idle' | 'pending' | 'pan' | 'tool' | 'multi' | 'orbit' | 'locked';
+/** 'rest': one finger left down after a pinch / twist; it pans once it moves (lifting it is no tap). */
+type Mode = 'idle' | 'pending' | 'pan' | 'tool' | 'multi' | 'orbit' | 'locked' | 'rest';
 
 const TOUCH_SLOP = 10;
 const MOUSE_SLOP = 4;
@@ -242,6 +243,9 @@ export class InputController {
         }
         break;
       }
+      case 'rest':
+        if (e.pointerId === this.primary && Math.hypot(p.x - p.sx, p.y - p.sy) > TOUCH_SLOP) this.startPan(p, true);
+        break;
       case 'pan':
         if (e.pointerId === this.primary) this.panTo(p);
         break;
@@ -347,11 +351,12 @@ export class InputController {
         const rest = this.ptrs.size === 1 ? this.ptrs.values().next().value : undefined;
         if (this.ptrs.size >= 2) this.startMulti();
         else if (rest && !this.cb.tool.active) {
-          // keep panning with the finger that is still down
+          // pan with the finger that is still down once it moves (not before: lifting the
+          // fingers of a pinch one by one must not end follow mode)
           this.primary = rest.id;
           rest.sx = rest.x;
           rest.sy = rest.y;
-          this.startPan(rest, false);
+          this.mode = 'rest';
         } else this.mode = this.ptrs.size ? 'locked' : 'idle';
         break;
       }

@@ -4,7 +4,8 @@ import { PathType, Terrain } from '../src/core/types';
 import { World } from '../src/core/world';
 import * as THREE from 'three';
 import { buildPoolGrid, poolLight, surfaceBrightness, type WorldEmitter } from '../src/props/lights/nightlights';
-import { applyLampField, figureColourShare, lampFieldAt, lampFieldUniforms, moonShoulder, resetLampField, writeLampField } from '../src/props/lights/lampField';
+import { applyLampField, figureColourShare, lampFieldAt, lampFieldUniforms, moonShoulder, moonToe, resetLampField, writeLampField } from '../src/props/lights/lampField';
+import { viewExposure } from '../src/render/grade';
 
 function lamp(x: number, z: number, y = 3.2): WorldEmitter {
   return { x, y, z, kind: 'lamp', px: x, pz: z, radius: 6.7, intensity: 1 };
@@ -142,10 +143,19 @@ describe('lamp light on creatures', () => {
       fragmentShader: THREE.ShaderLib.physical.fragmentShader,
     } as unknown as THREE.WebGLProgramParametersWithUniforms;
     applyLampField(shader);
-    expect(shader.fragmentShader).toContain('pow(smoothstep(0.05, 0.80, vLampLight) * uLampMark, 0.70)');
-    expect(shader.fragmentShader).toContain('whLampLit = 0.40 * (0.5 - sin(asin(');
-    // HDR target: the same linear mark as the pool on the ground (nightlights.ts)
-    expect(shader.fragmentShader).toContain('gl_FragColor.a += vLampLight * uLampMark');
+    const fs = shader.fragmentShader;
+    expect(fs).toContain('pow(smoothstep(0.05, 0.80, vLampLight) * uLampMark, 0.70)');
+    expect(fs).toContain('float lfMark = 0.40 * (0.5 - sin(asin(');
+    expect(fs).toContain('whLampLit = lfMark;');
+    // HDR target (post-FX tier): the same gradual mark through the alpha, and
+    // the moonlit shoulder against the view's exposure (three leaves
+    // toneMappingExposure out there)
+    expect(fs).toContain('gl_FragColor.a += lfMark;');
+    expect(fs).toContain('float lfExposure = uViewExposure;');
+    expect(shader.uniforms.uViewExposure).toBe(viewExposure);
+    // after the colour is final, before the tone map
+    expect(fs.indexOf('float lfMark')).toBeGreaterThan(fs.indexOf('#include <opaque_fragment>'));
+    expect(fs.indexOf('float lfMark')).toBeLessThan(fs.indexOf('#include <tonemapping_fragment>'));
   });
 
   it('colours figures gradually across a pool fringe instead of flipping one figure at a time', () => {
@@ -176,5 +186,16 @@ describe('lamp light on creatures', () => {
     expect(moonShoulder(0.03)).toBeGreaterThan(0.995);
     // monotonic: brighter stays brighter
     for (let d = 0.02; d < 2; d *= 1.3) expect((d * 1.3) * moonShoulder(d * 1.3)).toBeGreaterThan(d * moonShoulder(d));
+  });
+
+  it('lifts moonlit dark coats out of the black, leaving mid tones and the shoulder alone', () => {
+    // a giraffe's dark patch under the moon (≈ 0.006 displayed) against moonlit ground (≈ 0.04)
+    expect(moonToe(0.006)).toBeGreaterThan(1.6);
+    expect(moonToe(0.006)).toBeLessThan(2.01);
+    expect(moonToe(0.03)).toBe(1);
+    expect(moonToe(0.24)).toBe(1);
+    // the whole moonlit curve stays monotonic
+    const tone = (d: number) => d * moonShoulder(d) * moonToe(d);
+    for (let d = 0.001; d < 2; d *= 1.1) expect(tone(d * 1.1)).toBeGreaterThan(tone(d));
   });
 });

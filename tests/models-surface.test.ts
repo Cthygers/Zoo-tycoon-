@@ -1,7 +1,8 @@
 // Animal surfaces read as fur and skin, not plastic: matte coats without the
 // white grazing reflection, a coat-tinted sheen at the silhouette, fur relief
-// that fades out by its pixel footprint, dry skin that only shines where wet,
-// and a lion whose pale inner legs stay on the upper medial side.
+// that fades out by its pixel footprint, pale coats without marble contours,
+// thick-skin creases that vary over the body, dry skin that only shines when
+// wet, and a lion whose pale inner legs stay on the upper medial side.
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { batchedAnimalMaterials } from '../src/models/crowd/materials';
@@ -47,6 +48,30 @@ describe('animal surface shading', () => {
     }
   });
 
+  it('gives pale coats a quarter of the albedo swing and short albedo locks (no marble contours)', () => {
+    for (const detail of [0, 1] as const) {
+      const fs = fragment(createAnimalMaterial({ look: { skin: 'fur' }, detail }));
+      expect(fs).toContain('float crPale = mix(1.0, 0.25, smoothstep(0.55, 0.85, sqrt(dot(diffuseColor.rgb');
+      expect(fs).toContain('diffuseColor.rgb *= 1.0 + uMottle * (crMo - 0.5) * 2.0 * amp;');
+      // clump albedo: locks about 2x longer than wide; the relief keeps long locks (hair streaks) on darker coats only
+      expect(fs).toContain('cr_clump(vRestPos / (crGrain * CR_CLUMP), crFlow, 0.55) - 0.5) * amp');
+      if (detail > 0) expect(fs).toContain('float sq = mix(0.55, 0.8, (crPale - 0.25) / 0.75);');
+    }
+  });
+
+  it('varies thick-skin creases over the body and keeps their distant tone consistent', () => {
+    const fs = fragment(createAnimalMaterial({ look: { skin: 'wrinkled' }, detail: 1 }));
+    // the far mean equals the filtered network: Σ groove width × band weight
+    const bands = [...fs.matchAll(/cr_groove\([abc], ([0-9.]+) \* ws, fq \* [0-9.]+\) \* ([0-9.]+)/g)].map((m) => Number(m[1]) * Number(m[2]));
+    expect(bands).toHaveLength(3);
+    expect(bands.reduce((a, b) => a + b, 0)).toBeCloseTo(defineOf(fs, 'CR_CREASE_MEAN'), 4);
+    // strength and width follow the fold weight (legs, trunk) and a slow patch noise, near and far alike
+    expect(fs).toContain('float region = smoothstep(0.3, 0.8, max(-vPattern.w, 0.0));');
+    expect(fs).toContain('cr_crease(vRestPos / crGrain, crFq, crWs) : CR_CREASE_MEAN * crWs) * crCw;');
+    // the relief follows the same weights
+    expect(fs).toContain('#define CR_H(q) ((cr_crease(q, max(crFq, e), crWs) - 1.0) * crCw');
+  });
+
   it('fades fur strands and clumps by their own pixel footprint; relief on medium and high only', () => {
     const med = fragment(createAnimalMaterial({ look: { skin: 'fur' }, detail: 1 }));
     expect(med).toContain('#define CR_MICRO 1');
@@ -73,14 +98,38 @@ function glossSplit(species: string, wet: (y: number, ny: number, z: number) => 
   return { wet: s.wet[0] / s.wet[1], dry: s.dry[0] / s.dry[1] };
 }
 
+/** Mean baked colour (linear) of a species' adult mesh over the vertices a predicate picks. */
+function meanColor(species: string, pick: (y: number, ny: number, z: number) => boolean): THREE.Color {
+  const design = SPECIES_MODELS[species].design({ def: SPECIES_BY_ID[species], sex: 'F', detail: 0 });
+  const geo = assetFromDesign(`${species}-colour`, design, 0).geometry;
+  const pos = geo.getAttribute('position'), nor = geo.getAttribute('normal'), col = geo.getAttribute('color');
+  const c = new THREE.Color(0, 0, 0);
+  let n = 0;
+  for (let i = 0; i < pos.count; i++) {
+    if (!pick(pos.getY(i), nor.getY(i), pos.getZ(i))) continue;
+    c.r += col.getX(i); c.g += col.getY(i); c.b += col.getZ(i);
+    n++;
+  }
+  return c.multiplyScalar(1 / n);
+}
+
 describe('hippo skin', () => {
-  it('is matte and dry above the wet band, glossy only in it', () => {
+  it('is matte and dry all over until it swims: no baked wet band', () => {
     const look = SPECIES_MODELS.hippo.design({ def: SPECIES_BY_ID.hippo, sex: 'F', detail: 0 }).look;
     expect(look.roughness).toBeGreaterThanOrEqual(0.85);
-    const g = glossSplit('hippo', (y, ny) => y < 0.75 && ny < -0.3);
+    const low = glossSplit('hippo', (y, ny, z) => y < 0.75 && ny < -0.3 && Math.abs(z) < 1);
     const top = glossSplit('hippo', (y, ny, z) => y > 1.3 && ny > 0.5 && Math.abs(z) < 1);
     expect(top.wet).toBeLessThan(0.02);
-    expect(g.wet).toBeGreaterThan(0.15);
+    expect(low.wet).toBeLessThan(0.02);
+  });
+
+  it('reads grey-mauve to pinkish-brown, not charcoal, with a pinker underside', () => {
+    const lum = (c: THREE.Color) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    const flank = meanColor('hippo', (y, ny, z) => y > 0.8 && y < 1.2 && Math.abs(ny) < 0.3 && Math.abs(z) < 0.9);
+    const belly = meanColor('hippo', (y, ny, z) => ny < -0.6 && Math.abs(z) < 0.9);
+    expect(lum(flank)).toBeGreaterThan(0.09);
+    expect(flank.r / flank.b).toBeGreaterThan(1.2);
+    expect(belly.r / belly.b).toBeGreaterThan(flank.r / flank.b);
   });
 });
 
@@ -91,7 +140,7 @@ describe('wet skin after a swim', () => {
     expect(nextWetness(0.1, false, DRY_SECONDS)).toBe(0);
   });
 
-  it('reaches the shader of thick skins only, as a gloss that drives roughness and the Fresnel', () => {
+  it('reaches the shader of thick skins and swimming fur animals, as a gloss that drives roughness and the Fresnel', () => {
     const vs = (skin: LookSpec['skin']) => {
       const src = THREE.ShaderLib.standard;
       const shader = { vertexShader: src.vertexShader, fragmentShader: src.fragmentShader, uniforms: THREE.UniformsUtils.clone(src.uniforms), defines: {} };
@@ -103,6 +152,15 @@ describe('wet skin after a swim', () => {
     expect(wrinkled.fragmentShader).toContain('crGloss = max(crGloss, 0.5 * wet);');
     expect(wrinkled.fragmentShader).toContain('roughnessFactor = mix(roughnessFactor, 0.16, crGloss);');
     expect(vs('fur').fragmentShader).toContain('#define CR_WETS 0');
+    // fur that swims (tigers, bears): darker and slicker, less glossy than skin, own program
+    const src = THREE.ShaderLib.standard;
+    const shader = { vertexShader: src.vertexShader, fragmentShader: src.fragmentShader, uniforms: THREE.UniformsUtils.clone(src.uniforms), defines: {} };
+    const wetFur = batchedAnimalMaterials({ skin: 'fur', wets: true }, 1).material;
+    wetFur.onBeforeCompile(shader as unknown as THREE.WebGLProgramParametersWithUniforms, {} as THREE.WebGLRenderer);
+    expect(shader.fragmentShader).toContain('#define CR_WETS 1');
+    expect(shader.fragmentShader).toContain('crGloss = max(crGloss, 0.3 * wet);');
+    expect(wetFur.customProgramCacheKey()).not.toBe(batchedAnimalMaterials({ skin: 'fur' }, 1).material.customProgramCacheKey());
+    for (const id of ['tiger', 'polarbear', 'grizzly']) expect(SPECIES_MODELS[id].design({ def: SPECIES_BY_ID[id], sex: 'F', detail: 0 }).look.wets).toBe(true);
   });
 });
 

@@ -10,11 +10,13 @@
 // `whLampLit` on tiers that tone-map in the material, through the HDR
 // target's alpha on the post-FX tier.
 //
-// Standalone on purpose (three + core constants only): the creature
-// materials import it without pulling in the props layer.
+// Standalone on purpose (three, core constants and the grade's exposure
+// uniform only): the creature materials import it without pulling in the
+// props layer.
 
 import * as THREE from 'three';
 import { WORLD_H, WORLD_W } from '../../core/constants';
+import { viewExposure } from '../../render/grade';
 
 /** One texel per integer metre of the pool grid, 0 … WORLD_W / WORLD_H inclusive. */
 const FIELD_W = WORLD_W + 1;
@@ -35,6 +37,8 @@ export const lampFieldUniforms = {
   uLampLight: { value: new THREE.Color(0, 0, 0) },
   /** Strength of the lamp-lit mark for the night grade (0 by day). */
   uLampMark: { value: 0 },
+  /** The view's exposure, for the moonlit shoulder on the post-FX tier. */
+  uViewExposure: viewExposure,
 };
 
 /**
@@ -63,13 +67,21 @@ const MARK_GAMMA = 0.7;
 /** The grade shows full colour from this lamp-lit mark on (render/grade.ts: smoothstep from 0). */
 const GRADE_MARK_FULL = 0.4;
 /**
- * Moonlit highlight shoulder of figures (tiers that tone-map in the
- * material): above ≈ MOON_KNEE displayed, a figure's brightness grows only
- * with its square root, so a white coat under the moon sits ≈ 3× the moonlit
- * ground like a pale wall instead of glowing 15–20× it (ACES's toe crushes the
- * ground, not the coat). Guests' moonlit shirts stay below the knee.
+ * Moonlit highlight shoulder of figures (every tier): above ≈ MOON_KNEE
+ * displayed, a figure's brightness grows only with its square root, so a
+ * white coat under the moon sits ≈ 3× the moonlit ground like a pale wall
+ * instead of glowing 15–20× it (ACES's toe crushes the ground, not the coat).
+ * Guests' moonlit shirts stay below the knee.
  */
 const MOON_KNEE = 0.08;
+/**
+ * Moonlit toe of figures: ACES's toe crushes dark coats and clothes under the
+ * moon (giraffe patches, dark hair) into black holes next to the moonlit
+ * ground; below ≈ MOON_TOE displayed they get up to 1 + MOON_TOE_LIFT times
+ * their light, as the ground gets its night lift (render/groundMaterial.ts).
+ */
+const MOON_TOE = 0.03;
+const MOON_TOE_LIFT = 1.0;
 
 const smooth = (a: number, b: number, x: number) => {
   const t = Math.min(Math.max((x - a) / (b - a), 0), 1);
@@ -85,6 +97,11 @@ export function figureColourShare(light: number, night: number): number {
 export function moonShoulder(display: number): number {
   const x = Math.min(display / MOON_KNEE, 12);
   return Math.pow(1 + x * x * x * x, -0.125);
+}
+
+/** Factor the moonlit toe applies to a figure displayed at `display` (luminance × exposure). */
+export function moonToe(display: number): number {
+  return 1 + MOON_TOE_LIFT * (1 - smooth(0, MOON_TOE, display));
 }
 
 /** Lamp light level read back from the field at a world point (tests / debugging). */
@@ -129,6 +146,7 @@ const VERTEX = /* glsl */ `
 const FRAGMENT_PARS = /* glsl */ `
 uniform vec3 uLampLight;
 uniform float uLampMark;
+uniform float uViewExposure;
 varying float vLampLight;`;
 
 // before <aomap_fragment>: lamps shine from above, so tops catch the most.
@@ -148,29 +166,32 @@ if (vLampLight > 0.0) {
   reflectedLight.indirectDiffuse += uLampLight * (lfPool * lfFacing) * BRDF_Lambert(diffuseColor.rgb);
 }`;
 
-// The grade's lamp-lit mark (tiers that tone-map in the material): the grade
-// eases its colour share over whLampLit 0…GRADE_MARK_FULL (a smoothstep), so
-// the mark is that curve's inverse of the share figureColourShare wants. The
-// moonlit rest of the figure gets the highlight shoulder (MOON_KNEE).
-// On the HDR target the pool marks its light linearly in the alpha, and so
-// does this (FRAGMENT_MARK_ALPHA).
-const FRAGMENT_MARK_TONEMAP = /* glsl */ `
-#ifdef TONE_MAPPING
+// The grade's lamp-lit mark: the grade eases its colour share over
+// whLampLit 0…GRADE_MARK_FULL (a smoothstep), so the mark is that curve's
+// inverse of the share figureColourShare wants. It goes to whLampLit where
+// the material tone-maps itself, and to the HDR target's alpha on the
+// post-FX tier (the OutputPass reads alpha − 1 as whLampLit). The moonlit
+// rest of the figure gets the highlight shoulder (MOON_KNEE) and the toe
+// (MOON_TOE) on every tier, against the view's exposure.
+const FRAGMENT_MARK = /* glsl */ `
 {
   float lfShare = pow(smoothstep(${MARK_RAMP[0].toFixed(2)}, ${MARK_RAMP[1].toFixed(2)}, vLampLight) * uLampMark, ${MARK_GAMMA.toFixed(2)});
-  #ifdef WH_LAMP_LIT
-  whLampLit = ${GRADE_MARK_FULL.toFixed(2)} * (0.5 - sin(asin(clamp(1.0 - 2.0 * lfShare, -1.0, 1.0)) / 3.0));
+  float lfMark = ${GRADE_MARK_FULL.toFixed(2)} * (0.5 - sin(asin(clamp(1.0 - 2.0 * lfShare, -1.0, 1.0)) / 3.0));
+  #ifdef TONE_MAPPING
+  float lfExposure = toneMappingExposure;
+    #ifdef WH_LAMP_LIT
+  whLampLit = lfMark;
+    #endif
+  #else
+  float lfExposure = uViewExposure;
+  gl_FragColor.a += lfMark;
   #endif
-  float lfX = min(dot(gl_FragColor.rgb, vec3(0.2126, 0.7152, 0.0722)) * toneMappingExposure / ${MOON_KNEE.toFixed(3)}, 12.0);
+  float lfD = dot(gl_FragColor.rgb, vec3(0.2126, 0.7152, 0.0722)) * lfExposure;
+  float lfX = min(lfD / ${MOON_KNEE.toFixed(3)}, 12.0);
   float lfX2 = lfX * lfX;
-  gl_FragColor.rgb *= mix(1.0, pow(1.0 + lfX2 * lfX2, -0.125), uLampMark - lfShare * uLampMark);
-}
-#endif`;
-
-const FRAGMENT_MARK_ALPHA = /* glsl */ `
-#ifndef TONE_MAPPING
-gl_FragColor.a += vLampLight * uLampMark;
-#endif`;
+  float lfTone = pow(1.0 + lfX2 * lfX2, -0.125) * (1.0 + ${MOON_TOE_LIFT.toFixed(2)} * (1.0 - smoothstep(0.0, ${MOON_TOE.toFixed(3)}, lfD)));
+  gl_FragColor.rgb *= mix(1.0, lfTone, uLampMark - lfShare * uLampMark);
+}`;
 
 // The real point lights on the lamps nearest the camera (high tier,
 // nightlights.ts) would light a figure a second time on top of the field.
@@ -193,6 +214,5 @@ export function applyLampField(shader: THREE.WebGLProgramParametersWithUniforms)
   shader.fragmentShader = shader.fragmentShader
     .replace('#include <common>', `#include <common>${FRAGMENT_PARS}`)
     .replace('#include <aomap_fragment>', `${FRAGMENT_LIGHT}\n#include <aomap_fragment>`)
-    .replace('#include <tonemapping_fragment>', `${FRAGMENT_MARK_TONEMAP}\n#include <tonemapping_fragment>`)
-    .replace('#include <opaque_fragment>', `#include <opaque_fragment>${FRAGMENT_MARK_ALPHA}`);
+    .replace('#include <tonemapping_fragment>', `${FRAGMENT_MARK}\n#include <tonemapping_fragment>`);
 }

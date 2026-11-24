@@ -11,7 +11,7 @@
 // `setupWindMesh(mesh)`. BatchedMesh (batchingMatrix) is supported too.
 
 import * as THREE from 'three';
-import { preFadeHooks } from './lod/fade';
+import { fadeDepthKey, fadeDepthPatch, preFadeHooks } from './lod/fade';
 
 /** Shared uniforms (one object, referenced by every patched program). */
 export const windUniforms = {
@@ -126,15 +126,22 @@ export function applyWind(material: THREE.Material, amplitude?: number): boolean
 /**
  * Depth material (directional / spot shadow maps) that sways exactly like
  * `material`. Cached per material; three copies map / alphaTest / side onto
- * it at render time, so alpha-tested leaf cards keep their cut-outs.
+ * it at render time, so alpha-tested leaf cards keep their cut-outs. A tree's
+ * depth material also takes the per-tree near-camera removal (lod/fade.ts
+ * fadeDepthPatch), so a tree removed close to the camera leaves no shadow.
  */
 export function windDepthMaterial(material: THREE.Material): THREE.MeshDepthMaterial | null {
   if (!applyWind(material)) return null;
   const data = windData.get(material)!;
   if (!data.depth) {
     const d = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
-    d.onBeforeCompile = (shader) => patchShader(shader, data.sway);
-    d.customProgramCacheKey = () => 'props-wind-depth';
+    const treeFade = fadeDepthPatch(material);
+    const key = `props-wind-depth${fadeDepthKey(material)}`;
+    d.onBeforeCompile = (shader) => {
+      patchShader(shader, data.sway);
+      treeFade?.(shader);
+    };
+    d.customProgramCacheKey = () => key;
     data.depth = d;
   }
   return data.depth;

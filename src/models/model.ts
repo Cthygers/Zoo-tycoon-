@@ -202,7 +202,7 @@ function sameRig(a: RigDef, b: RigDef): boolean {
 }
 
 /** Growth (0..1) over which babyBones ease from their newborn scale to 1. */
-/** Seconds a coat takes to dry after a swim (thick skins show it as a wet sheen, see animalMaterial). */
+/** Seconds a coat takes to dry after a swim (thick skins and swimming fur animals show it, see animalMaterial). */
 export const DRY_SECONDS = 90;
 
 /** Wetness 0..1 after `dt` seconds: soaked while swimming, drying linearly afterwards. */

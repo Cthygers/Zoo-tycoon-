@@ -20,6 +20,7 @@ import {
   type GoalProgress,
   type HabitatReport,
   type ISimulation,
+  type NewGameOptions,
   type RunningCostEstimate,
   type SimMessage,
   type SimSave,
@@ -136,7 +137,12 @@ interface SimSaveData extends SimSave {
   turnedAwayToday?: number;
   /** The latest messages, oldest first (older saves: none). */
   messages?: SimMessage[];
+  /** When each recent notification key was last shown (sim time), so an ongoing problem stays quiet after Continue (older saves: none). */
+  notifyLast?: [string, number][];
 }
+
+/** Notification throttles older than this (sim seconds, two game days) can no longer silence or demote a message, so saves leave them out. */
+const NOTIFY_MEMORY = (2 * MINUTES_PER_DAY) / GAME_MINUTES_PER_SECOND;
 
 export class Simulation implements ISimulation {
   readonly world: World;
@@ -1005,6 +1011,7 @@ export class Simulation implements ISimulation {
       starterPath: rleEncode(this.starterPath),
       serviceDay: Array.from(this.serviceDay),
       messages: this.messageLog,
+      notifyLast: Array.from(this.notifyLast).filter(([, t]) => this.time - t < NOTIFY_MEMORY),
     };
     // deep copy (so later simulation never mutates a save that is still being written),
     // with fractional numbers rounded to 1/1000 — positions to the millimetre — which
@@ -1084,6 +1091,7 @@ export class Simulation implements ISimulation {
     this.enclosures.reset(s.openEnclosures ?? []);
     this.dropStaleHabitatRefs();
     this.resetCaches();
+    for (const [key, t] of s.notifyLast ?? []) if (typeof key === 'string' && Number.isFinite(t)) this.notifyLast.set(key, t);
     this.guestSys.afterLoad();
     if ((s.objectives ?? []).length) this.progress.settleNewGoals(newGoals);
     this.events.emit('moneyChanged', { money: this.money, delta: 0 });
@@ -1110,7 +1118,7 @@ export class Simulation implements ISimulation {
     }
   }
 
-  newGame(seed?: number): void {
+  newGame(seed?: number, opts: NewGameOptions = {}): void {
     const s = seed ?? this.pendingNewSeed ?? ((Math.random() * 0x7fffffff) | 0);
     this.pendingNewSeed = undefined;
     this.animals.clear();
@@ -1133,7 +1141,7 @@ export class Simulation implements ISimulation {
     this.money = START_MONEY;
     this.admissionPrice = DEFAULT_ADMISSION;
     this.day = 1;
-    this.minuteOfDay = START_MINUTE;
+    this.minuteOfDay = opts.startMinute ?? START_MINUTE;
     this.speed = 1;
     this.objectives = createObjectives();
     this.ledger = [];

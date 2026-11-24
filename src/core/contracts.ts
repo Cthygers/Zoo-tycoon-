@@ -127,6 +127,15 @@ export interface SimSave {
   [key: string]: unknown;
 }
 
+export interface NewGameOptions {
+  /**
+   * Minute of the day the first day starts at (default START_MINUTE, 07:30).
+   * A player's New Zoo starts at NEW_ZOO_START_MINUTE (sim/index.ts): a fresh
+   * morning under short shadows instead of a dim dawn.
+   */
+  startMinute?: number;
+}
+
 export interface ISimulation {
   readonly world: World;
   readonly events: EventBus;
@@ -219,7 +228,7 @@ export interface ISimulation {
   serialize(): SimSave;
   load(save: SimSave): void;
   /** Reset to a brand-new zoo. */
-  newGame(seed?: number): void;
+  newGame(seed?: number, opts?: NewGameOptions): void;
 }
 
 // ===========================================================================

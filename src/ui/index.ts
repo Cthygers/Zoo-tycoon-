@@ -9,6 +9,7 @@ import { ENTRANCE_TILE, TILE } from '../core/constants';
 import type { IGameUI, QualityLevel, SimSpeed, UIDeps } from '../core/contracts';
 import type { Habitat, SelectionRef, Tool } from '../core/types';
 import { OBJECTS_BY_ID } from '../data/objects';
+import { SPECIES_BY_ID } from '../data/species';
 import { CameraController } from './camera';
 import { buildCatalog, type CatalogItem, type Category, type CategoryId } from './catalog';
 import { Coach } from './coach';
@@ -77,7 +78,7 @@ class GameUI implements GameUIHandle {
   private offs: (() => void)[] = [];
   private selection: SelectionRef | null = null;
   private followSel: SelectionRef | null = null;
-  private followPos = { x: 0, z: 0 };
+  private followPos = { x: 0, z: 0, lookHeight: 0 };
   private vw = window.innerWidth;
   private vh = window.innerHeight;
   private affordAcc = 0;
@@ -487,6 +488,12 @@ class GameUI implements GameUIHandle {
     }
   }
 
+  /** A followed animal or person stays in the middle of the part of the view the info sheet leaves clear. */
+  private keepFollowClear(): void {
+    const a = this.clearArea();
+    this.camera.followScreenX = (a.x0 + a.x1) / this.vw - 1;
+  }
+
   private dropIfSelected(kind: SelectionRef['kind'], id: number): void {
     const s = this.selection;
     if (s && s.kind === kind && s.id === id) this.select(null);
@@ -499,16 +506,23 @@ class GameUI implements GameUIHandle {
     }
     const sim = this.deps.sim;
     const pos = this.followPos;
-    const get = (): { x: number; z: number } | null => {
-      const e = sel.kind === 'animal' ? sim.animals.get(sel.id) : sel.kind === 'guest' ? sim.guests.get(sel.id) : sel.kind === 'staff' ? sim.staff.get(sel.id) : undefined;
+    const get = (): { x: number; z: number; lookHeight: number } | null => {
+      const a = sel.kind === 'animal' ? sim.animals.get(sel.id) : undefined;
+      const p = sel.kind === 'guest' ? sim.guests.get(sel.id) : sel.kind === 'staff' ? sim.staff.get(sel.id) : undefined;
+      const e = a ?? p;
       if (!e) return null;
       pos.x = e.x;
       pos.z = e.z;
+      // close up the camera looks at a person's chest or an animal's middle, not its feet
+      // (juveniles are drawn at 0.4 → 1 of the adult size as they grow)
+      if (a) pos.lookHeight = 0.55 * (SPECIES_BY_ID[a.speciesId]?.height ?? 1) * (0.4 + 0.6 * a.growth);
+      else if (p) pos.lookHeight = 0.6 * p.appearance.height;
       return pos;
     };
     if (!get()) return;
     this.camera.stopFollow();
     this.followSel = sel;
+    this.keepFollowClear();
     this.camera.follow(get, 20);
   }
 
@@ -751,6 +765,7 @@ class GameUI implements GameUIHandle {
     if (panels !== this.panelsKey) {
       this.panelsKey = panels;
       this.layoutToasts();
+      if (this.followSel) this.keepFollowClear();
     }
     if (!this.backArmed && (this.zoo.isOpen || this.dock.drawerOpen || this.tools.active || this.selection)) {
       try {
@@ -782,6 +797,7 @@ class GameUI implements GameUIHandle {
       this.topBottom = this.hud.root.offsetTop + this.hud.root.offsetHeight;
       this.popupCovers = this.viewOverlays();
       this.layoutToasts();
+      if (this.followSel) this.keepFollowClear();
     }
   }
 

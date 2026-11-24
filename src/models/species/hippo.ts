@@ -4,8 +4,8 @@
 // floats), a real mouth: upper head and lower jaw separated by a slit whose
 // inner faces are pink gums / tongue, with canines and incisors that sit
 // hidden in the slit at rest and grow out (per-bone scale) as the jaw opens.
-// Smooth, slightly wet grey-brown skin with pink undertones on the face,
-// belly and in the folds.
+// Smooth grey-mauve to pinkish-brown skin with pink undertones on the face,
+// belly and in the folds; dark and glossy only for a while after a swim.
 //
 // Animation: short-stepping walk and trot, ear-twitching idle with the
 // occasional "propeller" tail wag, grazing, a huge yawn as the call, open-
@@ -193,10 +193,12 @@ function tailPrims(): Prim[] {
 // ---------------------------------------------------------------------------
 // Coat
 
-const TOP = 0x4a4442;
-const SIDE = 0x5e5550;
-const PINK = 0x9a776c;
-const BELLY = 0x8a6a62;
+// grey-mauve back over pinkish-brown flanks, pink underside and face: a
+// readable, warm form at mid range instead of a charcoal shape
+const TOP = 0x625753;
+const SIDE = 0x76655f;
+const PINK = 0xa97d70;
+const BELLY = 0x9c786c;
 const GUM = 0xc98583;
 const TONGUE = 0xb56d6b;
 const TOOTH = 0xe2d7bf;
@@ -222,20 +224,14 @@ function hippoCoat(eye: Vec3) {
     // reddish "blood sweat" sheen
     blendHex(c.color, 0x7a4b3a, smooth(0.15, 0.45, fbm(x * 3, y * 3, z * 3, 2, 103)) * 0.14);
     // broad warmer, browner patches on the flanks (no flat grey)
-    blendHex(c.color, 0x6e5a4f, smooth(-0.05, 0.3, fbm(x * 0.8, y * 0.8, z * 0.8, 2, 105)) * 0.45 * smooth(0.7, 0.1, c.ny));
-    // wet from the pool on the lower flanks and legs: a clearly darker, glossy
-    // band with a ragged, dripping top edge (the hippo's waterline)
-    const drip = fbm(x * 9, y * 3, z * 9, 2, 107);
-    const wetTop = 1.05 + n * 0.2 + fbm(x * 4.5, y * 4.5, z * 4.5, 2, 106) * 0.14 + drip * 0.08;
-    const wet = smooth(wetTop, wetTop - 0.12, y) * smooth(-0.95, -0.7, c.ny);
-    blendHex(c.color, 0x2f241d, wet * 0.75);
-    // the skin above it has dried to a paler, dusty grey (matte: no sky sheen
-    // lifts it), so the wet band stands out
-    blendHex(c.color, 0x7a6d64, smooth(0.04, 0.3, y - wetTop) * smooth(-0.3, 0.3, c.ny) * 0.45);
-    c.color2.copy(c.color).multiplyScalar(0.62);
+    blendHex(c.color, 0x7f6559, smooth(-0.05, 0.3, fbm(x * 0.8, y * 0.8, z * 0.8, 2, 105)) * 0.45 * smooth(0.7, 0.1, c.ny));
+    // dry skin is matte: it only darkens and shines for a while after a swim
+    // (the instance's wetness, see animalMaterial). Creases and folds are a
+    // darker, pinker brown.
+    c.color2.copy(c.color).multiplyScalar(0.7);
+    blendHex(c.color2, 0x6e4740, 0.45);
     c.w = 0;
-    // dry skin is matte; only the wet band shines
-    c.gloss = 0.5 * wet;
+    c.gloss = 0;
     // skin creases behind the elbows and in front of the thighs, where the barrel folds as the legs swing
     for (const [zc, lean] of FLANK_CREASES) {
       const d = z - zc - (y - 0.8) * lean;
@@ -250,7 +246,7 @@ function hippoCoat(eye: Vec3) {
     if (c.part === 'neck' || (c.pw('neck') > 0.3 && z > 0.8)) {
       c.s = (z - 0.95) / 0.075 + n * 0.8;
       c.w = 0.15 * smooth(0.6, -0.2, c.ny) * smooth(0.75, 1.0, z);
-      blendHex(c.color2, 0x5a4a46, 0.4);
+      blendHex(c.color2, 0x6a4a44, 0.4);
     }
     // eye turrets: pink rims
     const ex = ax - eye[0], ey = y - eye[1], ez = z - eye[2];
@@ -515,7 +511,7 @@ function design(ctx: DesignContext): CreatureDesign {
       tail: { scale: 0.3, aniso: [1, 1.5, 1] },
     },
     coat: hippoCoat(eye),
-    // dry, dusty and matte above the wet band (its gloss is baked in the coat)
+    // dry and matte; wet (darker, glossy) only after a swim, drying from the top down
     // bump 0.3: the neck and leg folds and the fine creases shade in enough to read at mid range
     look: { skin: 'wrinkled', pattern: 'stripes', roughness: 0.9, sheen: 0.12, grain: 0.012, bump: 0.3, mottle: 0.1 },
     eyes: [{ bone: 'head', pos: eye, radius: 0.026, color: 0x2a1609 }],

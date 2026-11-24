@@ -66,7 +66,21 @@ export interface WaterUniforms {
   uShallow: THREE.IUniform<THREE.Color>;
   /** Radiance of the reflected banks / tree line (set from the sky state). */
   uBank: THREE.IUniform<THREE.Color>;
+  /** Night factor 0..1, set by the render context (WATER_NIGHT). */
+  uNight: THREE.IUniform<number>;
 }
+
+/**
+ * Night look of the water (scaled by uNight). The ground under the moon is
+ * lifted for the dark-adapted eye (groundMaterial uNightLift); without a
+ * matching lift a pond turned into a black hole beside it (about 1/14 of the
+ * sand). The night sky reflection (env map and banks) is doubled, the
+ * reflectance floor rises a little (more sky sheen at steep views) and the
+ * murky body takes a bit more of the moonlight, which puts a pond at about
+ * 0.02 linear at 23:00 in a wide habitat view. The moon itself already
+ * glints through the lighting loop's directional light.
+ */
+export const WATER_NIGHT = { sky: 1.0, body: 0.5, sheen: 0.03 } as const;
 
 export class WaterSurface {
   readonly mesh: THREE.Mesh;
@@ -94,6 +108,7 @@ export class WaterSurface {
       uDeep: { value: new THREE.Color(0.016, 0.05, 0.068) },
       uShallow: { value: new THREE.Color(0.05, 0.09, 0.1) },
       uBank: { value: new THREE.Color(0.02, 0.03, 0.015) },
+      uNight: { value: 0 },
     };
     const m = new THREE.MeshPhysicalMaterial({
       color: 0xffffff,
@@ -123,6 +138,7 @@ export class WaterSurface {
           uniform vec3 uDeep;
           uniform vec3 uShallow;
           uniform vec3 uBank;
+          uniform float uNight;
           varying float vDepth;
           varying vec3 vWPos;
           vec3 wGlintN;
@@ -185,7 +201,9 @@ export class WaterSurface {
             vec3 rW = reflect(-wV, normalize((vec4(normal, 0.0) * viewMatrix).xyz));
             float bank = 1.0 - smoothstep(0.015, 0.16, rW.y);
             reflectedLight.indirectSpecular = mix(reflectedLight.indirectSpecular, uBank * (0.6 + 0.4 * fn), bank * 0.85);
-            vec3 wDiff = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse;
+            // moonlit night (WATER_NIGHT): more sky sheen, a faintly lit body
+            reflectedLight.indirectSpecular *= 1.0 + ${WATER_NIGHT.sky.toFixed(2)} * uNight;
+            vec3 wDiff = (reflectedLight.directDiffuse + reflectedLight.indirectDiffuse) * (1.0 + ${WATER_NIGHT.body.toFixed(2)} * uNight);
             float NdV = clamp(dot(normal, geometryViewDir), 0.0, 1.0);
             // Schlick Fresnel (already part of the BRDF's specular), raised to a
             // reflectance floor: ripples always tilt some facets toward the
@@ -194,7 +212,7 @@ export class WaterSurface {
             // a film of water a few cm deep mirrors little: the sheen builds up
             // over the first ~15 cm instead of ending in a bright hard line
             float wSheen = smoothstep(0.0, 0.15, wEdge);
-            float F = max(Fs, mix(0.065, 0.1, wFar)) * wSheen;
+            float F = max(Fs, mix(0.065, 0.1, wFar) + ${WATER_NIGHT.sheen.toFixed(3)} * uNight) * wSheen;
             vec3 wSpec = (reflectedLight.directSpecular + reflectedLight.indirectSpecular * (F / Fs)) * wSheen;
             #if NUM_DIR_LIGHTS > 0
             {

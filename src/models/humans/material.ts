@@ -14,8 +14,11 @@
 // Both get warm light from the night lamps a person stands under
 // (props/lights/lampField.ts, applied last in onBeforeCompile), and the same
 // surface model: skin with a warm subsurface wrap, matte fabric (drape folds,
-// a sheen in its own colour, no white grazing reflection), hair locks with
-// their own roughness, and face marks that keep their darkness at a distance.
+// a sheen in its own colour, no white grazing reflection), hair with volume
+// (a lit crown, shaded under-layers, locks, a wavering hairline), and a face
+// painted where the coarse mesh cannot model it (eye sockets, the shade beside
+// and under the nose, the mouth line, the chin's and the hair's shadows): marks
+// that keep their darkness at a distance instead of sparkling.
 
 import * as THREE from 'three';
 import { HIGHLIGHT_FN_GLSL, NOISE_GLSL } from '../material/shaderChunks';
@@ -85,7 +88,14 @@ interface ColorExpr {
 }
 
 const FRAG_HELPERS = `${NOISE_GLSL}
-float hm_step(float edge, float v) { float a = max(fwidth(v), 1e-4); return smoothstep(edge - a, edge + a, v); }`;
+float hm_step(float edge, float v) { float a = max(fwidth(v), 1e-4); return smoothstep(edge - a, edge + a, v); }
+// A soft ellipsoidal face mark of radii r about c, widened by the pixel
+// footprint fp and weakened by the same area: far away it is a faint smudge of
+// the same total darkness, never a sparkling dot.
+float hm_mark(vec3 p, vec3 c, vec3 r, float fp) {
+  vec3 rw = sqrt(r * r + fp * fp);
+  return (1.0 - smoothstep(0.3, 1.0, length((p - c) / rw))) * (r.x * r.y) / (rw.x * rw.y);
+}`;
 
 // Detail that is not geometry (fabric drape, hair locks, face marks) is sized
 // in rest-space metres and judged against the rest-space size of a pixel
@@ -135,11 +145,21 @@ float hmHair = 0.0;
   float shoe = onLeg * (1.0 - hm_step(hmMarks.z, y));
   hmCol = mix(hmCol, ${e.shoes}, shoe);
   hmRough = mix(hmRough, 0.55, shoe);
-  // hair: a soft hairline (skin shows through the first few mm), locks along
-  // its fall with their own roughness, faded by footprint like the drape
-  float hairM = max(hm_step(0.004, vZone.z), 0.6 * smoothstep(-0.003, 0.004, vZone.z));
+  vec3 hmEye = ${e.eye};
+  float hk = (hmEye.y - ${e.mouth}.y) / 0.07; // head scale (adult 1)
+  vec3 fq = (vRestPos - vec3(0.0, hmEye.y, hmEye.z)) / hk; // face frame: eye line, eye depth
+  // hair: a soft hairline (skin shows through the first few mm) that wavers by
+  // about a centimetre, not a helmet's clean rim; volume, not a painted cap
+  // (the crown catches the light, the under-layers and the ends below the
+  // ears sit in their own shade); locks along its fall with their own
+  // roughness and broader 4 cm clumps that still show at the closest zoom.
+  // Each detail settles to its mean before its cells reach pixel size.
+  float hairWave = (cr_vnoise(vRestPos * vec3(50.0, 32.0, 50.0) + 3.1) - 0.5) * (1.0 - smoothstep(0.012, 0.024, hmPix));
+  float hairM = max(hm_step(0.004 + 0.005 * hairWave, vZone.z), 0.6 * smoothstep(-0.003, 0.004, vZone.z));
   float locks = (cr_vnoise(vRestPos * vec3(45.0, 10.0, 45.0)) - 0.5) * (1.0 - smoothstep(0.008, 0.016, hmPix));
-  hmCol = mix(hmCol, ${e.hair} * (1.0 + 0.5 * locks), hairM);
+  float hairLift = mix(0.74, 1.06, smoothstep(-0.1, 0.07, fq.y));
+  float clumps = (cr_vnoise(vRestPos * vec3(24.0, 6.0, 24.0) + 11.7) - 0.5) * (1.0 - smoothstep(0.016, 0.032, hmPix));
+  hmCol = mix(hmCol, ${e.hair} * hairLift * (1.0 + 0.5 * locks + 0.35 * clumps), hairM);
   hmRough = mix(hmRough, 0.72 + 0.2 * locks, hairM);
   float hatM = hm_step(0.0, vZone.w);
   hmCol = mix(hmCol, ${e.hat} * (1.0 + drape * 0.2), hatM);
@@ -152,15 +172,35 @@ float hmHair = 0.0;
   // 7 mm) and fade by the same area, keeping their total darkness, so a face
   // still has eyes and brows at 8 m instead of sparkling dots.
   float face = (1.0 - hairM) * (1.0 - hatM) * hm_step(hmMarks.x + 0.02, y);
-  vec3 hmEye = ${e.eye};
   vec3 q = vec3(abs(vRestPos.x), vRestPos.y, vRestPos.z);
   float fp = min(0.6 * hmPix, 0.007);
   vec3 ds = (q - hmEye - vec3(-0.002, 0.004, -0.004)) / vec3(0.021, 0.014, 0.015);
   float socket = 1.0 - smoothstep(0.3, 1.0, length(ds));
   vec3 dc = (q - hmEye - vec3(0.008, -0.03, -0.012)) / vec3(0.022, 0.018, 0.02);
   float cheek = 1.0 - smoothstep(0.2, 1.0, length(dc));
-  hmCol *= mix(vec3(1.0), vec3(0.87, 0.84, 0.84), socket * face);
+  hmCol *= mix(vec3(1.0), vec3(0.79, 0.74, 0.74), socket * face);
   hmCol *= mix(vec3(1.0), vec3(1.06, 0.93, 0.91), cheek * face);
+  // the planes the coarse head mesh cannot hold, painted as soft occlusion so
+  // a face still reads at 20-30 px: down the sides of the nose and under its
+  // tip, under the lower lip, the chin's shadow on the neck and the hair's (or
+  // a brim's) on the forehead. Blood shows in the nose tip and the ears, and
+  // a bald crown is a little ruddier than the face (no blank pale egg).
+  float fpk = fp / hk;
+  vec3 fx = vec3(abs(fq.x), fq.yz);
+  float noseSide = hm_mark(fx, vec3(0.012, -0.022, 0.005), vec3(0.005, 0.016, 0.009), fpk);
+  float underNose = hm_mark(fq, vec3(0.0, -0.049, 0.008), vec3(0.012, 0.0045, 0.012), fpk);
+  float underLip = hm_mark(fq, vec3(0.0, -0.081, -0.001), vec3(0.014, 0.0045, 0.012), fpk);
+  float noseTip = hm_mark(fq, vec3(0.0, -0.036, 0.024), vec3(0.011, 0.011, 0.012), fpk);
+  float ear = hm_mark(fx, vec3(0.078, -0.023, -0.088), vec3(0.014, 0.028, 0.02), fpk);
+  float chinShade = (1.0 - smoothstep(-0.132, -0.118, fq.y)) * smoothstep(-0.19, -0.15, fq.y) * smoothstep(-0.11, -0.07, fq.z);
+  float hairShade = smoothstep(-0.016, 0.0, vZone.z) * step(-0.99, vZone.z);
+  float brimShade = smoothstep(-0.035, 0.0, vZone.w);
+  float crown = smoothstep(0.045, 0.075, fq.y);
+  float occl = 1.0 - 0.4 * noseSide - 0.55 * underNose - 0.35 * underLip - 0.4 * chinShade - 0.2 * hairShade - 0.3 * brimShade;
+  hmCol *= mix(1.0, occl, face);
+  hmCol *= mix(vec3(1.0), vec3(1.05, 0.94, 0.92), noseTip * face);
+  hmCol *= mix(vec3(1.0), vec3(0.92, 0.8, 0.78), ear * face);
+  hmCol *= mix(vec3(1.0), vec3(0.97, 0.9, 0.86), crown * face);
   vec2 er = vec2(0.012, 0.0048);
   vec2 ew = sqrt(er * er + fp * fp);
   vec3 de = (q - hmEye) / vec3(ew, 0.01 + 0.5 * fp);
@@ -174,6 +214,9 @@ float hmHair = 0.0;
   // brows darker than the hair and well under the skin, so blond, grey and red hair still frame the eyes
   hmCol = mix(hmCol, min(${e.hair} * 0.7, ${e.skin} * 0.45), brow * face * 0.8);
   hmCol = mix(hmCol, ${e.skin} * vec3(0.72, 0.5, 0.48), lip * face * 0.7);
+  // the line between the lips (widened and weakened by footprint like the eyes)
+  float mouthLine = hm_mark(fq, vec3(0.0, -0.0705, 0.004), vec3(0.017, 0.0022, 0.012), fpk);
+  hmCol = mix(hmCol, ${e.skin} * vec3(0.4, 0.27, 0.25), mouthLine * face * 0.85);
   hmCol = mix(hmCol, vec3(0.03, 0.022, 0.018), eye * face);
 }
 diffuseColor.rgb *= hmCol;`;
@@ -281,7 +324,7 @@ ${HIGHLIGHT_FN_GLSL}`,
       .replace('#include <opaque_fragment>', `${SKIN_CLOTH_LIGHT_GLSL}\noutgoingLight = crHighlightOf(outgoingLight, uHighlight);\n#include <opaque_fragment>`);
     applyLampField(shader);
   };
-  mat.customProgramCacheKey = () => 'creature-human-v3';
+  mat.customProgramCacheKey = () => 'creature-human-v4';
   return mat;
 }
 
@@ -411,6 +454,6 @@ ${humanColorGLSL({
       .replace('#include <opaque_fragment>', `${SKIN_CLOTH_LIGHT_GLSL}\noutgoingLight = crHighlightOf(outgoingLight, vHm5.w);\n#include <opaque_fragment>`);
     applyLampField(shader);
   };
-  mat.customProgramCacheKey = () => `creature-human-batch-v3-${n}`;
+  mat.customProgramCacheKey = () => `creature-human-batch-v4-${n}`;
   return { material: mat, depth: crowdDepthMaterial(u), uniforms: [u] };
 }

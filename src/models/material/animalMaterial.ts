@@ -12,8 +12,9 @@
 //     plus a soft coat-tinted sheen along the silhouette (tight on short coats,
 //     broad on long hair; light shining through the fringe when backlit),
 //   * glossy patches (eyes, nose leather, wet skin) from a baked gloss value;
-//     thick skins are also wet all over right after a swim and dry from the
-//     top down (wetness from the instance's look texel, see RiggedModel),
+//     thick skins and swimming fur animals are also wet all over right after
+//     a swim and dry from the top down (wetness from the instance's look
+//     texel, see RiggedModel),
 //   * 'wrinkled' skin: a network of fine creases (grooves darkened in the
 //     albedo) for elephants, rhinos and hippos instead of the cell plates of
 //     'hide', which read as reptile scales up close, plus deep folds across
@@ -52,7 +53,7 @@ export function createAnimalMaterial(o: AnimalMaterialOptions): THREE.MeshStanda
   const pattern = PATTERN_IDS[look.pattern ?? 'none'];
   const micro = o.detail > 0 ? 1 : 0;
   const juv = look.juvenile ? 1 : 0;
-  const wets = look.skin === 'wrinkled' ? 1 : 0;
+  const wets = (look.wets ?? look.skin === 'wrinkled') ? 1 : 0;
   const thick = look.skin === 'hide' || look.skin === 'wrinkled';
   const mat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
@@ -156,14 +157,15 @@ ${NOISE_GLSL}
 // Fur clumps are CR_CLUMP × the strand scale across the hair flow.
 #define CR_CLUMP 5.5
 // Clump height at q (clump units): value noise squashed along the hair flow
-// into locks about 5× longer than wide.
-float cr_clump(vec3 q, vec3 flow) {
+// into locks 1 / (1 − squash) times longer than wide.
+float cr_clump(vec3 q, vec3 flow, float squash) {
   q += 7.3;
-  return cr_vnoise(q - flow * dot(q, flow) * 0.8);
+  return cr_vnoise(q - flow * dot(q, flow) * squash);
 }
-// Fur relief (strand units): strands and clumps, weighted by their footprint fades.
-float cr_fur(vec3 q, vec3 flow, float wS, float wC) {
-  float h = wC * 3.0 * cr_clump(q * (1.0 / CR_CLUMP), flow);
+// Fur relief (strand units): strands and clumps (lock length from squash, see
+// cr_clump), weighted by their footprint fades.
+float cr_fur(vec3 q, vec3 flow, float wS, float wC, float squash) {
+  float h = wC * 3.0 * cr_clump(q * (1.0 / CR_CLUMP), flow, squash);
   if (wS > 0.001) h += wS * cr_vnoise(q - flow * dot(q, flow) * 0.85);
   return h;
 }
@@ -184,13 +186,14 @@ float cr_groove(float u, float w, float fw) {
 // runs mostly horizontally like the folds on legs and trunks). 1 on the
 // plates, dipping toward 0 in the grooves. fq = pixel footprint in q units;
 // each band's filter width is fq × its highest frequency × the noise slope.
-float cr_crease(vec3 q, float fq) {
+// ws scales the groove widths (the network's mean darkening scales with it).
+float cr_crease(vec3 q, float fq, float ws) {
   float a = abs(cr_vnoise(q * vec3(0.42, 1.25, 0.42)) - 0.5);
   float b = abs(cr_vnoise(q * vec3(0.95, 0.8, 0.95) + 11.7) - 0.5);
   float c = abs(cr_vnoise(q * 2.3 + 3.3) - 0.5);
-  return 1.0 - cr_groove(a, 0.11, fq * 0.38) * 0.5 - cr_groove(b, 0.085, fq * 0.29) * 0.32 - cr_groove(c, 0.07, fq * 0.69) * 0.18;
+  return 1.0 - cr_groove(a, 0.11 * ws, fq * 0.38) * 0.5 - cr_groove(b, 0.085 * ws, fq * 0.29) * 0.32 - cr_groove(c, 0.07 * ws, fq * 0.69) * 0.18;
 }
-/** Mean of 1 − cr_crease: what the network averages to once every band is filtered out. */
+/** Mean of 1 − cr_crease at ws = 1: what the network averages to once every band is filtered out. */
 #define CR_CREASE_MEAN 0.0948
 // Deep skin folds, CR_FOLD × the crease scale: long grooves running across
 // the limbs and trunk (object-space Y is up the legs and the hanging trunk),
@@ -213,14 +216,21 @@ float crFur = 1.0 + max(vPattern.w, 0.0);
 float crGrain = uGrain * crFur;
 float crPix = length(fwidth(vRestPos));
 float crFade = 1.0 - smoothstep(crGrain * 0.35, crGrain * 1.6, crPix);
-// gloss: baked (eyes, nose leather, wet bands), plus a whole thick skin right
-// after a swim, drying from the top down along a ragged line
+// gloss: baked (eyes, nose leather, wet bands), plus the whole coat right
+// after a swim, drying from the top down along a ragged line: thick skin goes
+// dark and shiny, wet fur darker (water fills the gaps between the hairs) and
+// slick but still a little matte
 float crGloss = vPattern.z;
 #if CR_WETS == 1
 if (vCrWet > 0.0) {
   float wet = smoothstep(0.0, 0.08, vCrWet * vCrWet * 3.6 - 0.3 - vRestPos.y + (cr_vnoise(vRestPos * 7.0) - 0.5) * 0.16);
+  #if CR_SKIN == 0
+  diffuseColor.rgb *= 1.0 - 0.35 * wet;
+  crGloss = max(crGloss, 0.3 * wet);
+  #else
   diffuseColor.rgb *= 1.0 - 0.4 * wet;
   crGloss = max(crGloss, 0.5 * wet);
+  #endif
 }
 #endif
 #if CR_SKIN == 0
@@ -258,19 +268,26 @@ float crWC = 1.0 - smoothstep(0.25, 0.7, crPix / (crGrain * CR_CLUMP));
 #endif
 // clumpy albedo variation on every tier: an 11 cm octave, and a 3 cm one
 // (streaked along the hair flow on fur) that settles to its mean once a pixel
-// spans half a cell, so it never crawls on a moving animal
+// spans half a cell, so it never crawls on a moving animal. Pale coats (polar
+// bear, white bellies and stripes) keep only a quarter of the swing: on a
+// bright, low-contrast coat slow albedo bands read as marble contours, so
+// their texture comes from relief and sheen instead (crPale: 1 dark … 0.25 pale).
 float crMo;
+float crPale = mix(1.0, 0.25, smoothstep(0.55, 0.85, sqrt(dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722)))));
 {
+  float amp = crPale * (1.0 - crGloss);
   vec3 q = vRestPos * 31.0;
   #if CR_SKIN == 0
   q -= crFlow * dot(q, crFlow) * 0.75;
   #endif
   float fine = mix(cr_vnoise(q), 0.5, smoothstep(0.25, 0.6, crPix * 31.0));
   crMo = cr_vnoise(vRestPos * 9.0) * 0.6 + fine * 0.4;
-  diffuseColor.rgb *= 1.0 + uMottle * (crMo - 0.5) * 2.0 * (1.0 - crGloss);
+  diffuseColor.rgb *= 1.0 + uMottle * (crMo - 0.5) * 2.0 * amp;
   #if CR_SKIN == 0
-  // on every tier the clumps' tips catch a little more light than the partings between them
-  if (crWC > 0.001) diffuseColor.rgb *= 1.0 + 0.36 * crWC * (cr_clump(vRestPos / (crGrain * CR_CLUMP), crFlow) - 0.5) * (1.0 - crGloss);
+  // on every tier the clumps' tips catch a little more light than the
+  // partings between them; short locks (about 2× longer than wide) so they
+  // never chain into long contour lines
+  if (crWC > 0.001) diffuseColor.rgb *= 1.0 + 0.36 * crWC * (cr_clump(vRestPos / (crGrain * CR_CLUMP), crFlow, 0.55) - 0.5) * amp;
   #endif
 }
 #if CR_SKIN == 4
@@ -278,8 +295,23 @@ float crMo;
 // they get thinner than a pixel; past crFq ≈ 3.5 every band of cr_crease is
 // at its mean, so the noise is not evaluated
 float crFq = crPix / crGrain;
+// crease strength (crCw) and groove width (crWs) vary over the body: deep and
+// wide where the coat sets folds (legs, trunk, throat, behind the ears),
+// faint on the broad flanks and fainter still on the upper back, patchy at a
+// ~40 cm scale, and about 30 % of the segments fade out (~5 cm cells, settling
+// to their mean before they near a pixel) so the net breaks into irregular
+// runs instead of an even mesh of polygons
+float crWs;
+float crCw;
 {
-  float groove = crFq < 3.5 ? 1.0 - cr_crease(vRestPos / crGrain, crFq) : CR_CREASE_MEAN;
+  float region = smoothstep(0.3, 0.8, max(-vPattern.w, 0.0));
+  float patchy = cr_vnoise(vRestPos * 2.6 + 4.1);
+  float keep = mix(smoothstep(0.3, 0.44, cr_vnoise(vRestPos * 19.0 + 9.3)), 0.7, smoothstep(0.3, 0.8, crPix * 19.0));
+  crWs = mix(0.75, 1.3, region) * mix(0.8, 1.2, patchy);
+  crCw = mix(0.35, 1.05, region) * mix(0.55, 1.35, patchy) * mix(1.0, 0.65, smoothstep(0.45, 0.9, vRestNormal.y) * (1.0 - region)) * keep;
+}
+{
+  float groove = (crFq < 3.5 ? 1.0 - cr_crease(vRestPos / crGrain, crFq, crWs) : CR_CREASE_MEAN * crWs) * crCw;
   float gd = clamp(uBump * 1.2, 0.12, 0.6);
   // folds (where the coat puts them): same treatment at their own, larger scale
   float ff = (1.0 - smoothstep(crGrain * CR_FOLD * 0.5, crGrain * CR_FOLD * 2.5, crPix)) * max(-vPattern.w, 0.0);
@@ -331,8 +363,11 @@ material.specularColorBlended = mix(material.specularColor, diffuseColor.rgb, me
   if (crWC > 0.001 && crGloss < 0.5) {
     vec3 p = vRestPos / crGrain;
     float e = 0.35;
-    float h0 = cr_fur(p, crFlow, wS, crWC);
-    vec3 g = vec3(cr_fur(p + vec3(e, 0.0, 0.0), crFlow, wS, crWC) - h0, cr_fur(p + vec3(0.0, e, 0.0), crFlow, wS, crWC) - h0, cr_fur(p + vec3(0.0, 0.0, e), crFlow, wS, crWC) - h0) / e;
+    // long locks (hair streaks) on darker coats; short ones on pale coats,
+    // whose long relief bands would shade into contour lines
+    float sq = mix(0.55, 0.8, (crPale - 0.25) / 0.75);
+    float h0 = cr_fur(p, crFlow, wS, crWC, sq);
+    vec3 g = vec3(cr_fur(p + vec3(e, 0.0, 0.0), crFlow, wS, crWC, sq) - h0, cr_fur(p + vec3(0.0, e, 0.0), crFlow, wS, crWC, sq) - h0, cr_fur(p + vec3(0.0, 0.0, e), crFlow, wS, crWC, sq) - h0) / e;
     vec3 gv = normalMatrix * g;
     gv -= normal * dot(gv, normal);
     normal = normalize(normal - gv * uBump * 0.35 * sqrt(crFur));
@@ -351,7 +386,7 @@ if (crFade > 0.001 && crGloss < 0.5) {
     #define CR_H(q) cr_vnoise((q) * vec3(1.0, 1.0, 0.3))
   #elif CR_SKIN == 4
     // filtered at least over the finite-difference step
-    #define CR_H(q) (cr_crease(q, max(crFq, e)) + cr_vnoise((q) * 0.9) * 0.25)
+    #define CR_H(q) ((cr_crease(q, max(crFq, e), crWs) - 1.0) * crCw + cr_vnoise((q) * 0.9) * 0.25)
   #else
     #define CR_H(q) (cr_vnoise((q) * 0.5) * 0.3)
   #endif
@@ -410,7 +445,7 @@ outgoingLight = crHighlightFurOf(outgoingLight, uHighlight, vPattern.w);
       );
     applyLampField(shader);
   };
-  mat.customProgramCacheKey = () => `creature-animal-${skin}-${pattern}-${micro}-${juv}-${hl}`;
+  mat.customProgramCacheKey = () => `creature-animal-${skin}-${pattern}-${micro}-${juv}-${wets}-${hl}`;
   mat.userData.creatureUniforms = uniforms;
   return mat;
 }

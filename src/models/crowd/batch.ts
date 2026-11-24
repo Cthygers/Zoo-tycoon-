@@ -24,7 +24,6 @@
 import * as THREE from 'three';
 import type { CrowdUniforms } from './skinning';
 
-const _box = new THREE.Box3();
 const _v = new THREE.Vector3();
 
 // three.js internals of BatchedMesh used here (r187)
@@ -85,6 +84,8 @@ export class FilteredBatch extends THREE.BatchedMesh {
   private shadowIds: DrawIdTexture;
   private boundsCount = 0;
   private boundsRadius = 0;
+  /** This frame's instance positions. One box per batch: a box shared by every batch gave each one the union of all creatures (~80 m), so no batch was ever frustum-culled. */
+  private readonly bounds = new THREE.Box3();
   /** Live instances (not counting freed ids). */
   live = 0;
 
@@ -247,7 +248,7 @@ export class FilteredBatch extends THREE.BatchedMesh {
 
   // ---- per-frame bounds (lets three skip the whole batch when nothing is in view)
   beginBounds(): void {
-    _box.makeEmpty();
+    this.bounds.makeEmpty();
     this.boundsCount = 0;
     this.boundsRadius = 0;
     this.anyShadow = false;
@@ -256,7 +257,7 @@ export class FilteredBatch extends THREE.BatchedMesh {
 
   /** Include an instance at world position `p` with radius `r`. */
   includeBounds(p: THREE.Vector3, r: number, shadow: boolean): void {
-    _box.expandByPoint(p);
+    this.bounds.expandByPoint(p);
     if (r > this.boundsRadius) this.boundsRadius = r;
     this.boundsCount++;
     if (shadow) this.anyShadow = true;
@@ -269,8 +270,8 @@ export class FilteredBatch extends THREE.BatchedMesh {
       return;
     }
     this.visible = true;
-    _box.getCenter(s.center);
-    s.radius = _box.getSize(_v).length() * 0.5 + this.boundsRadius;
+    this.bounds.getCenter(s.center);
+    s.radius = this.bounds.getSize(_v).length() * 0.5 + this.boundsRadius;
     this.castShadow = this.anyShadow;
   }
 

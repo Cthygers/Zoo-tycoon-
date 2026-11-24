@@ -75,7 +75,7 @@ export default okapi;
 | `regions` | detail regions keyed by `Prim.region` (`{ scale?, aniso? }`). |
 | `resolution` | base grid multiplier (bulky animals ≈ 0.7). |
 | `coat` | `(c: CoatSample) => void` — baked per vertex. |
-| `look` | `{ skin: 'fur'|'hide'|'wrinkled'|'smooth'|'feather', pattern: 'none'|'stripes'|'field', roughness, sheen, grain, bump, mottle, juvenile? }` — `'wrinkled'` = crease network plus deep folds across limbs and trunk (readable at mid range) for thick skins (elephant, rhino, hippo; `'hide'` = cell plates) — grooves thinner than a pixel are filtered to their average tone (no pinhole speckle), and its folds and stripe rings get an irregular spacing; `bump` sets how dark creases and folds shade in; `juvenile: { color, amount?, until?, keep? }` tints young animals (penguin chicks' grey down) per instance from their growth |
+| `look` | `{ skin: 'fur'|'hide'|'wrinkled'|'smooth'|'feather', pattern: 'none'|'stripes'|'field', roughness, sheen, grain, bump, mottle, wets?, juvenile? }` — `'wrinkled'` = crease network plus deep folds across limbs and trunk (readable at mid range) for thick skins (elephant, rhino, hippo; `'hide'` = cell plates) — grooves thinner than a pixel are filtered to their average tone (no pinhole speckle), and its folds and stripe rings get an irregular spacing; `bump` sets how dark creases and folds shade in; creases are deep on the folds (`fold`: legs, trunk, throat) and faint and broken on the back and flanks; pale coats (polar bear, white bellies) get about a quarter of the albedo clumps and mottle, so their texture comes from relief and sheen; `wets` makes a coat darker and slicker after a swim, drying from the top down (default: `'wrinkled'`; set on tigers and bears); `juvenile: { color, amount?, until?, keep? }` tints young animals (penguin chicks' grey down) per instance from their growth |
 | `eyes` | `[{ bone, pos (left eye), radius, color? }]` — glossy spheres rigidly bound to the bone (mirrored). Use `surfacePoint()` + `seat()` to sit them on the head. |
 | `anim` | `driver(myDriver)` — see Animation. |
 | `babyScale`, `babyHead` | growth 0 → root scale / extra head scale. |
@@ -169,8 +169,13 @@ Quadrupeds: `quadrupedDriver(quadParams(height, walkSpeed, runSpeed, overrides))
 gives idle, walk/run (walk→trot→gallop gait blending, stride from speed so
 feet don't skate, leg IK), eat, drink, sleep, rest, sit, play, social, call,
 swim. Tune with `QuadParams` (gait offsets / duty / stride, foot flex, scapula
-swing, lie & sit style, graze reach, call head/jaw, swim sink). Override or add
-actions by spreading:
+swing, lie & sit style, graze reach, call head/jaw, swim sink). Lying
+(`LieParams`): long-legged hoofed animals fold their legs under the body —
+`carpusZ` ≈ 0 puts the folded carpus under the chest with the cannon lying
+back beneath it, `hockZ` ≈ 0 rests the hock beside the belly instead of
+behind the rump (giraffe, camel); side-lying predators (`SideLie.bend`, bears)
+draw their paws in with bent knees and elbows. Override or add actions by
+spreading:
 
 ```ts
 const base = quadrupedDriver(p);

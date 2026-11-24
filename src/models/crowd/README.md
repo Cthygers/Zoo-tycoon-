@@ -51,7 +51,7 @@ world matrix is BatchedMesh's per-instance matrix. In GLSL (after
 Look texels:
 
 * animals (`ANIMAL_LOOK_TEXELS = 1`, crowd/materials.ts): texel 0 = (highlight,
-  growth 0..1, wetness 0..1 after a swim (RiggedModel.writeLook; thick skins show it), free) → fragment `flat varying vec4 vCrLook0`; plus
+  growth 0..1, wetness 0..1 after a swim (RiggedModel.writeLook; thick skins and fur with look.wets (tiger, bears) show it), free) → fragment `flat varying vec4 vCrLook0`; plus
   `flat varying vec2 vCrYaw` (instance yaw) — `normalMatrix` is redefined in the
   fragment shader as normalMatrix × instance rotation, so object-space
   micro-normals keep working.
@@ -97,10 +97,13 @@ Look texels:
   vertex (`vLampLight`) adds warm lamp irradiance before `<aomap_fragment>` and
   marks lamp-lit pixels for the night grade (`whLampLit`, eased over a wide
   ramp so figures at a pool's fringe are only partly coloured, or HDR alpha on
-  the post-FX tier). On tiers that tone-map in the material it also gives
-  moonlit figures a highlight shoulder (a white coat under the moon reads like
-  a pale wall, not a glow) by scaling `gl_FragColor.rgb` just before
-  `<tonemapping_fragment>`. Keep the hooks `<project_vertex>`, `<aomap_fragment>`,
+  the post-FX tier). On every tier it also gives moonlit figures a highlight
+  shoulder (a white coat under the moon reads like a pale wall, not a glow) and
+  a toe lift (dark coats such as giraffe patches are not black holes) by
+  scaling `gl_FragColor.rgb` just before `<tonemapping_fragment>`, against the
+  view's exposure (`toneMappingExposure`, or `viewExposure` from
+  render/grade.ts on the post-FX tier, where the gradual mark goes into the
+  HDR alpha). Keep the hooks `<project_vertex>`, `<aomap_fragment>`,
   `<tonemapping_fragment>`, `<opaque_fragment>` in place. It also inlines
   `<lights_fragment_begin>` without the point-light loop (the field replaces
   the high tier's lamp point lights on figures), so later patches must not

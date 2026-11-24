@@ -11,6 +11,7 @@ import { hashFloat } from '../core/rng';
 import { Terrain } from '../core/types';
 import type { World } from '../core/world';
 import { OBJECTS_BY_ID } from '../data/objects';
+import { nightGroundLight, nightGroundMark } from './groundMaterial';
 import { crownCover, lawnShare } from './terrain';
 
 const CELL = 4; // metres
@@ -28,6 +29,7 @@ function buildTuft(shape: TuftShape): THREE.InstancedBufferGeometry {
   const pos: number[] = [];
   const nrm: number[] = [];
   const at: number[] = [];
+  const side: number[] = [];
   const idx: number[] = [];
   let s = 12345;
   const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
@@ -67,10 +69,12 @@ function buildTuft(shape: TuftShape): THREE.InstancedBufferGeometry {
         pos.push(cx - sx * wdt, cy, cz - sz * wdt, cx + sx * wdt, cy, cz + sz * wdt);
         nrm.push(nx / l, ny / l, nz / l, nx / l, ny / l, nz / l);
         at.push(t, phase, t, phase);
+        side.push(-sx * wdt, -sz * wdt, sx * wdt, sz * wdt);
       } else {
         pos.push(cx, cy, cz);
         nrm.push(nx / l, ny / l, nz / l);
         at.push(1, phase);
+        side.push(0, 0);
       }
     }
     for (let k = 0; k < SEGS - 1; k++) {
@@ -84,6 +88,8 @@ function buildTuft(shape: TuftShape): THREE.InstancedBufferGeometry {
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
   g.setAttribute('aBlade', new THREE.Float32BufferAttribute(at, 2));
+  // offset of each vertex from its blade's centre line (half width), so the shader can thin blades
+  g.setAttribute('aSide', new THREE.Float32BufferAttribute(side, 2));
   g.setIndex(idx);
   return g;
 }
@@ -99,6 +105,7 @@ export interface GrassUniforms {
   uNoise: THREE.IUniform<THREE.Texture>;
   uSunCol: THREE.IUniform<THREE.Color>;
   uSunDirW: THREE.IUniform<THREE.Vector3>;
+  /** Night level of moonlit ground, as the ground's (groundMaterial.ts NIGHT_GROUND). */
   uNightLift: THREE.IUniform<number>;
 }
 
@@ -187,6 +194,7 @@ export class GrassField {
           attribute vec4 iPos;
           attribute vec4 iPar;
           attribute vec2 aBlade;
+          attribute vec2 aSide;
           uniform float uTime;
           uniform vec2 uCenter;
           uniform float uRadius;
@@ -197,6 +205,7 @@ export class GrassField {
           varying vec3 vGCol;
           varying vec3 vGN;
           varying float vGT;
+          varying float vGDry;
           float gFalloff(float r) {
             float f = r < uR0 ? 1.0 : pow(uR0 / r, 1.4);
             return f * (1.0 - smoothstep(uRadius * 0.8, uRadius, r));
@@ -215,7 +224,13 @@ export class GrassField {
           float gvis = clamp((gFalloff(gr) * uGlobal - iPar.w) / 0.1, 0.0, 1.0);
           float gsc = iPar.x * gvis;
           // dry tufts: low, wide clumps (straw lodges and spreads) rather than tall sticks
-          vec3 transformed = position * gsc * mix(vec3(1.0), vec3(1.35, 0.7, 1.35), iPar.y);
+          vec3 gSpread = mix(vec3(1.0), vec3(1.35, 0.7, 1.35), iPar.y);
+          // their blades stay thin, finely tapered straw close to the camera (not
+          // widened with the clump); a few metres out they keep the spread width
+          // so they never thin below a pixel and flicker
+          float gNear = 1.0 - smoothstep(3.0, 9.0, distance(cameraPosition, iPos.xyz));
+          float gWidth = mix(1.0, mix(gSpread.x, 0.85 * (1.0 - 0.3 * aBlade.x), gNear), iPar.y);
+          vec3 transformed = (position + vec3(aSide.x, 0.0, aSide.y) * (gWidth / gSpread.x - 1.0)) * gsc * gSpread;
           transformed.xz = gRot * transformed.xz;
           vec2 gwp = iPos.xz + transformed.xz;
           float gust = textureLod(uNoise, gwp * 0.012 - uWind * uTime * 0.035, 0.0).r;
@@ -227,13 +242,15 @@ export class GrassField {
           // colour: root dark, tip light; matches the ground's macro patches
           vec4 gm = textureLod(uNoise, iPos.xz * 0.019, 0.0);
           float macro = gm.r * 0.6 + 0.2;
-          // dry straw is paler and more golden than the soil it grows from
-          vec3 base = mix(vec3(0.034, 0.052, 0.018), vec3(0.2, 0.16, 0.09), iPar.y);
-          vec3 tip = mix(vec3(0.12, 0.19, 0.055), vec3(0.55, 0.45, 0.25), iPar.y);
+          // dry straw: the dry-grass ground's own straw tone (tips a little paler,
+          // bases a little darker), not bleached white
+          vec3 base = mix(vec3(0.034, 0.052, 0.018), vec3(0.25, 0.2, 0.115), iPar.y);
+          vec3 tip = mix(vec3(0.12, 0.19, 0.055), vec3(0.4, 0.33, 0.18), iPar.y);
           tip *= 0.85 + 0.3 * iPar.z;
           tip = mix(tip, tip * vec3(1.15, 1.02, 0.72), smoothstep(0.45, 0.75, gm.b) * 0.6);
           vGCol = mix(base, tip, smoothstep(0.0, 1.0, aBlade.x)) * (0.8 + 0.4 * macro);
           vGT = aBlade.x;
+          vGDry = iPar.y;
           vGN = normalize(mix(vec3(0.0, 1.0, 0.0), objectNormal, 0.45));`,
         );
       sh.fragmentShader = sh.fragmentShader
@@ -245,28 +262,34 @@ export class GrassField {
           uniform float uNightLift;
           varying vec3 vGCol;
           varying vec3 vGN;
-          varying float vGT;`,
+          varying float vGT;
+          varying float vGDry;`,
         )
         .replace('#include <map_fragment>', 'diffuseColor.rgb = vGCol;')
         .replace('#include <normal_fragment_maps>', 'normal = normalize((viewMatrix * vec4(vGN, 0.0)).xyz);')
         .replace(
           '#include <aomap_fragment>',
-          `{
+          `float gNightMark = 0.0;
+          {
             // blade-base occlusion of the sky fill: kept mild so shaded lawn
             // stays near the ground's own shade level (~20 % of sunlit)
-            float occ = mix(0.65, 1.0, vGT);
+            // (less on sparse dry clumps: dark roots made straw read as sticks)
+            float occ = mix(mix(0.65, 0.8, vGDry), 1.0, vGT);
             reflectedLight.indirectDiffuse *= occ;
-            reflectedLight.directDiffuse *= mix(0.7, 1.0, vGT);
+            reflectedLight.directDiffuse *= mix(mix(0.7, 0.85, vGDry), 1.0, vGT);
             // thin-blade translucency when looking toward the sun
             vec3 vdW = normalize(vViewPosition);
             vec3 vdWorld = normalize((vec4(vdW, 0.0) * viewMatrix).xyz);
             float back = pow(clamp(dot(-vdWorld, uSunDirW), 0.0, 1.0), 3.0);
             reflectedLight.directDiffuse += uSunCol * diffuseColor.rgb * back * vGT * 0.22;
-            // moonlit tufts get the ground's night lift (render/groundMaterial.ts uNightLift)
-            reflectedLight.indirectDiffuse *= 1.0 + uNightLift;
-            reflectedLight.directDiffuse *= 1.0 + uNightLift;
+            // straw is matte: no white sky sheen or glints along near blades
+            reflectedLight.directSpecular *= 1.0 - 0.6 * vGDry;
+            reflectedLight.indirectSpecular *= 1.0 - 0.6 * vGDry;
+            // moonlit tufts get the ground's night look (groundMaterial.ts NIGHT_GROUND)
+            ${nightGroundLight('1.0', 'diffuseColor.rgb', 'gNightMark')}
           }`,
-        );
+        )
+        .replace('#include <opaque_fragment>', `#include <opaque_fragment>${nightGroundMark('gNightMark')}`);
     };
     this.material = m;
     this.mesh = new THREE.Mesh(this.geo, m);

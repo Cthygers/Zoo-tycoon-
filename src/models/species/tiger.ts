@@ -629,7 +629,7 @@ function design(ctx: DesignContext): CreatureDesign {
       ears: { scale: 0.2, aniso: [1.4, 1.4, 1] },
     },
     coat: tigerCoat(hs, eye, eyeR),
-    look: { skin: 'fur', pattern: 'stripes', roughness: 0.9, sheen: 0.38, grain: 0.0075, bump: 0.35, mottle: 0.08 },
+    look: { skin: 'fur', pattern: 'stripes', roughness: 0.9, sheen: 0.38, grain: 0.0075, bump: 0.35, mottle: 0.08, wets: true },
     eyes: [{ bone: 'head', pos: eye, radius: eyeR, color: 0x5e4216 }],
     anim: driver(tigerDriver(p)),
     babyScale: 0.28,

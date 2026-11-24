@@ -1,6 +1,8 @@
 // Orbit camera for the zoo: looks at a target point on the ground from a
 // distance / pitch / yaw. Supports "grab the ground" panning, zoom and rotate
-// around an anchor under the fingers, inertia, smooth go-to and follow mode.
+// around an anchor under the fingers, inertia, smooth go-to and follow mode
+// (which may zoom in closer, to inspect a face or a coat, looking at the
+// entity's body rather than its feet, beside any open side panel).
 // Keeps the camera above the terrain and the target inside the map.
 
 import * as THREE from 'three';
@@ -12,7 +14,10 @@ const DEG = Math.PI / 180;
 const BASE_FOV = 45;
 
 export interface CameraLimits {
+  /** Closest zoom of the free camera. */
   minDistance: number;
+  /** Closest zoom while following an animal or a person: close enough to see faces, fabric and fur. */
+  followMinDistance: number;
   maxDistance: number;
   minPitch: number; // radians
   maxPitch: number;
@@ -20,17 +25,27 @@ export interface CameraLimits {
 
 export const DEFAULT_LIMITS: CameraLimits = {
   minDistance: 8,
+  followMinDistance: 5.25,
   maxDistance: 140,
   minPitch: 25 * DEG,
   maxPitch: 80 * DEG,
 };
 
-export type FollowFn = () => { x: number; z: number } | null;
+/**
+ * Where a followed entity is: its ground position and, optionally, the height
+ * (m above its feet) the camera should look at once zoomed in close, so a
+ * person or animal sits in the middle of the view instead of its feet.
+ */
+export type FollowFn = () => { x: number; z: number; lookHeight?: number } | null;
+
+/** Distance (m) from which the look point starts rising from the ground to the followed entity's lookHeight (reached at followMinDistance). */
+const LIFT_FROM = 12;
 
 const _ray = new THREE.Ray();
 const _v = new THREE.Vector3();
 const _anchor = new THREE.Vector3();
 const _hit = new THREE.Vector3();
+const _look = new THREE.Vector3();
 
 function easeInOut(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
@@ -46,6 +61,23 @@ export class CameraController {
 
   /** Called when follow mode ends (user panned or the entity disappeared). */
   onFollowEnd: (() => void) | null = null;
+  /**
+   * Closest zoom right now: followMinDistance while following; when following
+   * ends close up it eases back out to minDistance (no jump).
+   */
+  private floor: number;
+  /** Height (m) of the look point above the ground target (rises when close to a followed entity). */
+  private lift = 0;
+  /** Screen x (NDC) a followed entity is kept at: the middle of the view the side panels leave clear. */
+  followScreenX = 0;
+  /** followScreenX eased, so a panel opening or closing slides the view instead of jumping it. */
+  private screenX = 0;
+  /**
+   * Eased offset (x, z) from the look point to the followed entity: the render
+   * focus (near-camera foliage cut, shadow and grass centre) is the entity
+   * itself, also when it is kept beside a panel, and glides back when following ends.
+   */
+  private readonly focusOff = new THREE.Vector2();
 
   private velX = 0;
   private velZ = 0;
@@ -67,6 +99,7 @@ export class CameraController {
     limits: Partial<CameraLimits> = {},
   ) {
     this.limits = { ...DEFAULT_LIMITS, ...limits };
+    this.floor = this.limits.minDistance;
     this.target.set(WORLD_W / 2, 0, WORLD_H * 0.8);
     this.target.y = this.groundHeight(this.target.x, this.target.z);
     this.applyPose();
@@ -85,6 +118,12 @@ export class CameraController {
     if (distance !== undefined) this.distance = distance;
     if (yaw !== undefined) this.yaw = yaw;
     if (pitch !== undefined) this.pitch = pitch;
+    if (!this.followFn) {
+      // a jump, not a glide: drop what is left of an ended follow's close-up framing
+      this.floor = this.limits.minDistance;
+      this.lift = 0;
+      this.focusOff.set(0, 0);
+    }
     this.clampOrbit();
     this.anim = null;
     this.velX = this.velZ = this.velYaw = this.velZoom = 0;
@@ -102,7 +141,7 @@ export class CameraController {
 
   private clampOrbit(): void {
     const L = this.limits;
-    this.distance = Math.min(L.maxDistance, Math.max(L.minDistance, this.distance));
+    this.distance = Math.min(L.maxDistance, Math.max(this.floor, this.distance));
     this.pitch = Math.min(L.maxPitch, Math.max(L.minPitch, this.pitch));
     if (this.yaw > Math.PI) this.yaw -= Math.PI * 2;
     else if (this.yaw < -Math.PI) this.yaw += Math.PI * 2;
@@ -124,13 +163,15 @@ export class CameraController {
     const cp = Math.cos(this.pitch);
     const cam = this.camera;
     const d = this.distance * this.lensScale();
-    const px = this.target.x + Math.sin(this.yaw) * cp * d;
-    const pz = this.target.z + Math.cos(this.yaw) * cp * d;
-    let py = this.target.y + Math.sin(this.pitch) * d;
-    const floor = this.groundHeight(px, pz) + 1.6;
-    if (py < floor) py = floor;
+    const look = _look.copy(this.target);
+    look.y += this.lift;
+    const px = look.x + Math.sin(this.yaw) * cp * d;
+    const pz = look.z + Math.cos(this.yaw) * cp * d;
+    let py = look.y + Math.sin(this.pitch) * d;
+    const minY = this.groundHeight(px, pz) + 1.6;
+    if (py < minY) py = minY;
     cam.position.set(px, py, pz);
-    cam.lookAt(this.target);
+    cam.lookAt(look);
     cam.updateMatrixWorld();
   }
 
@@ -245,6 +286,8 @@ export class CameraController {
   /** Follow a moving entity until the user pans or fn returns null. */
   follow(fn: FollowFn, distance?: number): void {
     this.followFn = fn;
+    this.floor = this.limits.followMinDistance;
+    this.screenX = this.followScreenX;
     this.anim = null;
     this.velX = this.velZ = 0;
     if (distance !== undefined) this.distance = Math.min(this.distance, distance);
@@ -254,6 +297,16 @@ export class CameraController {
     if (!this.followFn) return;
     this.followFn = null;
     this.onFollowEnd?.();
+  }
+
+  /** After following: raise the closest zoom back to the free camera's, carrying a close view smoothly out with it. */
+  private easeFloorOut(dt: number): void {
+    const minD = this.limits.minDistance;
+    if (this.floor >= minD) return;
+    this.floor = Math.max(this.floor, Math.min(this.distance, minD));
+    this.floor += (minD - this.floor) * (1 - Math.exp(-dt * 4));
+    if (minD - this.floor < 0.01) this.floor = minD;
+    if (this.distance < this.floor) this.distance = this.floor;
   }
 
   // ------------------------------------------------------------ keyboard (desktop)
@@ -341,16 +394,32 @@ export class CameraController {
       if (a.t >= 1) this.anim = null;
     }
 
+    let lookHeight = 0;
+    let offX = 0,
+      offZ = 0;
     if (this.followFn) {
       const p = this.followFn();
       if (!p) this.stopFollow();
       else {
         const f = 1 - Math.exp(-dt * 5);
-        this.target.x += (p.x - this.target.x) * f;
-        this.target.z += (p.z - this.target.z) * f;
+        this.screenX += (this.followScreenX - this.screenX) * f;
+        // look beside the entity so it shows at screenX: half the view's width at the look
+        // point is camDist · tan(hfov / 2); screen-right on the ground is (cos yaw, −sin yaw)
+        const w = this.screenX * this.distance * this.lensScale() * Math.tan((this.camera.fov / 2) * DEG) * this.camera.aspect;
+        this.target.x += (p.x - Math.cos(this.yaw) * w - this.target.x) * f;
+        this.target.z += (p.z + Math.sin(this.yaw) * w - this.target.z) * f;
         this.clampTarget();
+        const L = this.limits;
+        lookHeight = (p.lookHeight ?? 0) * THREE.MathUtils.smoothstep(LIFT_FROM - this.distance, 0, LIFT_FROM - L.followMinDistance);
+        offX = p.x - this.target.x;
+        offZ = p.z - this.target.z;
       }
     }
+    if (!this.followFn) this.easeFloorOut(dt);
+    const ease = 1 - Math.exp(-dt * 5);
+    this.lift += (lookHeight - this.lift) * ease;
+    this.focusOff.x += (offX - this.focusOff.x) * ease;
+    this.focusOff.y += (offZ - this.focusOff.y) * ease;
 
     // terrain-following target height (smoothed so it never jitters)
     const gy = this.groundHeight(this.target.x, this.target.z);
@@ -358,7 +427,7 @@ export class CameraController {
 
     this.applyPose();
     const cp = Math.cos(this.pitch);
-    this.setFocus(this.target.x, this.target.z, this.distance * (0.85 + 1.5 * cp * cp));
+    this.setFocus(this.target.x + this.focusOff.x, this.target.z + this.focusOff.y, this.distance * (0.85 + 1.5 * cp * cp));
   }
 }
 

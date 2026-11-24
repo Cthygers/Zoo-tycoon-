@@ -16,11 +16,13 @@
 //    mesopic range. The night light pools therefore raise the HDR target's
 //    alpha above 1 where they light the ground (props/lights/nightlights.ts),
 //    and the OutputPass hands the excess to the grade (whLampLit, see
-//    readLampMark), which drops the Purkinje shift there. Materials that
-//    tone-map themselves (low / medium) leave whLampLit at 0; their pools
-//    blend after the grade, in display space. Lamp-lit creatures and people
+//    readLampMark), which drops the Purkinje shift there. On tiers whose
+//    materials tone-map themselves (low / medium) the pools blend after the
+//    grade, in display space. Lamp-lit creatures and people
 //    (props/lights/lampField.ts) set whLampLit themselves (WH_LAMP_LIT marks
-//    the grade being present) or, on the post-FX tier, mark the alpha too.
+//    the grade being present) or, on the post-FX tier, mark the alpha; so
+//    does moonlit natural ground, which keeps a share of its own hue
+//    (groundMaterial.ts NIGHT_GROUND).
 //  - Directional shadow fade: shadows fade out over the outer few percent of
 //    the (camera-fitted) shadow frustum instead of ending in a hard line.
 //
@@ -42,6 +44,14 @@ export const MESOPIC_EXPOSURE = [4.5, 10.0] as const;
  */
 export const DAY_FLARE = 0.0015;
 export const FLARE_EXPOSURE = [3.5, 6.0] as const;
+
+/**
+ * The view's exposure (the grade's adaptation state) as a shared uniform, set
+ * by the render context every frame: materials that grade themselves on the
+ * post-FX tier, where three leaves toneMappingExposure out of their shaders,
+ * read it from here (props/lights/lampField.ts).
+ */
+export const viewExposure: THREE.IUniform<number> = { value: 1 };
 
 const CUSTOM_TM = /* glsl */ `#define WH_LAMP_LIT
 float whLampLit = 0.0;

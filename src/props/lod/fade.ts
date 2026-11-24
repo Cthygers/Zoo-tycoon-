@@ -16,9 +16,15 @@
 //                         focus segment passes through its crown (grown by the
 //                         hole radius, so whenever the hole would touch a leaf)
 //                         or among its limbs (a cone around the trunk axis
-//                         widening to the crown), leaves, limbs and trunk
-//                         dissolve together, so no bare trunk, cut limb or
-//                         floating stub stays in front of the subject;
+//                         widening to the crown), and the tree stands clearly
+//                         between the camera and the subject (not the tree the
+//                         camera looks at: its trunk near the focus, or its
+//                         crown centre near or beyond the subject), the crown first
+//                         thins card by card (at most half its leaves, the
+//                         bark stays whole) over a few metres of zoom, then
+//                         leaves, limbs and trunk go together, so no bare
+//                         trunk, cut limb or floating stub stays in front of
+//                         the subject;
 //   foliage               other leaves, fronds, stems: instance, lens and hole terms;
 //   fadeNear              other solid parts (cactus): the whole-instance term, plus
 //                         the view hole on limbs (above LIMB_Y and beyond the
@@ -33,7 +39,13 @@
 // half-dissolved tree never holds a limb whose parent is gone. Parts without
 // ranks switch at 0.5. No blending / sorting is needed and it works for
 // BatchedMesh, InstancedMesh and plain meshes alike. Shadow / depth passes use
-// their own depth materials and never fade, so shadows stay put.
+// their own depth materials and never fade, so shadows stay put, except the
+// shadow a tree casts through its swaying depth material (foliage, bamboo
+// canes; wind.ts windDepthMaterial + fadeDepthPatch): a tree removed within
+// ~12 m of the camera takes it along, so no crown-shaped shadow lies on empty
+// ground in a close view. Still bark casts from the shared shadow-only
+// batches (props/layer.ts), which carry no crown data, so its trunk's shadow
+// stays.
 
 import * as THREE from 'three';
 
@@ -61,6 +73,12 @@ export const fadeUniforms = {
 export const LIMB_Y = 2.5;
 /** Default distance from the trunk axis (m) inside which solid parts are trunk, never cut. */
 export const TRUNK_R = 0.9;
+/** Horizontal trunk → focus distance (m) within which a tree is the subject's own and never cut (fully cut 1 m farther). */
+export const TREE_KEEP_R = 3;
+/** Per-tree cut strength (0..1) at which a thinned tree goes as a whole. */
+export const TREE_GONE = 0.6;
+/** Horizontal camera → trunk distance (m) within which a removed tree's foliage shadow goes too (fully back 4 m farther). */
+export const TREE_SHADOW_R = 12;
 
 const FADE_PARS_VERT = /* glsl */ `
 uniform vec3 uFadeCam;
@@ -122,14 +140,29 @@ float propFadeAt( vec3 p, mat4 M ) {
   float tEnd = len - uFadeMargin.x;
 #ifdef PROP_FADE_CROWN
   // a tree: one decision for the whole instance, with the hole's radius where
-  // the line passes the crown. Whole or gone outside a thin band (≈1 % of the
-  // crown radius, ≈0.5 m of zoom), and never held in the dissolve's second
-  // half: a tree half dissolved (mid zoom, crown on the hole's edge) would
-  // keep a bare trunk and main limbs; in the first half it is a sparser tree
-  float tc = clamp( dot( ( M * vec4( aCrown.xyz * 0.01, 1.0 ) ).xyz - uFadeCam, dir ) / len, 0.0, 1.0 );
-  float grow = mix( uFadeParams.y, uFadeParams.z, tc ) * k;
-  float tree = smoothstep( 0.45, 0.55, max( instF, propTreeF( M, uFadeCam + dir * max( tEnd, 0.0 ), grow ) * uFadeCrown ) );
-  return tree < 0.5 ? tree : 1.0;
+  // the line passes the crown
+  float tc = dot( ( M * vec4( aCrown.xyz * 0.01, 1.0 ) ).xyz - uFadeCam, dir ) / len;
+  float grow = mix( uFadeParams.y, uFadeParams.z, clamp( tc, 0.0, 1.0 ) ) * k;
+  // the tree the camera looks at stays: its trunk stands within TREE_KEEP_R
+  // of the focus, or its crown centre is not clearly between the camera and
+  // the subject (within TREE_KEEP_R of the line's end). A fixed radius, not
+  // one scaled by the crown: acacia and oak crowns spread 6-9 m, which would
+  // also keep a tree standing well in front of the subject (a wall of limbs)
+  float between = smoothstep( ${TREE_KEEP_R.toFixed(1)}, ${(TREE_KEEP_R + 1).toFixed(1)}, length( o.xz - uFadeFocus.xz ) )
+                * ( 1.0 - smoothstep( -0.04, 0.04, tc - 1.0 + ${TREE_KEEP_R.toFixed(1)} / len ) );
+  float tree = max( instF, propTreeF( M, uFadeCam + dir * max( tEnd, 0.0 ), grow ) * uFadeCrown * between );
+  // the crown thins card by card over a wide band (≈2-3 m of zoom), at most
+  // by half while the bark stays whole, then the whole tree goes at once:
+  // further thinning would leave a bare trunk and main limbs
+  float fade = tree < ${TREE_GONE.toFixed(2)} ? 0.5 * smoothstep( 0.15, ${TREE_GONE.toFixed(2)}, tree ) : 1.0;
+#ifdef PROP_FADE_BARK
+  fade = step( ${TREE_GONE.toFixed(2)}, tree );
+#endif
+#ifdef PROP_FADE_SHADOW
+  // its shadow goes with it only near the camera (close views)
+  fade *= 1.0 - smoothstep( ${TREE_SHADOW_R.toFixed(1)}, ${(TREE_SHADOW_R + 4).toFixed(1)}, length( uFadeCam.xz - o.xz ) );
+#endif
+  return fade;
 #else
   vec3 ap = p - uFadeCam;
   float t = dot( ap, dir );
@@ -215,26 +248,51 @@ export function applyFade(m: THREE.Material, mode: FadeMode): void {
   const solid = mode === 'solid';
   const define =
     (solid ? `#define PROP_FADE_SOLID\n#define PROP_TRUNK_R ${trunkR.toFixed(2)}\n` : '') +
-    (mode === 'crown' || mode === 'crownSolid' ? '#define PROP_FADE_CROWN\n' : '');
+    (mode === 'crown' || mode === 'crownSolid' ? '#define PROP_FADE_CROWN\n' : '') +
+    (mode === 'crownSolid' ? '#define PROP_FADE_BARK\n' : '');
   m.onBeforeCompile = function (shader, renderer) {
     prev.call(this, shader, renderer);
-    shader.uniforms.uFadeCam = fadeUniforms.uFadeCam;
-    shader.uniforms.uFadeFocus = fadeUniforms.uFadeFocus;
-    shader.uniforms.uFadeParams = fadeUniforms.uFadeParams;
-    shader.uniforms.uFadeMargin = fadeUniforms.uFadeMargin;
-    shader.uniforms.uFadeCrown = fadeUniforms.uFadeCrown;
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>\n${define}${FADE_PARS_VERT}`)
-      .replace('#include <project_vertex>', `#include <project_vertex>\n${FADE_VERT}`);
-    shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>\n${FADE_PARS_FRAG}`)
-      .replace('#include <clipping_planes_fragment>', `${FADE_DISCARD}\n#include <clipping_planes_fragment>`);
+    patchFadeShader(shader, define);
   };
   // resolve the previous key now: the default key is the hook's source text,
   // which would otherwise read the wrapper below for every material
   const prevKey = prevKeyFn.call(m);
   m.customProgramCacheKey = () => `${prevKey}|propfade-${mode}${solid ? trunkR : ''}`;
   m.needsUpdate = true;
+}
+
+function patchFadeShader(shader: THREE.WebGLProgramParametersWithUniforms, define: string): void {
+  shader.uniforms.uFadeCam = fadeUniforms.uFadeCam;
+  shader.uniforms.uFadeFocus = fadeUniforms.uFadeFocus;
+  shader.uniforms.uFadeParams = fadeUniforms.uFadeParams;
+  shader.uniforms.uFadeMargin = fadeUniforms.uFadeMargin;
+  shader.uniforms.uFadeCrown = fadeUniforms.uFadeCrown;
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', `#include <common>\n${define}${FADE_PARS_VERT}`)
+    .replace('#include <project_vertex>', `#include <project_vertex>\n${FADE_VERT}`);
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', `#include <common>\n${FADE_PARS_FRAG}`)
+    .replace('#include <clipping_planes_fragment>', `${FADE_DISCARD}\n#include <clipping_planes_fragment>`);
+}
+
+/**
+ * Shadow (depth) shader patch for a tree's foliage, or bark that casts from
+ * its own batch (swaying canes): the per-tree decision of the visible pass,
+ * so a tree removed near the camera takes its shadow along (see the header).
+ * Null for every other material, whose shadows never fade. Apply after the
+ * depth material's wind patch; key the depth program by `fadeDepthKey`.
+ */
+export function fadeDepthPatch(m: THREE.Material): ((shader: THREE.WebGLProgramParametersWithUniforms) => void) | null {
+  const mode = fadeModeOf(m);
+  if (mode !== 'crown' && mode !== 'crownSolid') return null;
+  const define = `#define PROP_FADE_CROWN\n#define PROP_FADE_SHADOW\n${mode === 'crownSolid' ? '#define PROP_FADE_BARK\n' : ''}`;
+  return (shader) => patchFadeShader(shader, define);
+}
+
+/** Program cache key suffix matching `fadeDepthPatch` ('' when it does not apply). */
+export function fadeDepthKey(m: THREE.Material): string {
+  const mode = fadeModeOf(m);
+  return mode === 'crown' || mode === 'crownSolid' ? `|treeshadow-${mode}` : '';
 }
 
 /** The hooks a material had before the fade patch (null when not patched). */

@@ -57,10 +57,61 @@ export interface GroundUniforms {
   uCloudCover: THREE.IUniform<number>;
   uCloudShadow: THREE.IUniform<number>;
   /**
-   * Night lift of natural ground (sand, soil, straw, lawn, mud: everything
-   * but paving-bright layers), as a share of its moonlit light (0 by day).
+   * Night level of moonlit natural ground (sand, soil, straw, lawn, mud:
+   * everything but paving-bright layers): 0 by day and through the blue
+   * hour, 1 in deep night (see NIGHT_GROUND).
    */
   uNightLift: THREE.IUniform<number>;
+}
+
+/**
+ * Moonlit natural ground at night level k (uNightLift; shared with the
+ * grass tufts, grass.ts). Paths and snow are left out: the moon already
+ * shows them pale.
+ *  - lift: ACES's toe crushes the ground to near black next to paving and
+ *    moonlit coats, so it gets this share more of its moonlit light (back to
+ *    about its daylight share of the paving's brightness, not more: a brighter
+ *    ground reads as frost or snow);
+ *  - hue: blue moonlight and the grade's rod vision (grade.ts) turn sand and
+ *    lawn blue-white. Their light is made neutral, so they show their own
+ *    albedo's hue, and they are marked for the grade (as lamp light marks
+ *    figures, props/lights/lampField.ts) so it keeps ≈ 20 % of that hue:
+ *    sand reads as pale warm grey, lawn as grey-green, under the blue night.
+ */
+export const NIGHT_GROUND = { lift: 0.2, mark: 0.18 } as const;
+
+/**
+ * GLSL (after the lights, e.g. at <aomap_fragment>): the lift and the
+ * neutral light for natural-ground share `nat` and albedo `alb` at night
+ * level uNightLift; sets `mark` (declared by the caller) for nightGroundMark.
+ */
+export function nightGroundLight(nat: string, alb: string, mark: string): string {
+  return `{
+    float ngK = uNightLift * (${nat});
+    vec3 ngHue = (${alb}) / max(dot(${alb}, vec3(0.2126, 0.7152, 0.0722)), 1e-4);
+    vec3 ngDir = reflectedLight.directDiffuse;
+    vec3 ngInd = reflectedLight.indirectDiffuse;
+    float ngLift = 1.0 + ${NIGHT_GROUND.lift.toFixed(2)} * ngK;
+    reflectedLight.directDiffuse = mix(ngDir, dot(ngDir, vec3(0.2126, 0.7152, 0.0722)) * ngHue, ngK) * ngLift;
+    reflectedLight.indirectDiffuse = mix(ngInd, dot(ngInd, vec3(0.2126, 0.7152, 0.0722)) * ngHue, ngK) * ngLift;
+    ${mark} = ${NIGHT_GROUND.mark.toFixed(2)} * ngK;
+  }`;
+}
+
+/**
+ * GLSL (right after <opaque_fragment>): hand `mark` to the grade, through
+ * whLampLit where the material tone-maps itself and through the HDR
+ * target's alpha on the post-FX tier (grade.ts).
+ */
+export function nightGroundMark(mark: string): string {
+  return `
+  #ifdef TONE_MAPPING
+    #ifdef WH_LAMP_LIT
+    whLampLit = ${mark};
+    #endif
+  #else
+    gl_FragColor.a += ${mark};
+  #endif`;
 }
 
 const PARS = /* glsl */ `
@@ -584,9 +635,11 @@ export function createGroundMaterial(textures: GroundTextureSet, typeTex: THREE.
           normal = normalize((viewMatrix * vec4(nW, 0.0)).xyz);
         }`,
       )
+      .replace('#include <opaque_fragment>', `#include <opaque_fragment>${nightGroundMark('gNightMark')}`)
       .replace(
         '#include <aomap_fragment>',
-        `{
+        `float gNightMark = 0.0;
+        {
           // grass sheen under a low sun: blades catch grazing light; scaled by
           // the shadow the direct term actually received (ratio to unshadowed)
           vec3 gN = normalize(vWNrm);
@@ -621,13 +674,8 @@ export function createGroundMaterial(textures: GroundTextureSet, typeTex: THREE.
           float gBright = max(smoothstep(0.38, 0.55, gLuma(gAlb)), smoothstep(0.35, 0.85, gSnowNear));
           vec3 gInd = reflectedLight.indirectDiffuse;
           reflectedLight.indirectDiffuse = mix(gInd, vec3(gLuma(gInd)), gBright * 0.45) * (1.0 + 0.8 * gBright);
-          // moonlit natural ground sits deep in ACES's toe, which crushes it
-          // to near black next to paving and pale coats (6-8x darker than
-          // paving, 2.5x by day): lift it back toward its daylight share
-          // (not paths or snow, which the moon already shows pale)
-          float gNight = 1.0 + uNightLift * (1.0 - max(gBright, gPath));
-          reflectedLight.indirectDiffuse *= gNight;
-          reflectedLight.directDiffuse *= gNight;
+          // moonlit natural ground (NIGHT_GROUND): lifted out of ACES's toe, in its own hue
+          ${nightGroundLight('1.0 - max(gBright, gPath)', 'gAlb', 'gNightMark')}
           // under water there is no air/ground specular interface
           reflectedLight.indirectSpecular *= occ * occ * (1.0 - submerged);
           reflectedLight.directSpecular *= 1.0 - submerged;

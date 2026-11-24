@@ -148,6 +148,12 @@ export interface SideLie {
   reach: number;
   /** Lower the neck / head to rest on the ground (rad about the neck's local x). */
   neckDrop: number;
+  /**
+   * 0 = legs stretched out stiffly; 1 = relaxed and bent: forepaws drawn in
+   * before the chest with the wrists curled, hind paws drawn forward under
+   * the belly so the knees bend (sleeping bears).
+   */
+  bend?: number;
 }
 
 /**
@@ -175,16 +181,20 @@ export function lieSide(ctx: AnimCtx, st: QuadState, pose: Pose, side: number, k
   rig.fk(pose);
   // foot orientation: rolled with the body, paws relaxed (pitched down a little)
   _q2.setFromAxisAngle(_Z, side * k.roll);
+  const bend = k.bend ?? 0;
   for (const leg of st.legs) {
     if (leg.r.scap >= 0) rig.fkBone(pose, leg.r.scap);
     rig.fkBone(pose, leg.r.upper);
     const H = rig.wp[leg.r.upper];
     const reach = leg.reach * k.reach;
     const upper = leg.side === side; // the legs on the upper flank
-    // stretch outward along the ground, upper legs a little forward / back of the lower ones
-    _A.set(H.x + side * reach, 0, H.z + (leg.front ? 0.18 : -0.12) * reach + (upper ? (leg.front ? 0.12 : -0.1) * reach : 0));
+    // stretch outward along the ground, upper legs a little forward / back of
+    // the lower ones; bent legs reach less far out and draw the paws forward
+    const out = reach * (1 - 0.4 * bend);
+    const fwd = (leg.front ? 0.18 + 0.2 * bend : -0.12 + 0.55 * bend) * reach;
+    _A.set(H.x + side * out, 0, H.z + fwd + (upper ? (leg.front ? 0.12 : -0.1) * reach : 0));
     _A.y = upper ? Math.max(0.1, k.hipsY * 0.75) : 0.07;
-    _q.setFromAxisAngle(_X, leg.front ? 0.5 : -0.35).premultiply(_q2);
+    _q.setFromAxisAngle(_X, leg.front ? 0.5 + 0.7 * bend : -0.35 - 0.3 * bend).premultiply(_q2);
     const qt = _q;
     placeLegQ(ctx, pose, leg, _A, qt, qt);
   }

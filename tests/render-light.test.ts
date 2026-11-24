@@ -90,13 +90,29 @@ describe('time of day air', () => {
   });
 
   it('lifts the low morning sun only', () => {
-    // a new zoo's first frame (07:30, ≈ 10°) and the first hours up to ≈ 25°
+    // 07:30 (≈ 10°) gets the full lift, fading as the sun climbs, gone by 09:00
     expect(at(7, 30).lift).toBeGreaterThan(1.18);
-    expect(at(8, 30).lift).toBeGreaterThan(1.18);
-    expect(at(9, 30).lift).toBeLessThan(at(8, 30).lift);
+    let prev = Infinity;
+    for (let se = 10; se < 40; se += 1) {
+      const lift = morningLift(se, 1);
+      expect(lift).toBeLessThanOrEqual(prev);
+      prev = lift;
+    }
+    expect(at(9).lift).toBeLessThan(1.01);
+    expect(at(9, 30).lift).toBe(1);
     expect(at(11).lift).toBe(1);
     expect(at(18, 30).lift).toBe(1);
     expect(at(6, 0).lift).toBe(1);
+  });
+
+  it('does not make 09:00 brighter than the later morning', () => {
+    const atm = new AtmosphereModel(1.35);
+    const shown = (h: number, m: number) => {
+      const a = at(h, m);
+      return daylight(atm, a.se * DEG, new THREE.Color()).displayB * a.lift;
+    };
+    expect(shown(9, 0)).toBeLessThanOrEqual(shown(10, 0));
+    expect(shown(10, 0)).toBeLessThanOrEqual(shown(11, 0));
   });
 });
 

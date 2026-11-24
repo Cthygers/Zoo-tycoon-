@@ -11,7 +11,7 @@ import type { World } from '../core/world';
 import { AtmosphereModel } from './atmosphere';
 import { BoardwalkDecks } from './boardwalk';
 import { SOLAR_NOON_H, computeCelestial, type Celestial } from './celestial';
-import { DAY_FLARE, FLARE_EXPOSURE, MESOPIC_EXPOSURE, installShaderPatches } from './grade';
+import { DAY_FLARE, FLARE_EXPOSURE, MESOPIC_EXPOSURE, installShaderPatches, viewExposure } from './grade';
 import { GrassField, type TuftShape } from './grass';
 import { createGroundMaterial, type GroundMaterialOptions, type GroundUniforms } from './groundMaterial';
 import { OuterLand } from './outer';
@@ -103,11 +103,16 @@ const MORNING_FILL = 0.25;
 /** Share of the fill's desaturation the clear morning air drops: cool morning shade under a warm sun. */
 const MORNING_COOL = 0.5;
 /**
- * Displayed-brightness lift of the low morning sun (≈ 10–25°): with the same
- * B_TABLE as the evening, the first hours (a new zoo starts at 07:30, ≈ 10°)
- * read dim and olive instead of fresh.
+ * Displayed-brightness lift of the low morning sun: with the same B_TABLE as
+ * the evening, the first hours read dim and olive instead of fresh. Full at
+ * 07:30 (≈ 10°), it fades out over MORNING_LIFT_FADE and is gone by 09:00:
+ * held into the high morning sun it made 09:00 the brightest, palest hour,
+ * dimming toward noon. (A low sun lights a scene brighter than the metered
+ * ground says, so the fade follows what the screen shows: about as bright
+ * from 07:30 to 09:00, then a little brighter toward 11:00.)
  */
 const MORNING_LIFT = 0.2;
+const MORNING_LIFT_FADE = [10, 26] as const;
 /**
  * Moonlight fill (hemisphere light) at night: the moonlit sky and ground
  * light what the moon's beam misses — the backs and shaded sides of people
@@ -117,12 +122,11 @@ const MORNING_LIFT = 0.2;
  */
 const MOON_FILL = 0.3;
 /**
- * Night lift of natural ground (groundMaterial uNightLift): under the moon,
- * sand, straw, soil and lawn sit deep in ACES's toe and crushed to near black
- * next to paving and moonlit coats; this much more of their moonlit light
- * brings them back to about their daylight share of the paving's brightness.
+ * Sun elevation (deg) over which moonlit natural ground takes its night look
+ * (groundMaterial.ts NIGHT_GROUND): after the blue hour, once the eye has
+ * adapted to the dark (≈ 20:30–21:15). The blue hour keeps its own light.
  */
-const NIGHT_GROUND_LIFT = 1.0;
+const NIGHT_GROUND_ELEV = [-9, -16] as const;
 /** Sun elevation (deg) below which the sky's light starts to turn blue-hour blue (the sky dome: 1.5°). */
 const SKY_LIGHT_BLUE_ELEV = 4;
 /** Blue-hour sky colour (luminance 1), see the sky shader's uTwilight. */
@@ -217,17 +221,18 @@ function rrt(v: number): number {
 
 /**
  * CPU twin of the CustomToneMapping grade (grade.ts) + ACES: maps a linear HDR
- * colour to the linear display value the shaders would output. Used for the
- * fog / clear colour, which three mixes in after tone mapping.
+ * colour to the linear display value the shaders would output (`lampLit`: the
+ * grade's whLampLit mark). Used for the fog / clear colour, which three mixes
+ * in after tone mapping.
  */
-export function gradeToneMap(c: THREE.Color, exposure: number, out: THREE.Color): THREE.Color {
+export function gradeToneMap(c: THREE.Color, exposure: number, out: THREE.Color, lampLit = 0): THREE.Color {
   const flare = (DAY_FLARE * (1 - smooth01(FLARE_EXPOSURE[0], FLARE_EXPOSURE[1], exposure))) / exposure;
   let r = c.r + flare,
     g = c.g + flare,
     b = c.b + flare;
   const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
   const disp = lum * exposure;
-  const meso = smooth01(MESOPIC_EXPOSURE[0], MESOPIC_EXPOSURE[1], exposure) * (1 - smooth01(0.06, 0.5, disp)) * 0.82;
+  const meso = smooth01(MESOPIC_EXPOSURE[0], MESOPIC_EXPOSURE[1], exposure) * (1 - smooth01(0.06, 0.5, disp)) * (1 - smooth01(0, 0.4, lampLit)) * 0.82;
   const rod = 0.03 * r + 0.55 * g + 0.62 * b;
   r += (rod * 0.6 - r) * meso;
   g += (rod * 0.8 - g) * meso;
@@ -356,7 +361,12 @@ export function airOfDay(hour: number, se: number, sunTint: THREE.Color): number
  * `se` (deg) and morning share `morning` (0…1).
  */
 export function morningLift(se: number, morning: number): number {
-  return 1 + MORNING_LIFT * morning * smooth01(2, 10, se) * (1 - smooth01(25, 35, se));
+  return 1 + MORNING_LIFT * morning * smooth01(2, 10, se) * (1 - smooth01(MORNING_LIFT_FADE[0], MORNING_LIFT_FADE[1], se));
+}
+
+/** Night level of moonlit natural ground (groundMaterial uNightLift) at sun elevation `se` (deg). */
+export function nightGroundLevel(se: number): number {
+  return smooth01(NIGHT_GROUND_ELEV[0], NIGHT_GROUND_ELEV[1], se);
 }
 
 /** Per-tier environment detail (the contract's QualitySettings stay generic). */
@@ -815,6 +825,8 @@ export class RenderContext implements IRenderContext {
       .multiply(BANK_ALBEDO)
       .multiplyScalar(1 / Math.PI)
       .lerp(this.fogHDR, 0.25);
+    // moonlit ponds: sky sheen and body lift to match the lifted moonlit ground (water.ts WATER_NIGHT)
+    this.water.uniforms.uNight.value = night;
 
     // ground contact shadows of the outer forest
     this.outer.updateTreeShadows(this.sunDirection, (1 - night) * Math.min(1, Math.max(0, se / 6)));
@@ -834,8 +846,9 @@ export class RenderContext implements IRenderContext {
     this.groundU.uSunDirW.value.copy(this.lightDir);
     this.groundU.uSunCol.value.copy(this.sun.color).multiplyScalar(this.sun.intensity);
     this.groundU.uCloudShadow.value = 0.45 * (1 - night) * Math.min(1, Math.max(0, se / 8));
-    this.groundU.uNightLift.value = NIGHT_GROUND_LIFT * night;
-    this.grass.uniforms.uNightLift.value = NIGHT_GROUND_LIFT * night;
+    const nightGround = nightGroundLevel(se);
+    this.groundU.uNightLift.value = nightGround;
+    this.grass.uniforms.uNightLift.value = nightGround;
     this.grass.uniforms.uSunDirW.value.copy(this.lightDir);
     this.grass.uniforms.uSunCol.value.copy(this.sun.color).multiplyScalar(this.sun.intensity);
 
@@ -1000,6 +1013,7 @@ export class RenderContext implements IRenderContext {
   /** Exposure → renderer, and the display-referred fog / clear colour. */
   private applyExposure(): void {
     this.renderer.toneMappingExposure = this.exposure;
+    viewExposure.value = this.exposure;
     if (this.post) this.fog.color.copy(this.fogHDR);
     else gradeToneMap(this.fogHDR, this.exposure, this.fog.color);
     this.renderer.setClearColor(this.fog.color);

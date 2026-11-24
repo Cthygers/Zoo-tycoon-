@@ -157,8 +157,14 @@ export interface LookSpec {
   grain?: number;
   /** Micro-normal strength 0..1 (default 0.5). */
   bump?: number;
-  /** Albedo clump variation 0..1 (default 0.12). */
+  /** Albedo clump variation 0..1 (default 0.12); pale coats get about a quarter of it. */
   mottle?: number;
+  /**
+   * Darker and slicker for a while after a swim, drying from the top down
+   * (the instance's wetness, RiggedModel). Default: thick ('wrinkled') skins;
+   * set it on fur animals that swim (tigers, bears).
+   */
+  wets?: boolean;
   /** Growth-dependent juvenile tint (see JuvenileTint). */
   juvenile?: JuvenileTint;
 }
