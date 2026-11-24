@@ -253,7 +253,8 @@ function tailPrims(): Prim[] {
 const SKIN = 0x5f5852;
 const DUSTY = 0x847461;
 const SHADOW = 0x4c4743;
-const MUD = 0x7a5b40;
+/** Dry dust and mud caked on the lower legs and belly: a greyish brown, not a red stocking. */
+const MUD = 0x756454;
 const EAR_FRONT = 0x87726b;
 const IVORY = 0xa8946f;
 const IVORY_BASE = 0x6e5a40;
@@ -271,9 +272,12 @@ function elephantCoat(male: boolean, eye: Vec3, tusk: Vec3[]) {
     // sun-bleached dust on the back and head, darker underside
     blendHex(c.color, DUSTY, clamp01(smooth(0.25, 0.95, c.ny) * 0.65 + n * 0.35));
     blendHex(c.color, SHADOW, clamp01(smooth(-0.15, -0.85, c.ny) * 0.55));
-    // mud stockings and belly splash with an irregular upper edge
-    const mudTop = 1.05 + n * 0.35 + n2 * 0.12;
-    blendHex(c.color, MUD, smooth(mudTop, mudTop - 0.7, y) * 0.48);
+    // mud on the lower legs and a belly splash: the upper edge wanders with
+    // splashes and drips (vertical streaks) and feathers out over ~40 cm,
+    // and the coverage is patchy, so it never reads as a stocking
+    const drip = fbm(x * 11, y * 3.5, z * 11, 2, 34);
+    const mudTop = 1.0 + n * 0.3 + n2 * 0.2 + drip * 0.14;
+    blendHex(c.color, MUD, smooth(mudTop + 0.12, mudTop - 0.28, y) * (0.36 + 0.12 * n2));
     blendHex(c.color, MUD, smooth(-0.3, -0.9, c.ny) * smooth(2.0, 1.4, y) * 0.35);
     c.color2.copy(c.color).multiplyScalar(0.62);
     c.w = 0;

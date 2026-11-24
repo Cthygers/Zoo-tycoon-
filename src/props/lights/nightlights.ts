@@ -24,7 +24,8 @@
 //    to a map-wide texture that creature and human materials sample once per
 //    vertex (lampField.ts), so anyone standing in a pool is lit warm.
 //  - real point lights: at most a couple (high tier only) on the lamps
-//    nearest the camera focus, so nearby benches / kiosk walls are lit too.
+//    nearest the camera focus, so nearby benches / kiosk walls are lit too
+//    (not animals and people: the field above already lights them).
 // Everything is invisible (0 draw calls) during the day.
 
 import * as THREE from 'three';
@@ -63,10 +64,11 @@ const POOL_GAIN_LDR = 1.0;
 const FILL_GAIN = 0.32;
 const FILL_COLOR = new THREE.Color(1.0, 0.62, 0.3);
 /**
- * Point lights (high tier) light what stands near a lamp: guests, benches,
- * kiosk walls. Their range ends just past the ground under the lamp, which the
- * pools already light, so the ground is not lit twice (and the pools of the
- * lamps that have a point light don't stand out).
+ * Point lights (high tier) light what stands near a lamp: benches, kiosk
+ * walls (animals and people skip them, lampField.ts). Their range ends just
+ * past the ground under the lamp, which the pools already light, so the
+ * ground is not lit twice (and the pools of the lamps that have a point light
+ * don't stand out).
  */
 const POINT_INTENSITY = 0.6;
 const POINT_RANGE = 3.8;
@@ -76,6 +78,14 @@ const POINT_RANGE = 3.8;
  * bright as the lit paving around them.
  */
 const CREATURE_LAMP = WARM.clone().multiplyScalar(0.45);
+/**
+ * Halo core brightness. LDR: display-referred additive glow. HDR (post-FX
+ * tier): in displayed units (divided by the exposure, which is ≈ 15× the noon
+ * one at night), kept well under the bloom threshold (render/post.ts) so
+ * bloom catches the lantern glass only, not a metre-wide white disc.
+ */
+const HALO_LDR = 0.42;
+const HALO_HDR = 0.6;
 /** Reference lamp height for the falloff normalisation (m). */
 const H0 = 3.2;
 /** Pool mesh height above the walk surface (m); small, so walls standing in a pool show no lit seam. */
@@ -452,9 +462,7 @@ export class NightLights {
     m.name = 'lamp-halos';
     m.onBeforeRender = (renderer) => {
       const hdr = renderer.getRenderTarget() !== null;
-      // HDR: stay just under the night bloom threshold (~0.8) so bloom only
-      // catches the lantern itself; LDR: display-referred additive glow
-      this.haloMat.uniforms.uGain.value = this.night * (hdr ? 0.3 : 0.42);
+      this.haloMat.uniforms.uGain.value = this.night * (hdr ? HALO_HDR / Math.max(renderer.toneMappingExposure, 1e-3) : HALO_LDR);
     };
     this.haloCap = cap;
     this.group.add(m);

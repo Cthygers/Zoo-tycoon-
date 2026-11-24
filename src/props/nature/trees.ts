@@ -84,7 +84,7 @@ function fullTree(p: TreeParts): THREE.Group {
   const leaves = new MeshData();
   cards.emit(leaves, crown, opts.bend ?? 0.78, leafAO(opts.aoInner ?? 0.45));
   const g = groupOf([
-    [bark, barkMat(p.bark, opts.barkSway), 'bark'],
+    [bark, barkMat(p.bark, opts.barkSway, true, true), 'bark'],
     [leaves, leafMat(p, opts), 'leaves'],
   ]);
   addCrownFade(g, crown);
@@ -122,7 +122,7 @@ function lodTree(p: TreeParts): THREE.Group {
   const ao = leafAO(opts.aoInner ?? 0.45);
   cards.emit(leaves, crown, opts.bend ?? 0.78, (q, d, nn) => ao(q, d, nn) * 0.87);
   const g = groupOf([
-    [bark, barkMat(p.bark, opts.barkSway), 'bark'],
+    [bark, barkMat(p.bark, opts.barkSway, true, true), 'bark'],
     [leaves, leafMat(p, opts), 'leaves'],
   ]);
   addCrownFade(g, crown);
@@ -638,7 +638,7 @@ function palm(variant: number, lod: boolean): THREE.Group {
     });
   }
   const g = groupOf([
-    [bark, barkMat('palm', 0.004), 'bark'],
+    [bark, barkMat('palm', 0.004, true, true), 'bark'],
     [fronds, leafMaterial('trees'), 'leaves'],
   ]);
   addCrownFade(g, crown);
@@ -754,7 +754,7 @@ function bamboo(variant: number, lod: boolean): THREE.Group {
     cards.lodSet(n, Math.min(2.3, Math.sqrt(cards.length / n) * 0.78), crown, budgetRng(variant + 77), 0.5).emit(leaves, crown, 0.65, leafAO(0.5));
   } else cards.emit(leaves, crown, 0.65, leafAO(0.5));
   const g = groupOf([
-    [canes, barkMat('bamboo', 0.012), 'canes'],
+    [canes, barkMat('bamboo', 0.012, true, true), 'canes'],
     [leaves, leafMaterial('trees'), 'leaves'],
   ]);
   addCrownFade(g, crown);

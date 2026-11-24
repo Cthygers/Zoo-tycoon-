@@ -404,18 +404,23 @@ export function groupOf(parts: [MeshData, THREE.Material, string?][]): THREE.Gro
 }
 
 /**
- * Near-camera crown dissolve data (props/lod/fade.ts) on the 'leaves' mesh of
- * a tree group: every vertex carries the crown ellipsoid (centre, horizontal
- * and vertical radius, cm) and a dissolve rank shared by its whole card or
- * frond (one connected piece of the mesh), so a crown on the camera's view
- * line drops out card by card, never as a half-transparent sheet. Every
- * geometry drawn with the shared tree foliage material needs it (BatchedMesh
+ * Near-camera crown dissolve data (props/lod/fade.ts) on every mesh of a tree
+ * group whose material is flagged crownFade (the leaves, and the bark that
+ * goes with them): every vertex carries the crown ellipsoid (centre,
+ * horizontal and vertical radius, cm) and a dissolve rank shared by its whole
+ * card, frond or limb (one connected piece of the mesh), so a crown on the
+ * camera's view line drops out piece by piece, never as a half-transparent
+ * sheet. Every geometry drawn with such a material needs it (BatchedMesh
  * wants one attribute layout per batch).
  */
 export function addCrownFade(group: THREE.Object3D, crown: Ellipsoid): void {
-  const mesh = group.getObjectByName('leaves') as THREE.Mesh | undefined;
-  if (!mesh) return;
-  const g = mesh.geometry;
+  group.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (mesh.isMesh && (mesh.material as THREE.Material).userData.crownFade === true) setCrownAttributes(mesh.geometry, crown);
+  });
+}
+
+function setCrownAttributes(g: THREE.BufferGeometry, crown: Ellipsoid): void {
   const n = g.getAttribute('position').count;
   const piece = connectedPieces(g);
   const cm = (v: number) => Math.round(v * 100);

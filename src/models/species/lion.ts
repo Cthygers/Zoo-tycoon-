@@ -209,6 +209,13 @@ function tailPrims(t: Vec3[]): Prim[] {
 const TAWNY_BACK = 0x7d5935;
 const TAWNY = 0xa07843;
 const CREAM = 0xc9ab82;
+/** Belly and inner legs: paler than the cream of the face, so the underside reads from the side. */
+const BELLY = 0xd8c39e;
+/** Mane: tan rim at the face, deep brown at the rear and underside, black-brown locks. */
+const MANE_RIM = 0xb4874c;
+const MANE_MID = 0x6a4627;
+const MANE_DARK = 0x5a3a20;
+const MANE_LOCK = 0x2e1e12;
 const NOSE = 0x8e5444;
 const LIP = 0x201814;
 const EARBACK = 0x2a2019;
@@ -230,12 +237,24 @@ function lionCoat(male: boolean, hs: number, eye: Vec3, eyeR: number) {
     blendHex(c.color, TAWNY_BACK, smooth(0.0, 0.45, fbm(x * 2.4 + 5, y * 2.4, z * 2.4, 2, 6)) * 0.3);
     const hw = clamp01(c.pw('head') + c.pw('muzzle') + c.pw('chin') + c.pw('nose') + c.pw('ear'));
     // (not on the head: pale jaws and cheeks read as a bear's face)
-    const under = clamp01(smooth(0.0, -0.7, c.ny) * 0.9 + (Math.abs(x) < 0.1 && y < 0.75 ? 0.3 : 0)) * (1 - hw * 0.8);
-    blendHex(c.color, CREAM, under * 0.7);
-    // inner legs paler
+    // the pale belly creeps up the lower flank, so it shows from the side
+    const under = clamp01(smooth(0.1, -0.55, c.ny) * smooth(0.85, 0.7, y) + (Math.abs(x) < 0.1 && y < 0.75 ? 0.3 : 0)) * (1 - hw * 0.8);
+    blendHex(c.color, BELLY, under * 0.8);
+    // inner legs pale: limb surfaces below the body that face the other legs
     const leg = clamp01((c.pw('leg') + c.pw('paw')) * 1.5);
-    const inner = leg * smooth(0.2, -0.6, Math.sign(x) * c.nx);
-    blendHex(c.color, CREAM, inner * 0.35);
+    const inner = smooth(0.2, -0.5, Math.sign(x) * c.nx) * smooth(0.8, 0.55, y) * (1 - hw);
+    blendHex(c.color, BELLY, inner * (0.3 + 0.25 * leg));
+    // muscle masses: a soft darker crease behind the shoulder (triceps) and in
+    // front of the thigh (stifle fold), the masses a touch lighter on top, so
+    // the flank reads as muscle under the coat rather than a smooth shell
+    const side = smooth(0.25, 0.6, Math.abs(c.nx)) * (1 - hw);
+    if (side > 0) {
+      const sh = Math.hypot((z - 0.34) / 0.17, (y - 0.74) / 0.22);
+      const hu = Math.hypot((z + 0.5) / 0.2, (y - 0.72) / 0.22);
+      const crease = Math.exp(-(((sh - 1) / 0.2) ** 2)) * smooth(0.34, 0.22, z) + Math.exp(-(((hu - 1) / 0.2) ** 2)) * smooth(-0.5, -0.38, z);
+      c.color.multiplyScalar(1 - 0.24 * clamp01(crease) * side);
+      blendHex(c.color, 0xb48c58, (smooth(1, 0.4, sh) + smooth(1, 0.4, hu)) * smooth(-0.3, 0.4, c.ny) * side * 0.15);
+    }
     if (hw > 0.1) {
       const mz = c.pw('muzzle') + c.pw('chin');
       // face a little darker / richer than the body, ochre on the nasal bridge
@@ -289,23 +308,25 @@ function lionCoat(male: boolean, hs: number, eye: Vec3, eyeR: number) {
     c.color.multiplyScalar(1 - 0.12 * clamp01((c.pw('leg') + c.pw('paw')) * 1.5));
     // muscle modelling: the grooves around shoulder, elbow and haunch and the
     // flank under the ribs shade in, so the body doesn't read as smooth plastic
-    if (c.pw('body') + c.pw('belly') + c.pw('neck') > 0.3) c.color.multiplyScalar(1 - 0.5 * c.ao(0.14));
+    if (c.pw('body') + c.pw('belly') + c.pw('neck') > 0.3) c.color.multiplyScalar(1 - 0.75 * c.ao(0.14));
     // paws: slightly darker, dusty
     blendHex(c.color, 0x8a6c46, smooth(0.12, 0.0, y) * 0.4);
-    // mane: golden in the ruff framing the face, darkening to brown and
-    // brown-black over the neck, shoulders and chest bib, in vertical locks
-    // (streaks) with paler, sun-bleached tips
+    // mane: two-tone, so it never reads as the body colour — a tan rim in the
+    // ruff framing the face, deep brown over the rear of the neck, the
+    // shoulders, the underside and the chest bib, in vertical locks (streaks)
+    // with a few paler, sun-bleached tips near the face
     if (male) {
       const m = c.pw('mane');
       if (m > 0.05) {
-        const face = smooth(0.66, 0.86, z) * smooth(0.62, 0.8, y);
-        const dark = clamp01(smooth(0.6, 0.3, z) * 0.6 + smooth(0.8, 0.55, y) * 0.7);
+        const face = smooth(0.7, 0.86, z) * smooth(0.62, 0.8, y);
+        const dark = clamp01(smooth(0.74, 0.45, z) + smooth(0.86, 0.62, y) + smooth(-0.2, -0.7, c.ny) * 0.6) * (1 - face);
         const streak = fbm(x * 34, y * 5, z * 30, 3, 17);
         const lock = fbm(x * 12, y * 3, z * 10, 2, 23);
-        const mane = c.color.clone().setHex(0x7d5530);
-        blendHex(mane, 0x3a2617, clamp01(dark * 0.8 + streak * 0.45 - lock * 0.2));
-        blendHex(mane, 0xb88a4e, clamp01(face * 0.85 - streak * 0.35));
-        blendHex(mane, 0xc49a5c, smooth(0.25, 0.6, lock + streak * 0.5) * (1 - dark) * 0.35);
+        const mane = c.color.clone().setHex(MANE_MID);
+        blendHex(mane, MANE_DARK, dark);
+        blendHex(mane, MANE_LOCK, clamp01(dark * 0.35 + streak * 0.5 - lock * 0.25));
+        blendHex(mane, MANE_RIM, clamp01(face * 0.9 - streak * 0.3));
+        blendHex(mane, 0xc49a5c, smooth(0.25, 0.6, lock + streak * 0.5) * face * 0.3);
         const k = smooth(0.1, 0.55, m);
         c.color.lerp(mane, k);
         c.fur = 1 + 2.6 * k;

@@ -167,7 +167,10 @@ function penguinCoat(eye: Vec3, eyeR: number) {
     const dz = z - zc;
     const r = Math.hypot(ax, dz);
     const th = Math.atan2(ax, dz);
-    const thB = 1.72 + 0.4 * smooth(0.26, 0.06, y) - 0.32 * smooth(0.36, 0.47, y);
+    // white wraps past the flank on the mid-body (seen from behind, a white
+    // edge below the flippers), so a penguin at the surface shows a white
+    // flank along its waterline
+    const thB = 1.72 + 0.4 * smooth(0.26, 0.06, y) + 0.35 * smooth(0.12, 0.22, y) * smooth(0.4, 0.3, y) - 0.32 * smooth(0.36, 0.47, y);
     const yT = 0.505 - 0.035 * smooth(0.7, 1.6, th);
     let s = Math.min((thB - th) * Math.max(0.04, r), yT - y);
     // ---- head: white band over the crown from eye to eye, white eye-ring
@@ -248,8 +251,9 @@ function design(ctx: DesignContext): CreatureDesign {
     waddle: 0.15,
     proneY: 0.12,
     crouchY: 0.145,
-    // float high, as resting and porpoising penguins do: back and head clear of the water
-    swimDepth: 0.015,
+    // float high, as resting and porpoising penguins do: back, head and the
+    // top of the white flanks clear of the water
+    swimDepth: -0.02,
     swimPitch: 1.45,
     swimShift: -0.13,
   });

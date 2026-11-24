@@ -385,12 +385,13 @@ export class Simulation implements ISimulation {
     this.day++;
     this.today = emptyLedger(this.day);
     this.progress.closeDay(this.guestsToday, runningResult(done));
+    const turnedAway = this.turnedAwayToday;
     this.guestsToday = 0;
     this.turnedAwayToday = 0;
     this.animalSys.daily();
     this.debtWarned = false;
     this.events.emit('dayChanged', { day: this.day });
-    const summary = daySummary(done);
+    const summary = daySummary(done, turnedAway);
     this.notify(null, summary.text, summary.kind);
     if (this.money < 0) {
       this.notify('debt', `You are ${fmtMoney(-this.money)} in debt! Building is blocked until you earn money — raise income or sell something.`, 'bad', undefined, 0);
@@ -450,12 +451,13 @@ export class Simulation implements ISimulation {
 
   /**
    * A lasting problem (e.g. a flooded habitat), throttled like `notify`: a toast when it starts,
-   * then log-only reminders while it lasts (a repeat within two cooldowns of the one before).
+   * then log-only reminders while it lasts (a repeat within `lasting` simulated seconds of the
+   * one before, two cooldowns by default).
    */
-  remind(key: string, text: string, kind: NotifyKind, focus?: { x: number; z: number }, cooldown = 90) {
+  remind(key: string, text: string, kind: NotifyKind, focus?: { x: number; z: number }, cooldown = 90, lasting = 2 * cooldown) {
     const last = this.notifyLast.get(key);
     if (!this.claimNotify(key, cooldown)) return;
-    this.emitNotify(text, kind, focus, last !== undefined && this.time - last < 2 * cooldown);
+    this.emitNotify(text, kind, focus, last !== undefined && this.time - last < lasting);
   }
 
   /** A toast the first time this zoo meets `key` (remembered in the save), log-only after that. */
@@ -1186,16 +1188,20 @@ export function runningResult(d: LedgerEntry): number {
  * End-of-day message. One-off items (building, animals, goal rewards, sales and refunds)
  * are reported apart from the day's running result, and only a running loss is a
  * warning: a day of building is an investment, and a reward is not everyday income.
+ * `turnedAway`: visitors a full zoo sent away that day (the day's 'Zoo full' notes only go
+ * to the log, so the final count is given here).
  */
-export function daySummary(d: LedgerEntry): { text: string; kind: NotifyKind } {
+export function daySummary(d: LedgerEntry, turnedAway = 0): { text: string; kind: NotifyKind } {
   const net = d.income - d.expenses;
   const investment = d.construction + d.animalPurchases;
   const running = runningResult(d);
   const other = Math.round(d.other);
   const kind: NotifyKind = running < 0 ? 'warn' : 'info';
+  const away = Math.round(turnedAway);
+  const full = away > 0 ? ` — zoo full, ${away} ${away === 1 ? 'visitor' : 'visitors'} turned away` : '';
   if (investment === 0 && other === 0) {
     return {
-      text: `Day ${d.day} closed: ${fmtMoney(net, { sign: true })} (income ${fmtMoney(d.income)}, running costs ${fmtMoney(d.expenses)})`,
+      text: `Day ${d.day} closed: ${fmtMoney(net, { sign: true })} (income ${fmtMoney(d.income)}, running costs ${fmtMoney(d.expenses)})${full}`,
       kind,
     };
   }
@@ -1206,7 +1212,7 @@ export function daySummary(d: LedgerEntry): { text: string; kind: NotifyKind } {
   }
   parts.push(`daily running ${fmtMoney(running, { sign: true })}`);
   if (other !== 0) parts.push(`rewards & refunds ${fmtMoney(other, { sign: true })}`);
-  return { text: `Day ${d.day} closed: ${fmtMoney(net, { sign: true })} (${parts.join('; ')})`, kind };
+  return { text: `Day ${d.day} closed: ${fmtMoney(net, { sign: true })} (${parts.join('; ')})${full}`, kind };
 }
 
 /** JSON replacer: fractional numbers rounded to 3 decimals (integers, strings untouched). */

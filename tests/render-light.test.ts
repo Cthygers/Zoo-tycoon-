@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 import { AtmosphereModel } from '../src/render/atmosphere';
 import { computeCelestial } from '../src/render/celestial';
-import { RenderContext, cameraFov, daylight, daylightFill, gradeToneMap } from '../src/render/context';
+import { RenderContext, airOfDay, cameraFov, daylight, daylightFill, gradeToneMap, moonFill, morningLift } from '../src/render/context';
 
 const DEG = Math.PI / 180;
 const lum = (c: THREE.Color) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
@@ -42,19 +42,75 @@ describe('daylight fill', () => {
     const fill = new THREE.Color();
     const ground = new THREE.Color();
     daylightFill(sky, sunH, 1, 0, fill, ground);
-    expect(lum(ground)).toBeGreaterThan(0.2 * lum(sunH));
+    expect(lum(ground)).toBeGreaterThan(0.15 * lum(sunH));
     expect(ground.b).toBeLessThan(ground.r);
     daylightFill(sky, sunH, 0, 0, fill, ground);
     expect(lum(fill)).toBe(0);
     expect(lum(ground)).toBe(0);
   });
 
-  it('gives the hazy morning more fill', () => {
+  it('gives the morning more fill, and cooler shade', () => {
     const plain = new THREE.Color();
-    const hazy = new THREE.Color();
+    const morning = new THREE.Color();
     daylightFill(sky, sunH, 1, 0, plain, new THREE.Color());
-    daylightFill(sky, sunH, 1, 1, hazy, new THREE.Color());
-    expect(lum(hazy)).toBeGreaterThan(lum(plain) * 1.1);
+    daylightFill(sky, sunH, 1, 1, morning, new THREE.Color());
+    expect(lum(morning)).toBeGreaterThan(lum(plain) * 1.1);
+    expect(morning.b / morning.r).toBeGreaterThan((plain.b / plain.r) * 1.05);
+  });
+
+  it('keeps the darkest daylight shade near black instead of a milky grey', () => {
+    // a dark coat or a crevice in deep shade at noon: ≈ 1 % of the metered ground
+    const exposure = dl.displayB / (dl.sunLumMeter + lum(sky));
+    const deep = gradeToneMap(new THREE.Color(1, 1, 1).multiplyScalar(0.01 / exposure), exposure, new THREE.Color());
+    const srgb = deep.clone().convertLinearToSRGB();
+    expect(srgb.g * 255).toBeLessThan(14);
+  });
+});
+
+describe('time of day air', () => {
+  const sun = new THREE.Vector3();
+  const moon = new THREE.Vector3();
+  const at = (h: number, m = 0) => {
+    const se = computeCelestial(h * 60 + m, 1, sun, moon).sunElev / DEG;
+    const tint = new THREE.Color();
+    const morning = airOfDay(h + m / 60, se, tint);
+    return { se, tint, morning, lift: morningLift(se, morning) };
+  };
+
+  it('keeps the low morning sun golden and cools it once it is high', () => {
+    const early = at(7, 30);
+    expect(early.morning).toBe(1);
+    // as warm as the afternoon sun
+    expect(early.tint.b).toBeLessThan(0.9);
+    expect(early.tint.b).toBeCloseTo(at(17).tint.b, 2);
+    const mid = at(9, 30);
+    expect(mid.tint.b).toBeGreaterThan(1.02);
+    expect(at(16).tint.b).toBeLessThan(0.95);
+    expect(at(13).morning).toBe(0);
+  });
+
+  it('lifts the low morning sun only', () => {
+    expect(at(7, 30).lift).toBeGreaterThan(1.1);
+    expect(at(8).lift).toBeGreaterThan(1.1);
+    expect(at(11).lift).toBe(1);
+    expect(at(18, 30).lift).toBe(1);
+    expect(at(6, 0).lift).toBe(1);
+  });
+});
+
+describe('moonlight fill', () => {
+  it('lights what the moon misses with a share of its light, bounced warmer from the ground', () => {
+    const moonH = new THREE.Color(0.52, 0.68, 1.0).multiplyScalar(0.05);
+    const sky = new THREE.Color();
+    const ground = new THREE.Color();
+    moonFill(moonH, sky, ground);
+    expect(lum(sky) / lum(moonH)).toBeGreaterThan(0.2);
+    expect(lum(sky) / lum(moonH)).toBeLessThan(0.5);
+    expect(sky.b).toBeGreaterThan(sky.r);
+    expect(lum(ground)).toBeGreaterThan(0);
+    expect(ground.b / ground.r).toBeLessThan(sky.b / sky.r);
+    moonFill(new THREE.Color(0, 0, 0), sky, ground);
+    expect(lum(sky) + lum(ground)).toBe(0);
   });
 });
 

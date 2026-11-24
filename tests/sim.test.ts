@@ -619,7 +619,7 @@ describe('persistence', () => {
     expect(() => {
       for (let i = 0; i < 50; i++) sim2.update(0.1);
     }).not.toThrow();
-  });
+  }, 20_000); // ~1.7 s alone; slower when the machine is busy
 
   it('newGame resets everything', () => {
     const { sim } = newSim(4);

@@ -7,7 +7,9 @@ import { MAP_W } from '../src/core/constants';
 import { EventBus } from '../src/core/events';
 import { Terrain } from '../src/core/types';
 import { World } from '../src/core/world';
-import { LakeBed, lakeBedKind, lawnShare, TileIndexTexture } from '../src/render/terrain';
+import { createGroundMaterial } from '../src/render/groundMaterial';
+import { crownCover, LakeBed, lakeBedKind, lawnShare, TileIndexTexture } from '../src/render/terrain';
+import type { GroundTextureSet } from '../src/render/textures';
 import { SHORE_OFFSET_GLSL, WaterSurface } from '../src/render/water';
 
 function flatWorld(t: Terrain): World {
@@ -72,6 +74,31 @@ describe('dry patches inside lawns', () => {
   });
 });
 
+describe('lawn under trees', () => {
+  it('maps how much each tile lies under a tree crown (trees only, wider for big trees)', () => {
+    const w = flatWorld(Terrain.Grass);
+    w.addObject('tree_oak', 20, 20, 0, 1);
+    w.addObject('tree_baobab', 40, 40, 0, 2);
+    w.addObject('bench', 60, 20, 0, 3);
+    const cover = crownCover(w);
+    const at = (x: number, z: number) => cover[z * MAP_W + x];
+    expect(at(20, 20)).toBe(1);
+    expect(at(21, 20)).toBeGreaterThan(0.3);
+    expect(at(21, 20)).toBeLessThan(1);
+    expect(at(23, 20)).toBe(0);
+    expect(at(60, 20)).toBe(0);
+    // a 2×2 baobab shades further out than a one-tile oak
+    expect(at(43, 40)).toBeGreaterThan(0);
+    // packed into the tile texture's blue channel for the ground shader
+    const tex = new TileIndexTexture(w);
+    const b = (x: number, z: number) => (tex.texture.image.data as Uint8Array)[(z * MAP_W + x) * 4 + 2];
+    expect(b(20, 20)).toBe(255);
+    expect(b(21, 20)).toBe(Math.round(at(21, 20) * 255));
+    expect(b(60, 20)).toBe(0);
+    tex.dispose();
+  });
+});
+
 describe('noisy waterline', () => {
   it('is the same function in the water and ground shaders', () => {
     const w = flatWorld(Terrain.Grass);
@@ -81,8 +108,35 @@ describe('noisy waterline', () => {
     const shader = { vertexShader: THREE.ShaderLib.physical.vertexShader, fragmentShader: THREE.ShaderLib.physical.fragmentShader, uniforms: {}, defines: {} };
     mat.onBeforeCompile(shader as unknown as THREE.WebGLProgramParametersWithUniforms, {} as THREE.WebGLRenderer);
     expect(shader.fragmentShader).toContain(SHORE_OFFSET_GLSL.trim());
-    expect(shader.fragmentShader).toContain('float wEdge = wDepth - shoreOffset(texture2D(uNoise, vWPos.xz * 0.087), texture2D(uNoise, vWPos.xz * 0.41));');
+    // past the noisy line or the terrain's own contour, whichever comes later
+    expect(shader.fragmentShader).toContain('float wEdge = min(wDepth - shoreOffset(texture2D(uNoise, vWPos.xz * 0.087), texture2D(uNoise, vWPos.xz * 0.41)), wDepth);');
     water.dispose();
+  });
+
+  it('wanders both ways around the terrain contour (a one-sided offset bared a ring of lake bed)', () => {
+    const body = /float shoreOffset\(vec4 nB, vec4 nC\) \{\s*return ([^;]+);/.exec(SHORE_OFFSET_GLSL)![1];
+    const offset = new Function('nB', 'nC', `return ${body};`) as (b: { g: number }, c: { r: number }) => number;
+    expect(offset({ g: 0.5 }, { r: 0.5 })).toBeCloseTo(0, 6);
+    expect(offset({ g: 0 }, { r: 0 })).toBeLessThan(-0.05);
+    expect(offset({ g: 1 }, { r: 1 })).toBeGreaterThan(0.05);
+    expect(Math.abs(offset({ g: 1 }, { r: 1 }))).toBeLessThanOrEqual(0.1);
+  });
+
+  it('draws the lake bed only below the visible waterline (no bare ring of dark silt above the water)', () => {
+    const t = new THREE.DataArrayTexture();
+    const set: GroundTextureSet = { albedo: t, detail: t, noise: t, waves: t, foliage: t };
+    const ground = createGroundMaterial(set, new THREE.Texture(), { antiTile: false, cloudShadows: false, caustics: false });
+    const shader = { vertexShader: THREE.ShaderLib.standard.vertexShader, fragmentShader: THREE.ShaderLib.standard.fragmentShader, uniforms: {}, defines: {} };
+    ground.material.onBeforeCompile(shader as unknown as THREE.WebGLProgramParametersWithUniforms, {} as THREE.WebGLRenderer);
+    const fs = shader.fragmentShader;
+    // the bed's share comes from the depth below the noisy waterline, before the layers are blended
+    const share = fs.indexOf('gBedShare = smoothstep(0.0, 0.08, -wy);');
+    expect(share).toBeGreaterThan(0);
+    expect(share).toBeLessThan(fs.indexOf('GSample gs = sampleGround('));
+    expect(fs).toContain('if (A == 7) m = mix(1.0, m, gBedShare);');
+    // the wet strip above the water plane keeps its sheen; only ground under the surface loses it
+    expect(fs).toContain('reflectedLight.directSpecular *= 1.0 - submerged;');
+    ground.material.dispose();
   });
 
   it('hides what stands deep in a pond behind depth-only murk layers drawn between the ground and the rest', () => {

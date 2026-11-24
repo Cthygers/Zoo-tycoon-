@@ -117,25 +117,40 @@ ${HIGHLIGHT_FN_GLSL}
 #endif
 ${NOISE_GLSL}
 #if CR_SKIN == 4
-// Crease network: iso-lines of three value-noise fields at different scales
+// A groove along an iso-line of value noise: u = |noise − 0.5|, half-width w
+// (noise units); 1 in the groove, 0 on the plates. Box-filtered over the
+// pixel footprint fw (noise units): widened and made shallower in proportion
+// once a pixel spans more than the groove, and faded to its mean (w) once it
+// spans the noise cells, so sub-pixel grooves average out into the tone
+// instead of aliasing into black pinholes.
+float cr_groove(float u, float w, float fw) {
+  float we = clamp(fw, w, 0.5);
+  return mix((1.0 - smoothstep(0.0, we, u)) * (w / we), w, smoothstep(0.5, 1.0, fw));
+}
+// Crease network: grooves of three value-noise fields at different scales
 // (wiggly grooves that cross into irregular, elongated plates; the coarse set
 // runs mostly horizontally like the folds on legs and trunks). 1 on the
-// plates, dipping to 0 in the grooves.
-float cr_crease(vec3 q) {
+// plates, dipping toward 0 in the grooves. fq = pixel footprint in q units;
+// each band's filter width is fq × its highest frequency × the noise slope.
+float cr_crease(vec3 q, float fq) {
   float a = abs(cr_vnoise(q * vec3(0.42, 1.25, 0.42)) - 0.5);
   float b = abs(cr_vnoise(q * vec3(0.95, 0.8, 0.95) + 11.7) - 0.5);
   float c = abs(cr_vnoise(q * 2.3 + 3.3) - 0.5);
-  return smoothstep(0.0, 0.11, a) * 0.5 + smoothstep(0.0, 0.085, b) * 0.32 + smoothstep(0.0, 0.07, c) * 0.18;
+  return 1.0 - cr_groove(a, 0.11, fq * 0.38) * 0.5 - cr_groove(b, 0.085, fq * 0.29) * 0.32 - cr_groove(c, 0.07, fq * 0.69) * 0.18;
 }
+/** Mean of 1 − cr_crease: what the network averages to once every band is filtered out. */
+#define CR_CREASE_MEAN 0.0948
 // Deep skin folds, CR_FOLD × the crease scale: long grooves running across
 // the limbs and trunk (object-space Y is up the legs and the hanging trunk),
 // a few centimetres apart, plus a fainter, finer cross set. They still read
-// at mid range on a phone, where the fine creases are sub-pixel.
+// at mid range on a phone, where the fine creases are sub-pixel. A slow warp
+// along Y varies their spacing by about ±30 %, so they never form even rings.
 #define CR_FOLD 4.0
-float cr_fold(vec3 q) {
+float cr_fold(vec3 q, float fq) {
+  q.y += (cr_vnoise(q * vec3(0.35, 0.22, 0.35) + 5.1) - 0.5) * 2.6;
   float a = abs(cr_vnoise(q * vec3(0.3, 1.0, 0.3)) - 0.5);
   float b = abs(cr_vnoise(q * vec3(0.8, 0.6, 0.8) + 7.7) - 0.5);
-  return smoothstep(0.0, 0.12, a) * 0.78 + smoothstep(0.0, 0.07, b) * 0.22;
+  return 1.0 - cr_groove(a, 0.12, fq * 0.3) * 0.78 - cr_groove(b, 0.07, fq * 0.24) * 0.22;
 }
 #endif`,
       )
@@ -150,6 +165,11 @@ float crFade = 1.0 - smoothstep(crGrain * 0.35, crGrain * 1.6, crPix);
 {
   float s = vPattern.x;
   float w = vPattern.y;
+  #if CR_SKIN == 4
+  // skin-fold rings (legs, trunk, neck): jitter their phase with a slow noise
+  // so the spacing varies by about ±25–40 % instead of forming even rings
+  s += (cr_vnoise(vRestPos * 8.0 + 2.9) - 0.5) * 1.1;
+  #endif
   float d = abs(fract(s) - 0.5) * 2.0;
   #if CR_MICRO == 1
   d += (cr_vnoise(vRestPos * (0.9 / uGrain)) - 0.5) * 0.07 * crFade;
@@ -171,21 +191,21 @@ float crFade = 1.0 - smoothstep(crGrain * 0.35, crGrain * 1.6, crPix);
   diffuseColor.rgb *= 1.0 + uMottle * (mo - 0.5) * 2.0 * (1.0 - vPattern.z);
 }
 #if CR_SKIN == 4
-// grooves are darker (dirt + occlusion); fades to the average a bit beyond the micro-normal range
-float crCreaseH = 1.0;
+// grooves are darker (dirt + occlusion), filtered to their average tone where
+// they get thinner than a pixel; past crFq ≈ 3.5 every band of cr_crease is
+// at its mean, so the noise is not evaluated
+float crFq = crPix / crGrain;
 {
-  float fa = 1.0 - smoothstep(crGrain * 0.6, crGrain * 3.2, crPix);
-  if (fa > 0.001) crCreaseH = cr_crease(vRestPos / crGrain);
-  float groove = 1.0 - crCreaseH;
+  float groove = crFq < 3.5 ? 1.0 - cr_crease(vRestPos / crGrain, crFq) : CR_CREASE_MEAN;
   float gd = clamp(uBump * 1.2, 0.12, 0.6);
   // folds (where the coat puts them): same treatment at their own, larger scale
   float ff = (1.0 - smoothstep(crGrain * CR_FOLD * 0.5, crGrain * CR_FOLD * 2.5, crPix)) * max(-vPattern.w, 0.0);
   float foldShade = 1.0 - gd * 0.06 * max(-vPattern.w, 0.0);
   if (ff > 0.001) {
-    float fold = 1.0 - cr_fold(vRestPos / (crGrain * CR_FOLD));
-    foldShade = mix(foldShade, 1.0 - gd * 0.45 * fold * fold, ff);
+    float fold = 1.0 - cr_fold(vRestPos / (crGrain * CR_FOLD), crFq / CR_FOLD);
+    foldShade = mix(foldShade, 1.0 - gd * 0.45 * fold, ff);
   }
-  float shade = mix(1.0 - gd * 0.14, 1.0 - gd * groove * groove, fa) * foldShade;
+  float shade = (1.0 - gd * 1.1 * groove) * foldShade;
   diffuseColor.rgb *= shade * (1.0 - vPattern.z) + vPattern.z;
 }
 #endif
@@ -226,7 +246,8 @@ if (crFade > 0.001 && vPattern.z < 0.5) {
   #elif CR_SKIN == 3
     #define CR_H(q) cr_vnoise((q) * vec3(1.0, 1.0, 0.3))
   #elif CR_SKIN == 4
-    #define CR_H(q) (cr_crease(q) + cr_vnoise((q) * 0.9) * 0.25)
+    // filtered at least over the finite-difference step
+    #define CR_H(q) (cr_crease(q, max(crFq, e)) + cr_vnoise((q) * 0.9) * 0.25)
   #else
     #define CR_H(q) (cr_vnoise((q) * 0.5) * 0.3)
   #endif
@@ -246,8 +267,9 @@ if (crFade > 0.001 && vPattern.z < 0.5) {
   if (ff > 0.001 && vPattern.z < 0.5) {
     vec3 p = vRestPos / (crGrain * CR_FOLD);
     float e = 0.3;
-    float h0 = cr_fold(p);
-    vec3 g = vec3(cr_fold(p + vec3(e, 0.0, 0.0)) - h0, cr_fold(p + vec3(0.0, e, 0.0)) - h0, cr_fold(p + vec3(0.0, 0.0, e)) - h0) / e;
+    float fq = max(crFq / CR_FOLD, e);
+    float h0 = cr_fold(p, fq);
+    vec3 g = vec3(cr_fold(p + vec3(e, 0.0, 0.0), fq) - h0, cr_fold(p + vec3(0.0, e, 0.0), fq) - h0, cr_fold(p + vec3(0.0, 0.0, e), fq) - h0) / e;
     vec3 gv = normalMatrix * g;
     gv -= normal * dot(gv, normal);
     normal = normalize(normal - gv * uBump * 0.2 * ff);

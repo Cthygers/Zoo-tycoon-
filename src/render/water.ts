@@ -25,12 +25,16 @@ const CX = MAP_W + 1;
  * GLSL: depth below the water plane (m) where open water starts. The terrain
  * meets the flat water plane along a straight-edged contour (bilinear tiles,
  * fan tessellation); noise at ~1.4 m and ~0.6 m bends the visible waterline
- * away from it. The ground shader's wet bank calls it with the same noise
- * samples (uNoise at 0.087 and 0.41 per metre), so bank and water agree.
+ * away from it, centred on the contour so the pond does not shrink on
+ * average (a one-sided offset bared a wide band of ground under the plane).
+ * Where it is negative the water fades in from the contour itself and the
+ * ground shader keeps the strip above the plane wet. The ground shader calls
+ * it with the same noise samples (uNoise at 0.087 and 0.41 per metre), so
+ * bank and water agree.
  */
 export const SHORE_OFFSET_GLSL = /* glsl */ `
 float shoreOffset(vec4 nB, vec4 nC) {
-  return max(0.0, 0.06 + (nB.g - 0.5) * 0.2 + (nC.r - 0.5) * 0.06);
+  return (nB.g - 0.5) * 0.12 + (nC.r - 0.5) * 0.04;
 }
 `;
 
@@ -127,8 +131,10 @@ export class WaterSurface {
         .replace(
           '#include <map_fragment>',
           `float wDepth = vDepth;
-          // depth past the (noisy) waterline: the water fades in over its first cm
-          float wEdge = wDepth - shoreOffset(texture2D(uNoise, vWPos.xz * 0.087), texture2D(uNoise, vWPos.xz * 0.41));
+          // depth past the visible waterline: the noisy line, or the terrain's
+          // own contour where the noise lifts that line up the bank. The water
+          // fades in from there, so neither line shows as a hard edge.
+          float wEdge = min(wDepth - shoreOffset(texture2D(uNoise, vWPos.xz * 0.087), texture2D(uNoise, vWPos.xz * 0.41)), wDepth);
           if (wEdge <= 0.0) discard;
           vec3 wV = normalize(cameraPosition - vWPos);
           float wDist = length(cameraPosition - vWPos);
@@ -203,7 +209,7 @@ export class WaterSurface {
             float a = clamp(max(absorb, foam), 0.0, 1.0);
             float alpha = a + (1.0 - a) * F;
             gl_FragColor = vec4(wDiff * a * (1.0 - F) + wSpec * (1.0 - foam * 0.7), alpha);
-            gl_FragColor *= smoothstep(0.0, 0.05, wEdge);
+            gl_FragColor *= smoothstep(0.0, 0.02, wEdge);
           }`,
         )
         .replace(

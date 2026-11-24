@@ -96,38 +96,57 @@ uniform vec3 uLampLight;
 uniform float uLampMark;
 varying float vLampLight;`;
 
-// before <aomap_fragment>: lamps shine from above, so tops catch the most
+// before <aomap_fragment>: lamps shine from above, so tops catch the most.
+// The light falls off like the pool the ground visibly shows: linear on the
+// HDR target, where the pool scales linear light; on tiers that tone-map in
+// the material the pool multiplies display values, ≈ light^1.5 in linear
+// light, so a figure at the faint pool fringe is not lit brighter than the
+// paving it stands on.
 const FRAGMENT_LIGHT = /* glsl */ `
 if (vLampLight > 0.0) {
   vec3 lfUp = normalize((viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
   float lfFacing = 0.6 + 0.4 * dot(normal, lfUp);
-  reflectedLight.indirectDiffuse += uLampLight * (vLampLight * lfFacing) * BRDF_Lambert(diffuseColor.rgb);
+  float lfPool = vLampLight;
+  #ifdef TONE_MAPPING
+  lfPool *= sqrt(vLampLight);
+  #endif
+  reflectedLight.indirectDiffuse += uLampLight * (lfPool * lfFacing) * BRDF_Lambert(diffuseColor.rgb);
 }`;
 
-const LAMP_MARK = 'clamp(vLampLight * uLampMark * 2.5, 0.0, 1.0)';
-
-// the grade's lamp-lit mark (whLampLit exists where the grade tone-maps in
-// the material; on the HDR target the alpha above 1 carries it)
+// The grade's lamp-lit mark, the same as on the ground around the figure, so
+// a figure at the pool fringe stays in the moonlit (rod) grade like the
+// paving it stands on. Where the grade tone-maps in the material (whLampLit),
+// only where the display-space pool visibly brightens the ground (the grade
+// shows full colour from a mark of 0.4 on); on the HDR target the pool marks
+// its light linearly in the alpha, and so does this.
 const FRAGMENT_MARK_TONEMAP = /* glsl */ `
 #ifdef WH_LAMP_LIT
-whLampLit = ${LAMP_MARK};
+whLampLit = smoothstep(0.15, 0.6, vLampLight) * uLampMark;
 #endif`;
 
 const FRAGMENT_MARK_ALPHA = /* glsl */ `
 #ifndef TONE_MAPPING
-gl_FragColor.a += ${LAMP_MARK};
+gl_FragColor.a += vLampLight * uLampMark;
 #endif`;
+
+// The real point lights on the lamps nearest the camera (high tier,
+// nightlights.ts) would light a figure a second time on top of the field.
+const POINT_LOOP = '#if ( NUM_POINT_LIGHTS > 0 ) && defined( RE_Direct )';
+const LIGHTS_NO_POINT = THREE.ShaderChunk.lights_fragment_begin.includes(POINT_LOOP)
+  ? THREE.ShaderChunk.lights_fragment_begin.replace(POINT_LOOP, '#if 0 // lamp light comes from the field')
+  : null;
 
 /**
  * Patch a standard / physical material shader (in onBeforeCompile) so it
- * receives lamp light from the field. Keeps every hook it uses in place, so
- * further patches can chain.
+ * receives lamp light from the field instead of the point lights. Keeps every
+ * hook it uses in place, so further patches can chain.
  */
 export function applyLampField(shader: THREE.WebGLProgramParametersWithUniforms): void {
   Object.assign(shader.uniforms, lampFieldUniforms);
   shader.vertexShader = shader.vertexShader
     .replace('#include <common>', `#include <common>${VERTEX_PARS}`)
     .replace('#include <project_vertex>', `#include <project_vertex>${VERTEX}`);
+  if (LIGHTS_NO_POINT) shader.fragmentShader = shader.fragmentShader.replace('#include <lights_fragment_begin>', LIGHTS_NO_POINT);
   shader.fragmentShader = shader.fragmentShader
     .replace('#include <common>', `#include <common>${FRAGMENT_PARS}`)
     .replace('#include <aomap_fragment>', `${FRAGMENT_LIGHT}\n#include <aomap_fragment>`)

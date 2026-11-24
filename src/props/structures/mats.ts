@@ -422,7 +422,7 @@ export function lampGlow(): THREE.MeshStandardMaterial {
       emissiveIntensity: 0,
       transparent: false,
     });
-    // incandescent hue; ≈ 3.5–4 displayed at full night on tiers without bloom
+    // incandescent hue; ≈ 3.5–4 displayed at full night on every tier (bloom adds only a tight halo)
     glowColor(m, 1, 0.45, 0.13, 0.062);
     // ≥ 3 marks lamp glass for the props layer (halo sprites, light pools)
     m.userData.nightEmissive = 3.2;

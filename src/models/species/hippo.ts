@@ -201,6 +201,12 @@ const GUM = 0xc98583;
 const TONGUE = 0xb56d6b;
 const TOOTH = 0xe2d7bf;
 
+/** Flank creases: z where they cross y = 0.8 and their lean (dz per metre of height). */
+const FLANK_CREASES: [number, number][] = [
+  [0.6, -0.25],
+  [-0.72, 0.2],
+];
+
 function hippoCoat(eye: Vec3) {
   return (c: CoatSample): void => {
     const { x, y, z } = c;
@@ -217,19 +223,31 @@ function hippoCoat(eye: Vec3) {
     blendHex(c.color, 0x7a4b3a, smooth(0.15, 0.45, fbm(x * 3, y * 3, z * 3, 2, 103)) * 0.14);
     // broad warmer, browner patches on the flanks (no flat grey)
     blendHex(c.color, 0x6e5a4f, smooth(-0.05, 0.3, fbm(x * 0.8, y * 0.8, z * 0.8, 2, 105)) * 0.45 * smooth(0.7, 0.1, c.ny));
-    // wet mud from the pool on the lower flanks and legs: darker, glossier, ragged top edge
-    const wetTop = 1.0 + n * 0.2 + fbm(x * 4.5, y * 4.5, z * 4.5, 2, 106) * 0.14;
-    const wet = smooth(wetTop, wetTop - 0.2, y) * smooth(-0.95, -0.7, c.ny);
-    blendHex(c.color, 0x3b2f27, wet * 0.6);
+    // wet from the pool on the lower flanks and legs: a clearly darker, glossy
+    // band with a ragged, dripping top edge (the hippo's waterline)
+    const drip = fbm(x * 9, y * 3, z * 9, 2, 107);
+    const wetTop = 1.05 + n * 0.2 + fbm(x * 4.5, y * 4.5, z * 4.5, 2, 106) * 0.14 + drip * 0.08;
+    const wet = smooth(wetTop, wetTop - 0.12, y) * smooth(-0.95, -0.7, c.ny);
+    blendHex(c.color, 0x2f241d, wet * 0.75);
+    // the skin above it has dried to a paler, dusty grey, so the wet band stands out
+    blendHex(c.color, 0x7a6d64, smooth(0.04, 0.3, y - wetTop) * smooth(-0.3, 0.3, c.ny) * 0.3);
     c.color2.copy(c.color).multiplyScalar(0.62);
     c.w = 0;
-    c.gloss = 0.1 + 0.3 * wet;
+    c.gloss = 0.1 + 0.4 * wet;
+    // skin creases behind the elbows and in front of the thighs, where the barrel folds as the legs swing
+    for (const [zc, lean] of FLANK_CREASES) {
+      const d = z - zc - (y - 0.8) * lean;
+      if (Math.abs(d) < 0.07 && ax > 0.3) {
+        c.s = d / 0.1 + n * 0.1;
+        c.w = 0.16 * smooth(0.07, 0.02, Math.abs(d)) * smooth(0.45, 0.6, y) * smooth(1.2, 1.0, y);
+      }
+    }
     // deep skin folds across the stubby legs and the neck; the barrel stays smooth
     c.fold = Math.max(0.2, clamp01((c.pw('leg') + c.pw('foot')) * 1.3), c.pw('neck') * smooth(0.6, 0.9, z));
     // neck folds
     if (c.part === 'neck' || (c.pw('neck') > 0.3 && z > 0.8)) {
       c.s = (z - 0.95) / 0.075 + n * 0.8;
-      c.w = 0.1 * smooth(0.5, -0.2, c.ny) * smooth(0.75, 1.0, z);
+      c.w = 0.15 * smooth(0.6, -0.2, c.ny) * smooth(0.75, 1.0, z);
       blendHex(c.color2, 0x5a4a46, 0.4);
     }
     // eye turrets: pink rims
@@ -496,7 +514,8 @@ function design(ctx: DesignContext): CreatureDesign {
     },
     coat: hippoCoat(eye),
     // moist but not mirror-like: a glossier skin only reflects the sky and reads flat grey
-    look: { skin: 'wrinkled', pattern: 'stripes', roughness: 0.74, sheen: 0.05, grain: 0.012, bump: 0.12, mottle: 0.1 },
+    // bump 0.3: the neck and leg folds and the fine creases shade in enough to read at mid range
+    look: { skin: 'wrinkled', pattern: 'stripes', roughness: 0.74, sheen: 0.05, grain: 0.012, bump: 0.3, mottle: 0.1 },
     eyes: [{ bone: 'head', pos: eye, radius: 0.026, color: 0x2a1609 }],
     anim: driver(makeDriver(ctx.def.height, ctx.def.walkSpeed, ctx.def.runSpeed)),
     babyScale: 0.25,

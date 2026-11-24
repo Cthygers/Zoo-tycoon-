@@ -11,6 +11,7 @@ import { hashFloat } from '../core/rng';
 import { Terrain } from '../core/types';
 import type { World } from '../core/world';
 import { OBJECTS_BY_ID } from '../data/objects';
+import { crownCover } from './terrain';
 
 const CELL = 4; // metres
 const CANDIDATES_PER_M2 = 6;
@@ -120,6 +121,8 @@ export class GrassField {
   private stageCount = 0;
 
   private density = 1;
+  /** Tree crown cover per tile (terrain.ts crownCover), refreshed when the world changes. */
+  private cover: Float32Array | null = null;
   private radius = 40;
   private builtCenter = new THREE.Vector2(1e9, 1e9);
   private wantCenter = new THREE.Vector2();
@@ -233,7 +236,9 @@ export class GrassField {
         .replace(
           '#include <aomap_fragment>',
           `{
-            float occ = mix(0.45, 1.0, vGT);
+            // blade-base occlusion of the sky fill: kept mild so shaded lawn
+            // stays near the ground's own shade level (~20 % of sunlit)
+            float occ = mix(0.65, 1.0, vGT);
             reflectedLight.indirectDiffuse *= occ;
             reflectedLight.directDiffuse *= mix(0.7, 1.0, vGT);
             // thin-blade translucency when looking toward the sun
@@ -268,6 +273,7 @@ export class GrassField {
 
   markDirty(): void {
     this.dirty = true;
+    this.cover = null;
   }
 
   /**
@@ -312,6 +318,7 @@ export class GrassField {
     };
     this.stageCount = 0;
     this.dirty = false;
+    this.cover ??= crownCover(this.world);
   }
 
   private fillCell(cx: number, cz: number, center: THREE.Vector2) {
@@ -354,6 +361,9 @@ export class GrassField {
       if (fx > 1 - m && this.blocked(tx + 1, tz)) continue;
       if (fz < m && this.blocked(tx, tz - 1)) continue;
       if (fz > 1 - m && this.blocked(tx, tz + 1)) continue;
+      // thinner, shorter turf under tree crowns
+      const under = this.cover ? this.cover[ti] : 0;
+      if (under > 0 && hashFloat(cz - k, cx, 29) < under * 0.5) continue;
       const y = w.heightAt(px, pz);
       if (y < WATER_LEVEL + 0.08) continue;
       if (this.stageCount >= this.capacity) return;
@@ -364,7 +374,7 @@ export class GrassField {
       this.stagePos[j + 2] = pz;
       this.stagePos[j + 3] = hashFloat(cx + k, cz, 3) * Math.PI * 2;
       const hs = hashFloat(k, cx, cz + 11);
-      this.stagePar[j] = dry ? 1.7 + hs * 0.5 : 0.55 + hs * 0.35;
+      this.stagePar[j] = (dry ? 1.7 + hs * 0.5 : 0.55 + hs * 0.35) * (1 - 0.3 * under);
       this.stagePar[j + 1] = dry ? 1 : 0;
       this.stagePar[j + 2] = hashFloat(cz, k, cx + 5);
       this.stagePar[j + 3] = h / Math.max(this.density, 1e-3);

@@ -1,6 +1,7 @@
 // Guest outfits read as clothes (no skin-coloured or all-pale figures) and the
 // outfit rules draw nothing from the shared sim RNG, so seeded sims are unchanged;
-// the guest walk keeps a natural step; pachyderm skin folds sit on legs and trunks.
+// the guest walk keeps a natural step; pachyderm skin folds sit on legs and trunks;
+// the lion's mane is two-tone and its belly and inner legs are pale.
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { fitOutfit, hexToLab, looksLikeSkin, randomGuestAppearance } from '../src/sim/names';
@@ -9,7 +10,11 @@ import { CreatureFactory } from '../src/models';
 import { assetFromDesign } from '../src/models/assets';
 import { SPECIES_MODELS } from '../src/models/species';
 import { SPECIES_BY_ID } from '../src/data/species';
-import type { QualitySettings } from '../src/core/contracts';
+import type { QualitySettings, SimSave } from '../src/core/contracts';
+import { EventBus } from '../src/core/events';
+import { createSimulation } from '../src/sim';
+import type { Simulation } from '../src/sim/simulation';
+import { buildZoo, buyHerd, hire, newSim } from './sim-helpers';
 
 const L = (hex: number) => hexToLab(hex)[0];
 
@@ -58,6 +63,27 @@ describe('guest outfits', () => {
     expect(app.shirt).toBe(0xe4e8ea);
     expect(app.pants).toBe(0x3d6f78);
   });
+
+  it('re-fits guests loaded from a save made before the outfit rules', () => {
+    const { sim } = newSim(7);
+    buildZoo(sim);
+    buyHerd(sim, 'zebra', 3);
+    hire(sim);
+    sim.setSpeed(3);
+    while (sim.guests.size < 6 && sim.minuteOfDay < 15 * 60) sim.update(0.1);
+    expect(sim.guests.size).toBeGreaterThanOrEqual(6);
+    // the old palette picks: a tan top on tan skin over tan trousers
+    for (const g of sim.guests.values()) Object.assign(g.appearance, { skin: 0xb98260, shirt: 0x9b6b43, pants: 0x8c7b5e });
+    const save = JSON.parse(JSON.stringify(sim.serialize())) as SimSave;
+    const old = createSimulation(new EventBus(), 1) as Simulation;
+    old.load(save);
+    expect(old.guests.size).toBe(sim.guests.size);
+    for (const g of old.guests.values()) {
+      expect(looksLikeSkin(g.appearance.shirt, g.appearance.skin)).toBe(false);
+      expect(looksLikeSkin(g.appearance.pants, g.appearance.skin)).toBe(false);
+      expect(Math.abs(L(g.appearance.shirt) - L(g.appearance.pants))).toBeGreaterThanOrEqual(18);
+    }
+  }, 60_000);
 });
 
 const QUALITY: QualitySettings = { level: 'low', pixelRatio: 1, antialias: false, shadows: false, shadowMapSize: 1024, grassDensity: 0, postFX: false, detailDistance: 40, creatureDetail: 0 };
@@ -104,5 +130,39 @@ describe('pachyderm skin folds', () => {
     expect(lowLeg / lowLegN).toBeGreaterThan(0.8);
     expect(back / backN).toBeCloseTo(0.3, 1);
     expect(glossyFolds).toBe(0);
+  });
+});
+
+describe('lion coat', () => {
+  /** Mean baked luminance (linear albedo) of the vertices matching `where`. */
+  function regions(sex: 'M' | 'F') {
+    const design = SPECIES_MODELS.lion.design({ def: SPECIES_BY_ID.lion, sex, detail: 0 });
+    const geo = assetFromDesign(`lion-coat-${sex}`, design, 0).geometry;
+    const pos = geo.getAttribute('position'), col = geo.getAttribute('color'), nor = geo.getAttribute('normal');
+    const acc: Record<string, [number, number]> = {};
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i), nx = nor.getX(i), ny = nor.getY(i);
+      const lum = 0.2126 * col.getX(i) + 0.7152 * col.getY(i) + 0.0722 * col.getZ(i);
+      const add = (k: string) => { (acc[k] ??= [0, 0])[0] += lum; acc[k][1]++; };
+      if (y > 1.05 && z > 0.35 && z < 0.6) add('maneCrest');
+      if (z > 0.86 && y > 0.85 && y < 1.15 && Math.abs(x) > 0.18) add('maneRim');
+      if (Math.abs(x) > 0.14 && y > 0.75 && y < 0.88 && z > -0.2 && z < 0.1 && Math.abs(nx) > 0.6) add('flank');
+      if (y > 0.55 && y < 0.72 && z > -0.3 && z < 0.1 && ny < -0.2 && ny > -0.7) add('lowerFlank');
+      if (y < 0.5 && y > 0.15 && Math.sign(x) * nx < -0.4) add('innerLeg');
+      if (y < 0.5 && y > 0.15 && Math.sign(x) * nx > 0.4) add('outerLeg');
+    }
+    const r: Record<string, number> = {};
+    for (const [k, [sum, n]] of Object.entries(acc)) r[k] = sum / n;
+    return r;
+  }
+
+  it('gives the male a two-tone mane, darker than the coat, and both sexes a pale belly and inner legs', () => {
+    const m = regions('M');
+    expect(m.maneCrest).toBeLessThan(m.flank * 0.5);
+    expect(m.maneRim).toBeGreaterThan(m.maneCrest * 1.6);
+    for (const r of [m, regions('F')]) {
+      expect(r.lowerFlank).toBeGreaterThan(r.flank);
+      expect(r.innerLeg).toBeGreaterThan(r.outerLeg);
+    }
   });
 });

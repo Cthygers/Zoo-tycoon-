@@ -471,16 +471,19 @@ export function barkTextures(kind: BarkKind): BarkTex {
 /**
  * Bark material per kind (cached). Trunk sway is slight. `fade` = dissolve
  * near the camera with the foliage (trunks, stems); off for ground-level wood.
+ * `crown` = the bark of a plant whose crown can drop out of a close view: it
+ * goes with the crown (every geometry drawn with it needs geo.ts addCrownFade).
  */
-export function barkMat(kind: BarkKind, sway = 0, fade = true): THREE.MeshStandardMaterial {
+export function barkMat(kind: BarkKind, sway = 0, fade = true, crown = false): THREE.MeshStandardMaterial {
   const t = barkTextures(kind);
   const opts: { sway?: number; roughness?: number; normalScale?: number; fade?: boolean } = { sway, fade };
   if (kind === 'birch') opts.roughness = 0.75;
   if (kind === 'bamboo') opts.roughness = 0.45;
   if (kind === 'cactus') opts.roughness = 0.6;
   if (kind === 'baobab') opts.roughness = 0.84;
-  const m = barkMaterial(`${kind}:${sway}${fade ? '' : ':nofade'}`, t.map, t.normal, opts);
+  const m = barkMaterial(`${kind}:${sway}${fade ? '' : ':nofade'}${crown ? ':crown' : ''}`, t.map, t.normal, opts);
   // the near-camera view hole cuts limbs, never this much of the trunk (props/lod/fade.ts)
   if (kind === 'baobab') m.userData.trunkRadius = 2;
+  if (crown) m.userData.crownFade = true;
   return m;
 }

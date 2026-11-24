@@ -84,6 +84,8 @@ class GameUI implements GameUIHandle {
   private bottomTop = window.innerHeight;
   /** Bottom edge of the top bar (refreshed with bottomTop): money popups fade out before it. */
   private topBottom = 0;
+  /** The goal pill and tour bubble over the view (refreshed with bottomTop): money popups fade out before them too. */
+  private popupCovers: ScreenRect[] = [];
   private disposed = false;
   private backArmed = false;
   private selectNextFrame: SelectionRef | null = null;
@@ -383,12 +385,10 @@ class GameUI implements GameUIHandle {
     let { x0, x1 } = a;
     let top = a.y0 + 4;
     let bottom = a.y1;
-    const pill = this.coach.pill;
-    const obstacles: (ScreenRect | null)[] = [getComputedStyle(pill).visibility !== 'hidden' ? pill.getBoundingClientRect() : null, this.coach.rect];
-    for (const r of obstacles) {
+    for (const r of this.viewOverlays()) {
       const half = Math.min(TOAST_COL_MAX, x1 - x0) / 2;
       const mid = (x0 + x1) / 2;
-      if (!r || r.right + TOAST_GAP <= mid - half || r.left - TOAST_GAP >= mid + half) continue;
+      if (r.right + TOAST_GAP <= mid - half || r.left - TOAST_GAP >= mid + half) continue;
       const leftRoom = r.left - TOAST_GAP - x0;
       const rightRoom = x1 - r.right - TOAST_GAP;
       if (r.top > (a.y0 + a.y1) / 2) bottom = Math.min(bottom, r.top);
@@ -403,6 +403,15 @@ class GameUI implements GameUIHandle {
     const room = bottom - top - 6;
     this.cele.setRoom(room);
     this.toasts.setRoom(room);
+  }
+
+  /** The next-goal pill and the tour's bubble where they float over the view. */
+  private viewOverlays(): ScreenRect[] {
+    const out: ScreenRect[] = [];
+    const pill = this.coach.pill;
+    if (getComputedStyle(pill).visibility !== 'hidden') out.push(pill.getBoundingClientRect());
+    if (this.coach.rect) out.push(this.coach.rect);
+    return out;
   }
 
   /** Screen rect (px) of what is being built right now: the tool's preview and its cost label. */
@@ -756,7 +765,7 @@ class GameUI implements GameUIHandle {
     this.info.update(dt);
     this.zoo.update(dt);
     this.coach.update(dt);
-    this.popups.update(dt, this.vw, this.vh, this.topBottom);
+    this.popups.update(dt, this.vw, this.vh, this.topBottom, this.popupCovers);
     this.costLabel.update(this.vw, this.vh, this.bottomTop - 6);
     this.affordAcc += dt;
     if (this.affordAcc > 0.25) {
@@ -769,6 +778,7 @@ class GameUI implements GameUIHandle {
       // top edge of the bottom dock (+ confirm bar / tool bar): a cheap 4 Hz layout read
       this.bottomTop = this.dock.root.offsetTop || this.vh;
       this.topBottom = this.hud.root.offsetTop + this.hud.root.offsetHeight;
+      this.popupCovers = this.viewOverlays();
       this.layoutToasts();
     }
   }

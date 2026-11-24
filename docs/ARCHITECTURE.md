@@ -45,6 +45,11 @@ Modules communicate only through `src/core/contracts.ts`, the shared types in
 * `CommandResult.cost` is negative for refunds (booked as income); `warning` on a successful or dry-run result flags an outcome the player probably doesn't want (e.g. fences that won't make a habitat, removing a fence that opens a habitat, an animal put in a habitat that is unsafe or poor for it); `severity: 'confirm'` marks a warning serious enough that the UI asks before going ahead (a dialog for bulldoze and animal moves/adoptions, 'Paint anyway' in amber for terrain that floods non-swimmers), and `shortWarning` (adoptions and moves that ask) is its text cut down for the confirm bar while the dialog shows it in full; `cutsEntrance` on a bulldoze result means the removal cuts the entrance off from every exhibit, which closes the gate until it is reconnected; `reason` on a successful result is an informational note.
 * Per frame order (main.ts): sim.update → ctx.setTimeOfDay → ui.update → views.update →
   creatures.update(camera) → props.update → audio.update → ctx.update → ctx.render.
+* Draw order around water (`renderOrder`): the terrain and the near outer ring draw at −2, the
+  pond murk layers (depth-only copies of the water surface, `src/render/water.ts`) at −1,
+  creatures and props at 0 and the water surface at 10. The murk layers hide whatever stands more
+  than ~20 cm under water (wading legs fade out), so any solid mesh that must stay visible
+  deeper than ~20 cm under water needs a `renderOrder` below −1.
 
 ## Art direction — "realistic"
 

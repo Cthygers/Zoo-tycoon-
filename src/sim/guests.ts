@@ -90,7 +90,7 @@ const ENTRANCE_CUT = 'The entrance path is cut — reconnect it to open the gate
 /** Visitors turned away in a day before the "zoo full" message. */
 const FULL_NOTE_AT = 10;
 /** The entrance plaza, where the turned-away crowd is (message focus). */
-const GATE_SPOT = { x: (ENTRANCE_TILE.x + 0.5) * TILE, z: (ENTRANCE_TILE.z - 0.5) * TILE };
+export const GATE_SPOT = { x: (ENTRANCE_TILE.x + 0.5) * TILE, z: (ENTRANCE_TILE.z - 0.5) * TILE };
 
 /** Party-wide minimum of the basic needs (filled by partyNeeds). */
 interface PartyNeeds {
@@ -661,6 +661,8 @@ export class GuestSystem {
     for (const g of rel) this.afterRelease(g);
     rel.length = 0;
     for (const g of sim.guests.values()) {
+      // guests saved before the outfit rules may wear skin-coloured or same-tone clothes
+      fitOutfit(g.appearance);
       if (g.leader && !sim.guests.has(g.leader)) {
         g.leader = 0;
         this.resumeWalking(g);

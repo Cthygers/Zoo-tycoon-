@@ -1,11 +1,12 @@
 // Zoo rating (0..100, smoothed) and the progressive objective list.
 
-import { MAP_W, TILE } from '../core/constants';
+import { GAME_MINUTES_PER_SECOND, MAP_W, MINUTES_PER_DAY, TILE } from '../core/constants';
 import type { GoalProgress } from '../core/contracts';
 import { fmtMoney } from '../core/format';
 import type { Objective } from '../core/types';
 import { OBJECTS_BY_ID } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
+import { GATE_SPOT } from './guests';
 import type { Simulation } from './simulation';
 
 interface ObjectiveDef {
@@ -59,6 +60,13 @@ const OBJECTIVES: ObjectiveDef[] = [
 export function createObjectives(): Objective[] {
   return OBJECTIVES.map((o) => ({ id: o.id, text: o.text, done: false, reward: o.reward }));
 }
+
+/**
+ * Guests only complain while they are in the zoo, and some complaints only at the busiest hour,
+ * so one that comes back within a day and a half (simulated seconds) is the same problem as
+ * the day before: a toast when it starts, then the log.
+ */
+const COMPLAINT_LASTS = (1.5 * MINUTES_PER_DAY) / GAME_MINUTES_PER_SECOND;
 
 /** Guest complaint counters (reset after each report window). */
 export interface Complaints {
@@ -401,7 +409,7 @@ export class Progress {
     if (this.litterParties.size >= thr) this.reportLitter();
     if (c.noAnimals >= Math.max(2, thr * 0.5)) sim.notify('cmp-noanimals', 'Guests are disappointed: there are no animals to see yet!', 'warn', undefined, 150);
     if (c.price >= thr)
-      sim.notify('cmp-price', `Many visitors turned away at the gate — they think about ${fmtMoney(sim.guestSys.fairPrice)} would be fair.`, 'warn', undefined, 150);
+      sim.remind('cmp-price', `Many visitors turned away at the gate — they think about ${fmtMoney(sim.guestSys.fairPrice)} would be fair.`, 'warn', GATE_SPOT, 150, COMPLAINT_LASTS);
     this.clearComplaints();
   }
 
@@ -417,6 +425,6 @@ export class Progress {
       : t >= 0 && !sim.binNear[t]
         ? 'Guests are disgusted by the litter here — put litter bins along this path.'
         : 'Guests are disgusted by the litter here — your groundskeepers can’t keep up, hire another.';
-    sim.notify('cmp-litter', text, 'warn', focus, 150);
+    sim.remind('cmp-litter', text, 'warn', focus, 150, COMPLAINT_LASTS);
   }
 }

@@ -5,7 +5,7 @@
 import * as THREE from 'three';
 import type { SimMessage } from '../core/contracts';
 import type { NotifyKind } from '../core/events';
-import { el, escapeHtml, fmtMoney, setText, swallowPointer, toggleClass } from './dom';
+import { el, escapeHtml, fmtMoney, setText, swallowPointer, toggleClass, type ScreenRect } from './dom';
 import { icon, type IconName } from './icons';
 import { cue } from './sound';
 
@@ -328,13 +328,25 @@ interface Popup {
   z: number;
   age: number;
   active: boolean;
+  /** Half the width (px) of its text, estimated from the number of characters. */
+  halfW: number;
 }
 
 const _v = new THREE.Vector3();
 const POPUP_LIFE = 1.7;
-/** A money popup is invisible this close (px, centre to edge) to the top bar, and fades in over the next POPUP_FADE px. */
-const POPUP_CLEAR = 14;
+/** Half the height (px) of a popup's text, and half its width per character (15 px bold). */
+const POPUP_HALF_H = 10;
+const POPUP_HALF_W_PER_CHAR = 4.5;
+/** A money popup is invisible this close (px, text edge to edge) to the HUD, and fades in over the next POPUP_FADE px. */
+const POPUP_CLEAR = 4;
 const POPUP_FADE = 26;
+
+/** Gap (px) between a popup's text box centred at (sx, sy) and a screen rect; negative when they overlap. */
+function popupGap(r: ScreenRect, sx: number, sy: number, halfW: number): number {
+  const gx = Math.max(r.left - sx, sx - r.right) - halfW;
+  const gy = Math.max(r.top - sy, sy - r.bottom) - POPUP_HALF_H;
+  return Math.max(gx, gy);
+}
 
 /** Pooled floating money labels anchored to world positions. */
 export class MoneyPopups {
@@ -346,7 +358,7 @@ export class MoneyPopups {
     for (let i = 0; i < 14; i++) {
       const e = el('div', 'wh-popup');
       this.root.append(e);
-      this.pool.push({ el: e, x: 0, y: 0, z: 0, age: 0, active: false });
+      this.pool.push({ el: e, x: 0, y: 0, z: 0, age: 0, active: false, halfW: 0 });
     }
   }
 
@@ -360,13 +372,18 @@ export class MoneyPopups {
     p.x = x;
     p.z = z;
     p.y = this.heightAt(x, z) + 2.2;
-    p.el.textContent = fmtMoney(amount, { sign: true });
+    const text = fmtMoney(amount, { sign: true });
+    p.el.textContent = text;
+    p.halfW = text.length * POPUP_HALF_W_PER_CHAR;
     p.el.className = `wh-popup ${amount > 0 ? 'plus' : 'minus'}`;
     p.el.style.display = 'block';
   }
 
-  /** `top`: bottom edge (px) of the top bar; a popup rising towards it fades out first. */
-  update(dt: number, width: number, height: number, top = 0): void {
+  /**
+   * `top`: bottom edge (px) of the top bar; `covers`: other HUD rects over the view (the next-goal
+   * pill, the tour's bubble). A popup rising towards any of them fades out first.
+   */
+  update(dt: number, width: number, height: number, top = 0, covers: readonly ScreenRect[] = []): void {
     if (!this.activeCount) return;
     for (const p of this.pool) {
       if (!p.active) continue;
@@ -385,8 +402,10 @@ export class MoneyPopups {
       const sx = (_v.x * 0.5 + 0.5) * width;
       const sy = (1 - (_v.y * 0.5 + 0.5)) * height;
       const t = p.age / POPUP_LIFE;
-      // gone before its text (about ±10 px around sy) reaches the top bar's chips
-      const clear = Math.max(0, Math.min(1, (sy - top - POPUP_CLEAR) / POPUP_FADE));
+      // gone before its text reaches the top bar's chips or a pill under it
+      let gap = sy - top - POPUP_HALF_H;
+      for (const r of covers) gap = Math.min(gap, popupGap(r, sx, sy, p.halfW));
+      const clear = Math.max(0, Math.min(1, (gap - POPUP_CLEAR) / POPUP_FADE));
       const a = (t < 0.15 ? t / 0.15 : t > 0.65 ? 1 - (t - 0.65) / 0.35 : 1) * clear;
       const s = 0.85 + Math.min(1, p.age * 6) * 0.15;
       p.el.style.opacity = a.toFixed(3);

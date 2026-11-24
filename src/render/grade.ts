@@ -33,12 +33,14 @@ import * as THREE from 'three';
 /** Exposure at which mesopic desaturation starts / is complete. */
 export const MESOPIC_EXPOSURE = [4.5, 10.0] as const;
 /**
- * Veiling glare in daylight (displayed units, ≈ 3 % of sunlit ground): lens
+ * Veiling glare in daylight (displayed units, ≈ 0.5 % of sunlit ground): lens
  * and eye scatter lift the deepest shade a little, where ACES's toe would
- * otherwise crush dark lawn and coats in shadow to black. Fades out over
- * FLARE_EXPOSURE (golden hour → blue hour), so night keeps its blacks.
+ * otherwise crush dark lawn and coats in shadow to black. Kept small: the
+ * daylight fill (context.ts) already lifts shade, and more glare greys every
+ * dark pixel into a milky veil. Fades out over FLARE_EXPOSURE (golden hour →
+ * blue hour), so night keeps its blacks.
  */
-export const DAY_FLARE = 0.008;
+export const DAY_FLARE = 0.0015;
 export const FLARE_EXPOSURE = [3.5, 6.0] as const;
 
 const CUSTOM_TM = /* glsl */ `#define WH_LAMP_LIT

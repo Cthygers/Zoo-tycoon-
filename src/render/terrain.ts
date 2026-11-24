@@ -16,6 +16,7 @@ import { MAP_H, MAP_W, TILE } from '../core/constants';
 import type { TileRect } from '../core/events';
 import { Terrain } from '../core/types';
 import type { World } from '../core/world';
+import { OBJECTS_BY_ID } from '../data/objects';
 
 const CX = MAP_W + 1;
 const CZ = MAP_H + 1;
@@ -84,10 +85,37 @@ export function lawnShare(world: World, x: number, z: number): number {
   return n ? lawn / n : 0;
 }
 
+/** Crown radius (tiles) of a one-tile tree for crownCover; bigger footprints spread wider. */
+const CROWN_R = 2;
+
+/**
+ * How much each tile lies under a tree crown (0..1, row-major MAP_W × MAP_H):
+ * 1 at the trunk, fading out at the crown's edge. Lawn there gets less sun
+ * and more traffic (animals and guests rest in the shade), so it is drawn
+ * thinner and worn.
+ */
+export function crownCover(world: World): Float32Array {
+  const out = new Float32Array(MAP_W * MAP_H);
+  for (const o of world.objects.values()) {
+    const def = OBJECTS_BY_ID[o.defId];
+    if (def?.category !== 'tree') continue;
+    const [w, d] = o.rot % 2 ? [def.size[1], def.size[0]] : def.size;
+    const cx = o.tx + w / 2,
+      cz = o.tz + d / 2;
+    const r = CROWN_R + (Math.max(w, d) - 1) * 0.6;
+    for (let z = Math.max(0, Math.floor(cz - r)); z <= Math.min(MAP_H - 1, Math.floor(cz + r)); z++)
+      for (let x = Math.max(0, Math.floor(cx - r)); x <= Math.min(MAP_W - 1, Math.floor(cx + r)); x++) {
+        const k = 1 - Math.hypot(x + 0.5 - cx, z + 0.5 - cz) / r;
+        if (k > out[z * MAP_W + x]) out[z * MAP_W + x] = Math.min(1, k * 1.4);
+      }
+  }
+  return out;
+}
+
 /**
  * Per-tile data for the ground shader (RGBA8, nearest): r = terrain type,
- * g = path type, b = 255 under objects, a = lake bed look (LakeBed, bits 0–1)
- * | lawn share × 63 (lawnShare, bits 2–7).
+ * g = path type, b = tree crown cover × 255 (crownCover), a = lake bed look
+ * (LakeBed, bits 0–1) | lawn share × 63 (lawnShare, bits 2–7).
  */
 export class TileIndexTexture {
   readonly texture: THREE.DataTexture;
@@ -108,12 +136,13 @@ export class TileIndexTexture {
       x1 = Math.min(MAP_W - 1, Math.max(rect.x0, rect.x1));
     const z0 = Math.max(0, Math.min(rect.z0, rect.z1)),
       z1 = Math.min(MAP_H - 1, Math.max(rect.z0, rect.z1));
+    const cover = crownCover(w);
     for (let z = z0; z <= z1; z++)
       for (let x = x0; x <= x1; x++) {
         const i = z * MAP_W + x;
         this.data[i * 4] = w.terrain[i];
         this.data[i * 4 + 1] = w.path[i];
-        this.data[i * 4 + 2] = w.objectGrid[i] ? 255 : 0;
+        this.data[i * 4 + 2] = Math.round(cover[i] * 255);
       }
     // both depend on tiles up to BED_R away
     for (let z = Math.max(0, z0 - BED_R); z <= Math.min(MAP_H - 1, z1 + BED_R); z++)

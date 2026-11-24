@@ -66,26 +66,49 @@ const MOON_TINT = new THREE.Color(0.52, 0.68, 1.0);
  * single-scattering sky lacks multiple scattering and the light bounced off
  * sunlit surroundings, so shade came out at 4–9 % of sunlit on screen (real
  * clear-sky shade: ≈ 15–25 %). Sky side: this much more sky irradiance,
- * desaturated (multiply scattered and bounced light is far less blue than the
- * clear sky), plus a share of the direct sun scattered back by everything
- * sunlit around. Ground side: the sunlit ground's bounce (neutral, warm).
+ * half desaturated (multiply scattered and bounced light is less blue than
+ * the clear sky, but shade still reads cool), plus a share of the direct sun
+ * scattered back by everything sunlit around. Ground side: the sunlit
+ * ground's bounce (neutral, warm).
  */
-const SKY_FILL = 0.9;
-const SKY_FILL_DESAT = 0.7;
+const SKY_FILL = 1.0;
+const SKY_FILL_DESAT = 0.5;
 const SUN_FILL = 0.05;
-const BOUNCE_ALBEDO = new THREE.Color(0.2, 0.18, 0.15);
+/**
+ * Ground bounce albedo: below that of open sunlit ground, since much of what
+ * faces down (canopy undersides, bellies) sees shaded ground.
+ */
+const BOUNCE_ALBEDO = new THREE.Color(0.16, 0.145, 0.12);
 /** Floor of the environment's brightness scale in full daylight (see applyEnvIntensity). */
 const ENV_DAY_MIN = 0.6;
 /**
  * The sun path is symmetric about noon, the air is not: morning light is
- * cooler and hazier (more fill, denser haze), afternoon light warmer. Sun
- * colour factors (≈ luminance neutral) at full morning / afternoon.
+ * cooler and a little hazier, afternoon light warmer. Sun colour factors
+ * (≈ luminance neutral): WARM_SUN for the afternoon and for the low morning
+ * sun, which reads golden like the evening one; it turns to the cool
+ * MORNING_SUN over MORNING_SUN_ELEV (deg).
  */
 const MORNING_SUN = new THREE.Color(0.95, 1.0, 1.08);
-const AFTERNOON_SUN = new THREE.Color(1.07, 1.0, 0.86);
+const MORNING_SUN_ELEV = [15, 25] as const;
+const WARM_SUN = new THREE.Color(1.07, 1.0, 0.86);
 /** Extra haze (fog density share) and daylight fill in the full morning. */
-const MORNING_HAZE = 0.7;
+const MORNING_HAZE = 0.35;
 const MORNING_FILL = 0.25;
+/** Share of the fill's desaturation the clear morning air drops: cool morning shade under a warm sun. */
+const MORNING_COOL = 0.5;
+/**
+ * Displayed-brightness lift of the low morning sun (≈ 10–20°): with the same
+ * B_TABLE as the evening, the first hours read dim and murky instead of fresh.
+ */
+const MORNING_LIFT = 0.15;
+/**
+ * Moonlight fill (hemisphere light) at night: the moonlit sky and ground
+ * light what the moon's beam misses — the backs and shaded sides of people
+ * and animals, which otherwise get only the faint night sky and show as black
+ * cut-outs against moonlit paving. Sky side: this share of the moon's
+ * irradiance on horizontal ground; ground side: its bounce (BOUNCE_ALBEDO).
+ */
+const MOON_FILL = 0.3;
 /** Blue-hour sky colour (luminance 1), see the sky shader's uTwilight. */
 const TWILIGHT_BLUE = new THREE.Color(0.646, 0.999, 2.056);
 
@@ -281,8 +304,40 @@ const scratchFill = new THREE.Color();
 export function daylightFill(skyIrr: THREE.Color, sunH: THREE.Color, day: number, morning: number, sky: THREE.Color, ground: THREE.Color): void {
   sky.copy(skyIrr).multiplyScalar((SKY_FILL + MORNING_FILL * morning) * day);
   const l = luminance(sky);
-  sky.lerp(scratchFill.setRGB(l, l, l), SKY_FILL_DESAT).add(scratchFill.copy(sunH).multiplyScalar(SUN_FILL * day));
+  const desat = SKY_FILL_DESAT * (1 - MORNING_COOL * morning);
+  sky.lerp(scratchFill.setRGB(l, l, l), desat).add(scratchFill.copy(sunH).multiplyScalar(SUN_FILL * day));
   ground.copy(sunH).add(skyIrr).multiply(BOUNCE_ALBEDO).multiplyScalar(day);
+}
+
+/**
+ * Moonlight fill of the hemisphere light (MOON_FILL) for the moon's
+ * irradiance on horizontal ground `moonH`: sky side to `sky`, the moonlit
+ * ground's bounce to `ground`. Both are black while the moon is down.
+ */
+export function moonFill(moonH: THREE.Color, sky: THREE.Color, ground: THREE.Color): void {
+  sky.copy(moonH).multiplyScalar(MOON_FILL);
+  ground.copy(moonH).multiply(BOUNCE_ALBEDO);
+}
+
+/**
+ * Morning / afternoon character at clock hour `hour` and sun elevation `se`
+ * (deg): writes the sun colour factor to `sunTint` and returns the morning
+ * share (0…1) that drives the extra haze, the cool fill and the lift.
+ */
+export function airOfDay(hour: number, se: number, sunTint: THREE.Color): number {
+  const morning = hour < SOLAR_NOON_H ? 1 - smooth01(9, 11, hour) : 0;
+  const afternoon = hour > SOLAR_NOON_H ? smooth01(13.5, 17, hour) : 0;
+  const high = smooth01(MORNING_SUN_ELEV[0], MORNING_SUN_ELEV[1], se);
+  sunTint.setRGB(1, 1, 1).lerp(WARM_SUN, Math.max(afternoon, morning * (1 - high))).lerp(MORNING_SUN, morning * high);
+  return morning;
+}
+
+/**
+ * Displayed-brightness factor of the morning (MORNING_LIFT) at sun elevation
+ * `se` (deg) and morning share `morning` (0…1).
+ */
+export function morningLift(se: number, morning: number): number {
+  return 1 + MORNING_LIFT * morning * smooth01(2, 10, se) * (1 - smooth01(20, 30, se));
 }
 
 /** Per-tier environment detail (the contract's QualitySettings stay generic). */
@@ -398,6 +453,9 @@ export class RenderContext implements IRenderContext {
   /** Daylight fill on the hemisphere light's sky / ground side (see daylightFill). */
   private dayFill = new THREE.Color();
   private bounce = new THREE.Color();
+  /** Moonlight fill on the hemisphere light's sky / ground side (see moonFill). */
+  private nightFill = new THREE.Color();
+  private nightBounce = new THREE.Color();
   private mountainAmb = new THREE.Color();
   private tmpV = new THREE.Vector3();
   private tmpV2 = new THREE.Vector3();
@@ -655,10 +713,8 @@ export class RenderContext implements IRenderContext {
     const dl = daylight(atm, sunElev, this.sunCol);
     const { skyE, sunLight } = dl;
     // morning / afternoon character (MORNING_SUN …)
-    const hour = this.clockMinute / 60;
-    const morning = hour < SOLAR_NOON_H ? 1 - smooth01(9, 11, hour) : 0;
-    const afternoon = hour > SOLAR_NOON_H ? smooth01(13.5, 17, hour) : 0;
-    this.sunCol.multiply(this.tmpC.setRGB(1, 1, 1).lerp(MORNING_SUN, morning).lerp(AFTERNOON_SUN, afternoon));
+    const morning = airOfDay(this.clockMinute / 60, se, this.tmpC);
+    this.sunCol.multiply(this.tmpC);
     this.fog.density = FOG_DENSITY * (1 + MORNING_HAZE * morning * (1 - night));
 
     // ---- moon: fades in as the sky darkens, blue-tinted (night grade desaturates further)
@@ -722,11 +778,12 @@ export class RenderContext implements IRenderContext {
     this.fogHDR.add(this.tmpC.copy(nightSky).multiplyScalar(1.5)).add(this.tmpC2.copy(u.uHorizonGlow.value).multiplyScalar(0.3));
 
     // hemisphere fill: a faint base (deep shadows, env-less materials) plus the
-    // daylight fill; night keeps the moonlit look it was tuned for
+    // daylight fill by day and the moonlight fill by night
     const sunH = this.tmpC2.copy(this.sun.color).multiplyScalar(this.sun.intensity * Math.max(this.lightDir.y, 0));
     daylightFill(skyIrr, sunH, 1 - night, morning, this.dayFill, this.bounce);
-    this.hemi.color.copy(skyIrr).multiplyScalar(0.25 / Math.PI).add(this.dayFill);
-    this.hemi.groundColor.copy(u.uGround.value).multiplyScalar(0.6).add(this.bounce);
+    moonFill(this.tmpC.copy(this.moonCol).multiplyScalar(Math.max(this.moonDir.y, 0)), this.nightFill, this.nightBounce);
+    this.hemi.color.copy(skyIrr).multiplyScalar(0.25 / Math.PI).add(this.dayFill).add(this.nightFill);
+    this.hemi.groundColor.copy(u.uGround.value).multiplyScalar(0.6).add(this.bounce).add(this.nightBounce);
     this.hemi.intensity = 1;
 
     // water: reflected banks ≈ dark foliage lit by sky + sun, blended with haze
@@ -759,9 +816,10 @@ export class RenderContext implements IRenderContext {
     this.grass.uniforms.uSunCol.value.copy(this.sun.color).multiplyScalar(this.sun.intensity);
 
     // ---- exposure: displayed brightness per sun elevation (B_TABLE) / scene light
-    // (the fill lights the metered ground too: sunlit ground keeps its brightness)
+    // (the daylight fill lights the metered ground too: sunlit ground keeps its
+    // brightness; the moon fill is not metered, it lifts what the beam misses)
     const E = Math.max(dl.sunLumMeter, moonLum) + luminance(skyIrr) + luminance(this.dayFill) + 1e-5;
-    this.targetExposure = Math.min(Math.max(dl.displayB / E, 0.7), 20);
+    this.targetExposure = Math.min(Math.max((dl.displayB * morningLift(se, morning)) / E, 0.7), 20);
 
     // environment re-capture (≈50 passes) only every few degrees of sun motion;
     // in between its brightness follows the sky (applyEnvIntensity)

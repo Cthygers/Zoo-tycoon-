@@ -94,7 +94,10 @@ Look texels:
   vertex (`vLampLight`) adds warm lamp irradiance before `<aomap_fragment>` and
   marks lamp-lit pixels for the night grade (`whLampLit`, or HDR alpha on the
   post-FX tier). Keep the hooks `<project_vertex>`, `<aomap_fragment>`,
-  `<tonemapping_fragment>`, `<opaque_fragment>` in place.
+  `<tonemapping_fragment>`, `<opaque_fragment>` in place. It also inlines
+  `<lights_fragment_begin>` without the point-light loop (the field replaces
+  the high tier's lamp point lights on figures), so later patches must not
+  look for that include.
 * **New per-vertex attribute** (coat baker): nothing to do. LOD meshes copy
   every attribute of level 0 (`lod/simplify.ts`), BatchedMesh requires all
   levels of a variant to share the attribute set — they do.

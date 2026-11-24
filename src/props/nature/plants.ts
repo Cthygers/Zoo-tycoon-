@@ -84,7 +84,7 @@ function thornBush(variant: number, lod: boolean): THREE.Group {
   (lod ? lodCards(0.25) : cards).emit(leaves, crown, 0.75, leafAO(0.45));
   const g = groupOf([
     // tree acacia bark / shared tree foliage: no extra batches for bushes
-    [bark, barkMat('acacia', 0.003), 'bark'],
+    [bark, barkMat('acacia', 0.003, true, true), 'bark'],
     [leaves, leafMaterial('trees'), 'leaves'],
   ]);
   addCrownFade(g, crown);

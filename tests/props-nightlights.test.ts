@@ -121,4 +121,29 @@ describe('lamp light on creatures', () => {
     // the lamp light lands before the lighting is summed up
     expect(shader.fragmentShader.indexOf('uLampLight * (')).toBeLessThan(shader.fragmentShader.indexOf('#include <aomap_fragment>'));
   });
+
+  it('takes lamp light from the field only: the real point lights skip creatures, sun and moon still reach them', () => {
+    const shader = {
+      uniforms: {},
+      vertexShader: THREE.ShaderLib.physical.vertexShader,
+      fragmentShader: THREE.ShaderLib.physical.fragmentShader,
+    } as unknown as THREE.WebGLProgramParametersWithUniforms;
+    applyLampField(shader);
+    expect(shader.fragmentShader).not.toContain('#include <lights_fragment_begin>');
+    expect(shader.fragmentShader).not.toContain('#if ( NUM_POINT_LIGHTS > 0 ) && defined( RE_Direct )');
+    expect(shader.fragmentShader).toContain('#if ( NUM_DIR_LIGHTS > 0 ) && defined( RE_Direct )');
+    expect(shader.fragmentShader).toContain('getHemisphereLightIrradiance');
+  });
+
+  it('marks only figures the pool visibly lights for the colour (lamp-lit) grade', () => {
+    const shader = {
+      uniforms: {},
+      vertexShader: THREE.ShaderLib.physical.vertexShader,
+      fragmentShader: THREE.ShaderLib.physical.fragmentShader,
+    } as unknown as THREE.WebGLProgramParametersWithUniforms;
+    applyLampField(shader);
+    expect(shader.fragmentShader).toContain('whLampLit = smoothstep(0.15, 0.6, vLampLight) * uLampMark');
+    // HDR target: the same linear mark as the pool on the ground (nightlights.ts)
+    expect(shader.fragmentShader).toContain('gl_FragColor.a += vLampLight * uLampMark');
+  });
 });

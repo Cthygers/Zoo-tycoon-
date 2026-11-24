@@ -445,16 +445,10 @@ export class PropsLayer implements IPropsLayer {
     if (typeof ne === 'number' && !this.nightSet.has(m) && (m as THREE.MeshStandardMaterial).emissive) {
       const sm = m as THREE.MeshStandardMaterial;
       if (sm.emissive.r + sm.emissive.g + sm.emissive.b === 0) sm.emissive.copy(DEFAULT_GLOW);
-      sm.emissiveIntensity = Math.max(this.nightLevel, 0) * this.glowOf(ne);
+      sm.emissiveIntensity = Math.max(this.nightLevel, 0) * ne;
       this.nightSet.add(m);
       this.nightMats.push(sm);
     }
-  }
-
-  /** Emissive intensity at full night for a material's nightEmissive. */
-  private glowOf(ne: number): number {
-    // lamp glass / bulbs: tame on bloom tiers so bloom halos stay soft
-    return ne >= 3 ? ne * this.tier.lampGlow : ne;
   }
 
   /**
@@ -796,7 +790,7 @@ export class PropsLayer implements IPropsLayer {
       this.nightLevel = nightFactor;
       // moonlit crowns: no light through the leaves, no silvery sheen (nature/mats.ts)
       setNatureNight(nightFactor);
-      for (const m of this.nightMats) m.emissiveIntensity = nightFactor * this.glowOf(m.userData.nightEmissive as number);
+      for (const m of this.nightMats) m.emissiveIntensity = nightFactor * (m.userData.nightEmissive as number);
     }
 
     // unique props
@@ -991,7 +985,6 @@ export class PropsLayer implements IPropsLayer {
     this.night.setPointLights(this.tier.pointLights);
     this.night.setWarmFill(!quality.postFX);
     for (const b of this.batchList) b.setShadows(quality.shadows);
-    for (const m of this.nightMats) m.emissiveIntensity = Math.max(this.nightLevel, 0) * this.glowOf(m.userData.nightEmissive as number);
     for (const m of this.fadeMats) {
       if (m.alphaToCoverage === quality.antialias) continue;
       m.alphaToCoverage = quality.antialias;

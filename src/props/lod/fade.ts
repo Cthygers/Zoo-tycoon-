@@ -9,13 +9,16 @@
 //   - any vertex touching the lens (small sphere), and
 //   - geometry inside a cylinder around the camera → focus line, in front of
 //     the focus (a see-through hole to the subject).
-// Three flavours, chosen by material.userData (see registry.ts):
-//   crownFade = true  tree foliage (leaf cards / fronds with crown data): all terms;
-//   foliage = true    other leaves, fronds, stems: all but the crown term;
-//   fadeNear = true   solid parts (bark, cactus): the whole-instance term, plus
-//                     the view hole on limbs (above LIMB_Y and beyond the
-//                     material's userData.trunkRadius from the trunk axis;
-//                     the trunk stays).
+// Four flavours, chosen by material.userData (see registry.ts):
+//   foliage + crownFade   tree foliage (leaf cards / fronds with crown data): all terms;
+//   foliage               other leaves, fronds, stems: all but the crown term;
+//   fadeNear              solid parts (bark, cactus): the whole-instance term, plus
+//                         the view hole on limbs (above LIMB_Y and beyond the
+//                         material's userData.trunkRadius from the trunk axis;
+//                         the trunk stays);
+//   fadeNear + crownFade  a tree's bark: as fadeNear, and the whole tree goes
+//                         with its crown (limb by limb), so no bare trunk and
+//                         limbs stay in front of the subject.
 // Nothing is ever half transparent: without TAA a partly faded leaf card
 // reads as a flat translucent sheet (MSAA coverage) or a stipple (dither).
 // Every card has a dissolve rank shared by its vertices; a card is drawn
@@ -102,17 +105,17 @@ float propFadeAt( vec3 p, mat4 M ) {
 #ifdef PROP_FADE_SOLID
   // limbs only: the trunk (below LIMB_Y or near its axis) stays
   float limb = smoothstep( ${(LIMB_Y - 0.2).toFixed(2)}, ${(LIMB_Y + 0.2).toFixed(2)}, p.y - o.y ) * smoothstep( PROP_TRUNK_R, PROP_TRUNK_R + 0.3, length( p.xz - o.xz ) );
-  return max( instF, lineF * limb );
+  float f = max( instF, lineF * limb );
 #else
   // anything touching the lens
   float lr = uFadeMargin.y * k;
   float lensF = 1.0 - smoothstep( lr * 0.85, lr, length( ap ) );
   float f = max( max( instF, lensF ), lineF );
-  #ifdef PROP_FADE_CROWN
-  f = max( f, propCrownF( M, uFadeCam + dir * max( tEnd, 0.0 ) ) );
-  #endif
-  return f;
 #endif
+#ifdef PROP_FADE_CROWN
+  f = max( f, propCrownF( M, uFadeCam + dir * max( tEnd, 0.0 ) ) );
+#endif
+  return f;
 }
 `;
 
@@ -153,20 +156,20 @@ interface FadeData {
 
 const fadeData = new WeakMap<THREE.Material, FadeData>();
 
-export type FadeMode = 'crown' | 'foliage' | 'solid';
+export type FadeMode = 'crown' | 'foliage' | 'solid' | 'crownSolid';
 
 /** How a material fades near the camera (null = never), from its userData flags. */
 export function fadeModeOf(m: THREE.Material): FadeMode | null {
   const u = m.userData ?? {};
   if (u.foliage === true) return u.crownFade === true ? 'crown' : 'foliage';
-  if (u.fadeNear === true) return 'solid';
+  if (u.fadeNear === true) return u.crownFade === true ? 'crownSolid' : 'solid';
   return null;
 }
 
 /**
  * Patch a material with the near-camera fade (idempotent). Apply after the
- * wind patch. 'crown' materials need the aCrown / aCrownR attributes on every
- * geometry they draw (nature/geo.ts addCrownFade).
+ * wind patch. 'crown' and 'crownSolid' materials need the aCrown / aCrownR
+ * attributes on every geometry they draw (nature/geo.ts addCrownFade).
  */
 export function applyFade(m: THREE.Material, mode: FadeMode): void {
   if (fadeData.has(m)) return;
@@ -175,8 +178,10 @@ export function applyFade(m: THREE.Material, mode: FadeMode): void {
   const data: FadeData = { prev, prevKey: prevKeyFn };
   fadeData.set(m, data);
   const trunkR = typeof m.userData.trunkRadius === 'number' ? m.userData.trunkRadius : TRUNK_R;
+  const solid = mode === 'solid' || mode === 'crownSolid';
   const define =
-    mode === 'solid' ? `#define PROP_FADE_SOLID\n#define PROP_TRUNK_R ${trunkR.toFixed(2)}\n` : mode === 'crown' ? '#define PROP_FADE_CROWN\n' : '';
+    (solid ? `#define PROP_FADE_SOLID\n#define PROP_TRUNK_R ${trunkR.toFixed(2)}\n` : '') +
+    (mode === 'crown' || mode === 'crownSolid' ? '#define PROP_FADE_CROWN\n' : '');
   m.onBeforeCompile = function (shader, renderer) {
     prev.call(this, shader, renderer);
     shader.uniforms.uFadeCam = fadeUniforms.uFadeCam;
@@ -194,7 +199,7 @@ export function applyFade(m: THREE.Material, mode: FadeMode): void {
   // resolve the previous key now: the default key is the hook's source text,
   // which would otherwise read the wrapper below for every material
   const prevKey = prevKeyFn.call(m);
-  m.customProgramCacheKey = () => `${prevKey}|propfade-${mode}${mode === 'solid' ? trunkR : ''}`;
+  m.customProgramCacheKey = () => `${prevKey}|propfade-${mode}${solid ? trunkR : ''}`;
   m.needsUpdate = true;
 }
 
