@@ -874,7 +874,7 @@ function design(ctx: DesignContext): CreatureDesign {
       tail: { scale: 0.3, aniso: [1, 2.2, 1] },
     },
     coat: elephantCoat(male, eye, tusk.pts),
-    look: { skin: 'wrinkled', pattern: 'stripes', roughness: 0.9, sheen: 0.06, grain: 0.013, bump: 0.42, mottle: 0.14 },
+    look: { skin: 'wrinkled', pattern: 'stripes', roughness: 0.9, sheen: 0.15, grain: 0.013, bump: 0.42, mottle: 0.14 },
     eyes: [{ bone: 'head', pos: eye, radius: 0.03, color: 0x24170d }],
     anim: driver(d),
     babyScale: 0.3,

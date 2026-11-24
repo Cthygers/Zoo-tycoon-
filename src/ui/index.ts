@@ -148,7 +148,7 @@ class GameUI implements GameUIHandle {
     this.popups = new MoneyPopups(ctx.camera, (x, z) => sim.world.heightAt(x, z));
     this.costLabel = new CostLabel(ctx.camera);
     const focusEvent = (x: number, z: number) => this.focusClear(x, z, Math.min(this.camera.distance, 34));
-    // toasts show over the zoo menu too: one tapped there closes the menu to show its place
+    // feedback toasts show over the zoo menu too: one tapped there closes the menu to show its place
     const toastFocus = (x: number, z: number) => {
       this.zoo.close();
       focusEvent(x, z);
@@ -244,7 +244,8 @@ class GameUI implements GameUIHandle {
     // ---- events
     const ev = sim.events;
     this.offs.push(
-      ev.on('notify', (n) => (n.logOnly ? this.toasts.logOnly(n.text, n.kind, n.focus) : this.toasts.show(n.text, n.kind, n.focus))),
+      // news waits while the zoo menu is open, and only goes to the list the player is reading on its Messages tab
+      ev.on('notify', (n) => (n.logOnly || this.zoo.readingMessages ? this.toasts.logOnly(n.text, n.kind, n.focus) : this.toasts.show(n.text, n.kind, n.focus, true))),
       ev.on('objectiveCompleted', (o) => {
         this.cele.show(o.text, o.reward);
         this.layoutToasts(); // toasts under the new card make way at once
@@ -371,8 +372,9 @@ class GameUI implements GameUIHandle {
    */
   private layoutToasts(): void {
     const col = this.toasts.root;
+    this.toasts.hold(this.zoo.isOpen);
     if (this.zoo.isOpen) {
-      // over the menu's title row: one toast at a time, the rest wait until it closes
+      // feedback over the menu's title row: one toast at a time, the rest wait until it closes
       const g = this.zoo.headGap();
       setStyle(col, 'left', `${Math.round((g.x0 + g.x1) / 2)}px`);
       setStyle(col, 'width', `${Math.round(Math.max(0, Math.min(TOAST_COL_MAX, g.x1 - g.x0)))}px`);

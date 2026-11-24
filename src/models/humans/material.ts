@@ -12,7 +12,10 @@
 //                                texture (HUMAN_LOOK_TEXELS, see writeHumanLook)
 //                                passed to the fragment shader as flat varyings.
 // Both get warm light from the night lamps a person stands under
-// (props/lights/lampField.ts).
+// (props/lights/lampField.ts, applied last in onBeforeCompile), and the same
+// surface model: skin with a warm subsurface wrap, matte fabric (drape folds,
+// a sheen in its own colour, no white grazing reflection), hair locks with
+// their own roughness, and face marks that keep their darkness at a distance.
 
 import * as THREE from 'three';
 import { HIGHLIGHT_FN_GLSL, NOISE_GLSL } from '../material/shaderChunks';
@@ -84,14 +87,25 @@ interface ColorExpr {
 const FRAG_HELPERS = `${NOISE_GLSL}
 float hm_step(float edge, float v) { float a = max(fwidth(v), 1e-4); return smoothstep(edge - a, edge + a, v); }`;
 
-/** Clothing / skin / face colouring (replaces <color_fragment>); sets hmCol, hmRough. */
+// Detail that is not geometry (fabric drape, hair locks, face marks) is sized
+// in rest-space metres and judged against the rest-space size of a pixel
+// (hmPix = |fwidth(vRestPos)| ≈ 1.4 px): noise fades to its mean before its
+// cells shrink under ~2.5 px (no shimmer on a phone), and face marks widen
+// into soft smudges of the same total darkness instead of vanishing, so a face
+// keeps its eyes and brows at 4–8 m.
+
+/** Clothing / skin / face colouring (replaces <color_fragment>); sets hmCol, hmRough and the skin / fabric / hair masks. */
 function humanColorGLSL(e: ColorExpr): string {
   return `#include <color_fragment>
 vec3 hmCol = ${e.skin};
-float hmRough = 0.55;
+float hmRough = 0.6;
+float hmSkin = 1.0;
+float hmCloth = 0.0;
+float hmHair = 0.0;
 {
   vec4 hmCut = ${e.cut};
   vec3 hmMarks = ${e.marks};
+  float hmPix = length(fwidth(vRestPos));
   float armT = vZone.x;
   float legT = vZone.y;
   float y = vRestPos.y;
@@ -106,42 +120,94 @@ float hmRough = 0.55;
   float coatLeg = onLeg * (1.0 - hm_step(hmCut.z, legT));
   float shirtM = clamp(upper + sleeve + coatLeg, 0.0, 1.0);
   float pantsM = clamp(lower + pantsLeg, 0.0, 1.0) * (1.0 - coatLeg);
-  float fold = 0.0;
-  if (uMicro > 0.5) fold = cr_vnoise(vRestPos * vec3(30.0, 9.0, 30.0)) - 0.5;
-  hmCol = mix(hmCol, ${e.pants} * (1.0 + fold * 0.12), pantsM);
-  hmCol = mix(hmCol, ${e.shirt} * (1.0 + fold * 0.1), shirtM);
+  // fabric: soft drape folds hanging down the garment (4.5 cm) and finer
+  // wrinkles on medium / high (2.2 cm), in tone and in roughness (never one
+  // smooth plastic tone)
+  float drape = (cr_vnoise(vRestPos * vec3(22.0, 6.0, 22.0)) - 0.5) * (1.0 - smoothstep(0.016, 0.032, hmPix));
+  if (uMicro > 0.5) drape += (cr_vnoise(vRestPos * vec3(45.0, 14.0, 45.0) + 7.3) - 0.5) * 0.6 * (1.0 - smoothstep(0.008, 0.016, hmPix));
+  hmCol = mix(hmCol, ${e.pants} * (1.0 + drape * 0.26), pantsM);
+  hmCol = mix(hmCol, ${e.shirt} * (1.0 + drape * 0.22), shirtM);
   // waistband under the hem of the top (not on a lab coat): separates top and bottom
   float belt = trunk * (1.0 - hm_step(hmMarks.y, y)) * hm_step(hmMarks.y - 0.03, y) * step(hmCut.z, 0.0);
   hmCol = mix(hmCol, ${e.pants} * 0.4, belt);
-  hmRough = mix(hmRough, 0.86, max(shirtM, pantsM));
+  float clothM = max(shirtM, pantsM);
+  hmRough = mix(hmRough, 0.93 - drape * 0.1, clothM);
   float shoe = onLeg * (1.0 - hm_step(hmMarks.z, y));
   hmCol = mix(hmCol, ${e.shoes}, shoe);
-  hmRough = mix(hmRough, 0.5, shoe);
-  float hairM = hm_step(0.0, vZone.z);
-  hmCol = mix(hmCol, ${e.hair} * (0.85 + 0.3 * cr_vnoise(vRestPos * vec3(160.0, 40.0, 160.0))), hairM);
-  hmRough = mix(hmRough, 0.6, hairM);
+  hmRough = mix(hmRough, 0.55, shoe);
+  // hair: a soft hairline (skin shows through the first few mm), locks along
+  // its fall with their own roughness, faded by footprint like the drape
+  float hairM = max(hm_step(0.004, vZone.z), 0.6 * smoothstep(-0.003, 0.004, vZone.z));
+  float locks = (cr_vnoise(vRestPos * vec3(45.0, 10.0, 45.0)) - 0.5) * (1.0 - smoothstep(0.008, 0.016, hmPix));
+  hmCol = mix(hmCol, ${e.hair} * (1.0 + 0.5 * locks), hairM);
+  hmRough = mix(hmRough, 0.72 + 0.2 * locks, hairM);
   float hatM = hm_step(0.0, vZone.w);
-  hmCol = mix(hmCol, ${e.hat}, hatM);
-  hmRough = mix(hmRough, 0.85, hatM);
-  // face: eyes, brows, lips (only on bare head skin)
+  hmCol = mix(hmCol, ${e.hat} * (1.0 + drape * 0.2), hatM);
+  hmRough = mix(hmRough, 0.9, hatM);
+  hmSkin = (1.0 - clothM) * (1.0 - shoe) * (1.0 - hairM) * (1.0 - hatM);
+  hmCloth = max(clothM * (1.0 - shoe) * (1.0 - hairM), hatM);
+  hmHair = hairM * (1.0 - hatM);
+  // face (only on bare head skin): eye sockets, eyes, brows, lips and a
+  // flush on the cheeks. Eyes and brows widen with the pixel footprint (up to
+  // 7 mm) and fade by the same area, keeping their total darkness, so a face
+  // still has eyes and brows at 8 m instead of sparkling dots.
   float face = (1.0 - hairM) * (1.0 - hatM) * hm_step(hmMarks.x + 0.02, y);
   vec3 hmEye = ${e.eye};
   vec3 q = vec3(abs(vRestPos.x), vRestPos.y, vRestPos.z);
-  vec3 de = (q - hmEye) / vec3(0.0105, 0.0055, 0.012);
-  float eye = 1.0 - smoothstep(0.7, 1.0, length(de));
-  vec3 db = (q - hmEye - vec3(0.002, 0.016, 0.0)) / vec3(0.016, 0.0035, 0.02);
-  float brow = 1.0 - smoothstep(0.6, 1.0, length(db));
-  vec3 dm = (vRestPos - ${e.mouth}) / vec3(0.021, 0.004, 0.02);
+  float fp = min(0.6 * hmPix, 0.007);
+  vec3 ds = (q - hmEye - vec3(-0.002, 0.004, -0.004)) / vec3(0.021, 0.014, 0.015);
+  float socket = 1.0 - smoothstep(0.3, 1.0, length(ds));
+  vec3 dc = (q - hmEye - vec3(0.008, -0.03, -0.012)) / vec3(0.022, 0.018, 0.02);
+  float cheek = 1.0 - smoothstep(0.2, 1.0, length(dc));
+  hmCol *= mix(vec3(1.0), vec3(0.87, 0.84, 0.84), socket * face);
+  hmCol *= mix(vec3(1.0), vec3(1.06, 0.93, 0.91), cheek * face);
+  vec2 er = vec2(0.012, 0.0048);
+  vec2 ew = sqrt(er * er + fp * fp);
+  vec3 de = (q - hmEye) / vec3(ew, 0.01 + 0.5 * fp);
+  float eye = (1.0 - smoothstep(0.6, 1.0, length(de))) * (er.x * er.y) / (ew.x * ew.y);
+  vec2 br = vec2(0.017, 0.0048);
+  vec2 bw = sqrt(br * br + fp * fp);
+  vec3 db = (q - hmEye - vec3(0.002, 0.017, 0.0)) / vec3(bw, 0.012 + 0.5 * fp);
+  float brow = (1.0 - smoothstep(0.55, 1.0, length(db))) * (br.x * br.y) / (bw.x * bw.y);
+  vec3 dm = (vRestPos - ${e.mouth}) / vec3(0.021, 0.004 + 0.5 * fp, 0.02);
   float lip = 1.0 - smoothstep(0.6, 1.0, length(dm));
-  hmCol = mix(hmCol, ${e.hair} * 0.8, brow * face * 0.85);
+  // brows darker than the hair and well under the skin, so blond, grey and red hair still frame the eyes
+  hmCol = mix(hmCol, min(${e.hair} * 0.7, ${e.skin} * 0.45), brow * face * 0.8);
   hmCol = mix(hmCol, ${e.skin} * vec3(0.72, 0.5, 0.48), lip * face * 0.7);
-  hmCol = mix(hmCol, vec3(0.02, 0.015, 0.012), eye * face);
+  hmCol = mix(hmCol, vec3(0.03, 0.022, 0.018), eye * face);
 }
 diffuseColor.rgb *= hmCol;`;
 }
 
 const ROUGHNESS_GLSL = `#include <roughnessmap_fragment>
 roughnessFactor = hmRough;`;
+
+/**
+ * Matte fabric and soft skin (after <lights_physical_fragment>): cloth gets no
+ * white grazing reflection (the plastic tell), skin a low one with the
+ * slightly weaker reflectance of skin (F0 0.028), hair keeps its own.
+ */
+const SPECULAR_GLSL = `#include <lights_physical_fragment>
+material.specularF90 = mix(mix(0.6, 0.25, hmCloth), 0.8, hmHair);
+material.specularColor = vec3(mix(0.04, 0.028, hmSkin));
+material.specularColorBlended = material.specularColor;`;
+
+/**
+ * Before <opaque_fragment>: light scattered under the skin wraps a little
+ * warm, reddened sunlight past the terminator and warms the shaded side (no
+ * flat, grey mannequin paint); fabric fibres seen side-on catch a soft sheen
+ * in the cloth's own colour. Both follow the surface's own normal and the key
+ * light with its shadow (`directLight` still holds it after the light loop).
+ */
+const SKIN_CLOTH_LIGHT_GLSL = `{
+  float hmEdge = pow(1.0 - saturate(dot(nonPerturbedNormal, geometryViewDir)), 3.0);
+  outgoingLight += hmCloth * 0.18 * hmEdge * totalDiffuse;
+  outgoingLight += hmSkin * reflectedLight.indirectDiffuse * vec3(0.05, 0.012, 0.0);
+  #if NUM_DIR_LIGHTS > 0
+  float hmWrap = saturate(dot(nonPerturbedNormal, directLight.direction) * 0.5 + 0.5);
+  outgoingLight += hmSkin * directLight.color * BRDF_Lambert(diffuseColor.rgb) * (0.1 * hmWrap * hmWrap) * vec3(1.0, 0.42, 0.28);
+  #endif
+}`;
 
 export function createHumanMaterial(colors: HumanColors, cut: HumanCut, marks: HumanMarks, detail: 0 | 1 | 2): HumanMaterial {
   const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.8, metalness: 0 }) as HumanMaterial;
@@ -211,10 +277,11 @@ ${HIGHLIGHT_FN_GLSL}`,
         }),
       )
       .replace('#include <roughnessmap_fragment>', ROUGHNESS_GLSL)
-      .replace('#include <opaque_fragment>', 'outgoingLight = crHighlightOf(outgoingLight, uHighlight);\n#include <opaque_fragment>');
+      .replace('#include <lights_physical_fragment>', SPECULAR_GLSL)
+      .replace('#include <opaque_fragment>', `${SKIN_CLOTH_LIGHT_GLSL}\noutgoingLight = crHighlightOf(outgoingLight, uHighlight);\n#include <opaque_fragment>`);
     applyLampField(shader);
   };
-  mat.customProgramCacheKey = () => 'creature-human-v2';
+  mat.customProgramCacheKey = () => 'creature-human-v3';
   return mat;
 }
 
@@ -340,9 +407,10 @@ ${humanColorGLSL({
 })}`,
       )
       .replace('#include <roughnessmap_fragment>', ROUGHNESS_GLSL)
-      .replace('#include <opaque_fragment>', 'outgoingLight = crHighlightOf(outgoingLight, vHm5.w);\n#include <opaque_fragment>');
+      .replace('#include <lights_physical_fragment>', SPECULAR_GLSL)
+      .replace('#include <opaque_fragment>', `${SKIN_CLOTH_LIGHT_GLSL}\noutgoingLight = crHighlightOf(outgoingLight, vHm5.w);\n#include <opaque_fragment>`);
     applyLampField(shader);
   };
-  mat.customProgramCacheKey = () => `creature-human-batch-v2-${n}`;
+  mat.customProgramCacheKey = () => `creature-human-batch-v3-${n}`;
   return { material: mat, depth: crowdDepthMaterial(u), uniforms: [u] };
 }

@@ -52,6 +52,41 @@ export function writeLampField(position: Float32Array, light: Float32Array): voi
   fieldTexture.needsUpdate = true;
 }
 
+/**
+ * Lamp light (field value) over which a figure moves from the moonlit grade
+ * to colour, and the curve of its colour share (mark^MARK_GAMMA): wide and
+ * gradual, so at a pool's fringe a guest is dim and only partly coloured
+ * instead of flipping between a daylit figure and a grey statue a metre apart.
+ */
+const MARK_RAMP = [0.05, 0.8] as const;
+const MARK_GAMMA = 0.7;
+/** The grade shows full colour from this lamp-lit mark on (render/grade.ts: smoothstep from 0). */
+const GRADE_MARK_FULL = 0.4;
+/**
+ * Moonlit highlight shoulder of figures (tiers that tone-map in the
+ * material): above ≈ MOON_KNEE displayed, a figure's brightness grows only
+ * with its square root, so a white coat under the moon sits ≈ 3× the moonlit
+ * ground like a pale wall instead of glowing 15–20× it (ACES's toe crushes the
+ * ground, not the coat). Guests' moonlit shirts stay below the knee.
+ */
+const MOON_KNEE = 0.08;
+
+const smooth = (a: number, b: number, x: number) => {
+  const t = Math.min(Math.max((x - a) / (b - a), 0), 1);
+  return t * t * (3 - 2 * t);
+};
+
+/** Share of full colour the night grade gives a figure in lamp light `light` (0…1) at `night` (0…1). */
+export function figureColourShare(light: number, night: number): number {
+  return Math.pow(smooth(MARK_RAMP[0], MARK_RAMP[1], light) * night, MARK_GAMMA);
+}
+
+/** Factor the moonlit shoulder applies to a figure displayed at `display` (luminance × exposure). */
+export function moonShoulder(display: number): number {
+  const x = Math.min(display / MOON_KNEE, 12);
+  return Math.pow(1 + x * x * x * x, -0.125);
+}
+
 /** Lamp light level read back from the field at a world point (tests / debugging). */
 export function lampFieldAt(x: number, z: number): number {
   const ix = Math.round(x);
@@ -113,15 +148,23 @@ if (vLampLight > 0.0) {
   reflectedLight.indirectDiffuse += uLampLight * (lfPool * lfFacing) * BRDF_Lambert(diffuseColor.rgb);
 }`;
 
-// The grade's lamp-lit mark, the same as on the ground around the figure, so
-// a figure at the pool fringe stays in the moonlit (rod) grade like the
-// paving it stands on. Where the grade tone-maps in the material (whLampLit),
-// only where the display-space pool visibly brightens the ground (the grade
-// shows full colour from a mark of 0.4 on); on the HDR target the pool marks
-// its light linearly in the alpha, and so does this.
+// The grade's lamp-lit mark (tiers that tone-map in the material): the grade
+// eases its colour share over whLampLit 0…GRADE_MARK_FULL (a smoothstep), so
+// the mark is that curve's inverse of the share figureColourShare wants. The
+// moonlit rest of the figure gets the highlight shoulder (MOON_KNEE).
+// On the HDR target the pool marks its light linearly in the alpha, and so
+// does this (FRAGMENT_MARK_ALPHA).
 const FRAGMENT_MARK_TONEMAP = /* glsl */ `
-#ifdef WH_LAMP_LIT
-whLampLit = smoothstep(0.15, 0.6, vLampLight) * uLampMark;
+#ifdef TONE_MAPPING
+{
+  float lfShare = pow(smoothstep(${MARK_RAMP[0].toFixed(2)}, ${MARK_RAMP[1].toFixed(2)}, vLampLight) * uLampMark, ${MARK_GAMMA.toFixed(2)});
+  #ifdef WH_LAMP_LIT
+  whLampLit = ${GRADE_MARK_FULL.toFixed(2)} * (0.5 - sin(asin(clamp(1.0 - 2.0 * lfShare, -1.0, 1.0)) / 3.0));
+  #endif
+  float lfX = min(dot(gl_FragColor.rgb, vec3(0.2126, 0.7152, 0.0722)) * toneMappingExposure / ${MOON_KNEE.toFixed(3)}, 12.0);
+  float lfX2 = lfX * lfX;
+  gl_FragColor.rgb *= mix(1.0, pow(1.0 + lfX2 * lfX2, -0.125), uLampMark - lfShare * uLampMark);
+}
 #endif`;
 
 const FRAGMENT_MARK_ALPHA = /* glsl */ `

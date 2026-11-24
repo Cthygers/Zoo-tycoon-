@@ -202,6 +202,14 @@ function sameRig(a: RigDef, b: RigDef): boolean {
 }
 
 /** Growth (0..1) over which babyBones ease from their newborn scale to 1. */
+/** Seconds a coat takes to dry after a swim (thick skins show it as a wet sheen, see animalMaterial). */
+export const DRY_SECONDS = 90;
+
+/** Wetness 0..1 after `dt` seconds: soaked while swimming, drying linearly afterwards. */
+export function nextWetness(wet: number, swimming: boolean, dt: number): number {
+  return swimming ? 1 : Math.max(0, wet - dt / DRY_SECONDS);
+}
+
 const BABY_BONES_FROM = 0.15;
 const BABY_BONES_TO = 0.95;
 
@@ -228,6 +236,8 @@ export class RiggedModel implements CreatureModel {
   private babyBones: { bone: number; scale: number }[] = [];
   protected baseScale = 1;
   protected growth = 1;
+  /** 1 right after a swim, drying to 0 (look texel z of animals). */
+  private wetness = 0;
   private lastYaw = NaN;
   protected highlighted = false;
   protected readonly host: CrowdHost | null;
@@ -442,6 +452,11 @@ export class RiggedModel implements CreatureModel {
     ctx.actionTime = anim.actionTime ?? 0;
     ctx.swimming = !!anim.swimming;
     ctx.holding = anim.holding ?? 'none';
+    const wet = nextWetness(this.wetness, ctx.swimming, dt);
+    if (wet !== this.wetness) {
+      this.wetness = wet;
+      this.writeLook();
+    }
     // turn rate from the root's yaw
     const yaw = this.object.rotation.y;
     if (dt > 0 && !Number.isNaN(this.lastYaw)) {
@@ -517,13 +532,14 @@ export class RiggedModel implements CreatureModel {
   /** Hook after skinMatrices into the batch (FK.* holds the joints). */
   protected afterSkin(): void {}
 
-  /** Write the per-instance look block (animals: highlight, growth). */
+  /** Write the per-instance look block (animals: highlight, growth, wetness). */
   writeLook(): void {
     const b = this.batch;
     if (!b) return;
     const o = b.offset(this.slot);
     b.data[o] = this.highlighted ? 0.25 : 0;
     b.data[o + 1] = this.growth;
+    b.data[o + 2] = this.wetness;
   }
 
   /** Per-frame batched work after the crowd placed the instance (highlight pulse …). */

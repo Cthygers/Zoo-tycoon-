@@ -25,8 +25,9 @@ anim/util.ts        noise, glance(), pulses(), smooth(), driver() …
 coat/coat.ts        coat helpers (fbm, voronoi, mixHex, blendHex, belly …)
 kit/quadruped.ts    quadSkeleton(), legPrims(), hoof(), surfacePoint(), seat(), withRegion()
 kit/generic.ts      genericQuadruped(), genericUpright(), paletteCoat() (placeholders)
-material/*.ts       animal material (vertex colours + per-pixel pattern, fur/hide micro-normals, sheen)
-humans/*.ts         human body design, clothing material, held items, HumanFactory
+material/*.ts       animal material (vertex colours + per-pixel pattern, fur strands / clumps and hide
+                    micro-normals faded by pixel footprint, matte grazing reflection, coat-tinted sheen)
+humans/*.ts         human body design (bald fringe baked in the zone attribute), skin / fabric / hair / face material, held items, HumanFactory
 species/*.ts        ONE FILE PER SPECIES (default export SpeciesModel); index.ts = registry
 ```
 

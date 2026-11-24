@@ -1,11 +1,11 @@
 // Zoo rating (0..100, smoothed) and the progressive objective list.
 
 import { GAME_MINUTES_PER_SECOND, MAP_W, MINUTES_PER_DAY, TILE } from '../core/constants';
-import type { GoalProgress } from '../core/contracts';
+import type { GoalProgress, SimMessage } from '../core/contracts';
 import { fmtMoney } from '../core/format';
 import type { Objective } from '../core/types';
 import { OBJECTS_BY_ID } from '../data/objects';
-import { SPECIES_BY_ID } from '../data/species';
+import { SPECIES, SPECIES_BY_ID } from '../data/species';
 import { GATE_SPOT } from './guests';
 import type { Simulation } from './simulation';
 
@@ -177,6 +177,19 @@ export class Progress {
     this.complaintAcc = d.complaintAcc ?? 0;
     this.facilitiesRev = -1;
     this.clearComplaints();
+  }
+
+  /**
+   * Saves from before the species that bred here were kept: young still with
+   * their mother and the births in the saved message log tell which species
+   * have had a baby, so their next birth does not toast as the first again.
+   */
+  recallBredSpecies(messages: readonly SimMessage[]) {
+    for (const a of this.sim.animals.values()) if (a.mother) this.bredSpecies.add(a.speciesId);
+    for (const m of messages) {
+      const sp = SPECIES.find((sp) => m.text.includes(` the ${sp.name} gave birth`));
+      if (sp) this.bredSpecies.add(sp.id);
+    }
   }
 
   private clearComplaints() {
@@ -399,13 +412,14 @@ export class Progress {
     // a path cut off from the entrance first: otherwise guests seem to say things are missing
     const cut = g ? sim.guestSys.unreachable() : null;
     if (cut) sim.notify('cmp-cutoff', cut.text, 'warn', cut.focus, 300);
+    // ongoing needs: one toast when the complaints start, then log lines while they last
     if (c.restroom >= thr)
-      sim.notify('cmp-restroom', h.restroom ? 'Guests can’t find a restroom nearby — build more around the zoo.' : 'Guests are complaining that there are no restrooms.', 'warn', undefined, 120);
+      sim.remind('cmp-restroom', h.restroom ? 'Guests can’t find a restroom nearby — build more around the zoo.' : 'Guests are complaining that there are no restrooms.', 'warn', undefined, 120, COMPLAINT_LASTS);
     if (c.food >= thr)
-      sim.notify('cmp-food', h.food ? 'Hungry guests can’t find food nearby — build snack kiosks around the zoo.' : 'Guests are hungry but there is nowhere to buy food.', 'warn', undefined, 120);
+      sim.remind('cmp-food', h.food ? 'Hungry guests can’t find food nearby — build snack kiosks around the zoo.' : 'Guests are hungry but there is nowhere to buy food.', 'warn', undefined, 120, COMPLAINT_LASTS);
     if (c.drink >= thr)
-      sim.notify('cmp-drink', h.drink ? 'Thirsty guests can’t find a drink nearby — build drinks kiosks around the zoo.' : 'Guests are thirsty — build a drinks kiosk.', 'warn', undefined, 120);
-    if (c.bench >= thr) sim.notify('cmp-bench', 'Tired guests want benches to sit on.', 'info', undefined, 150);
+      sim.remind('cmp-drink', h.drink ? 'Thirsty guests can’t find a drink nearby — build drinks kiosks around the zoo.' : 'Guests are thirsty — build a drinks kiosk.', 'warn', undefined, 120, COMPLAINT_LASTS);
+    if (c.bench >= thr) sim.remind('cmp-bench', 'Tired guests want benches to sit on.', 'info', undefined, 150, COMPLAINT_LASTS);
     if (this.litterParties.size >= thr) this.reportLitter();
     if (c.noAnimals >= Math.max(2, thr * 0.5)) sim.notify('cmp-noanimals', 'Guests are disappointed: there are no animals to see yet!', 'warn', undefined, 150);
     if (c.price >= thr)

@@ -90,11 +90,39 @@ describe('time of day air', () => {
   });
 
   it('lifts the low morning sun only', () => {
-    expect(at(7, 30).lift).toBeGreaterThan(1.1);
-    expect(at(8).lift).toBeGreaterThan(1.1);
+    // a new zoo's first frame (07:30, ≈ 10°) and the first hours up to ≈ 25°
+    expect(at(7, 30).lift).toBeGreaterThan(1.18);
+    expect(at(8, 30).lift).toBeGreaterThan(1.18);
+    expect(at(9, 30).lift).toBeLessThan(at(8, 30).lift);
     expect(at(11).lift).toBe(1);
     expect(at(18, 30).lift).toBe(1);
     expect(at(6, 0).lift).toBe(1);
+  });
+});
+
+describe('horizon sun', () => {
+  const atm = new AtmosphereModel(1.35);
+  const sunAt = (se: number) => {
+    atm.compute(se * DEG);
+    const c = new THREE.Color();
+    daylight(atm, se * DEG, c);
+    return c;
+  };
+
+  it('keeps sunrise and sunset light warm but not autumn-rust', () => {
+    // the model's horizon sun is R/B ≈ 10–30; the eye half adapts to it, so
+    // it is no redder than the golden-hour sun at ≈ 8°
+    const golden = sunAt(8);
+    for (const se of [0.5, 2, 4, 6]) {
+      const c = sunAt(se);
+      expect(c.r / c.b).toBeGreaterThan(2.5);
+      expect(c.r / c.b).toBeLessThanOrEqual(golden.r / golden.b + 1e-6);
+    }
+    // golden hour proper is left as it was: warmer than the high sun
+    const g = sunAt(10);
+    expect(g.r / g.b).toBeGreaterThan(2.2);
+    const n = sunAt(44);
+    expect(n.r / n.b).toBeLessThan(g.r / g.b);
   });
 });
 

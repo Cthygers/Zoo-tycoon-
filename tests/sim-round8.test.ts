@@ -28,10 +28,10 @@ describe('day-close summary', () => {
     const d = day({ income: 2211, admissions: 2211, expenses: 2000, salaries: 1500, upkeep: 500 });
     expect(daySummary(d).text).toBe('Day 4 closed: +$211 (income $2,211, running costs $2,000)');
     expect(daySummary(d, 0.4).text).toBe('Day 4 closed: +$211 (income $2,211, running costs $2,000)');
-    expect(daySummary(d, 63.25).text).toBe('Day 4 closed: +$211 (income $2,211, running costs $2,000) — zoo full, 63 visitors turned away');
-    expect(daySummary(d, 1).text).toMatch(/ — zoo full, 1 visitor turned away$/);
+    expect(daySummary(d, 63.25).text).toBe('Day 4 closed: +$211 (income $2,211, running costs $2,000) — zoo\u00a0full, 63 visitors turned away');
+    expect(daySummary(d, 1).text).toMatch(/ — zoo\u00a0full, 1 visitor turned away$/);
     const building = day({ income: 500, admissions: 500, expenses: 1100, construction: 600, upkeep: 500 });
-    expect(daySummary(building, 9).text).toBe('Day 4 closed: −$600 (building $600; daily running +$0) — zoo full, 9 visitors turned away');
+    expect(daySummary(building, 9).text).toBe('Day 4 closed: −$600 (building $600; daily running +$0) — zoo\u00a0full, 9 visitors turned away');
     // a full zoo is not a money problem: the kind still follows the running result
     expect(daySummary(d, 63).kind).toBe('info');
   });
@@ -48,7 +48,7 @@ describe('day-close summary', () => {
     runTo(sim, 1, 2);
     const close = notes(log, /^Day 1 closed:/);
     expect(close.length).toBe(1);
-    expect(close[0].text).toMatch(new RegExp(` — zoo full, ${total} visitors turned away$`));
+    expect(close[0].text).toMatch(new RegExp(` — zoo\u00a0full, ${total} visitors turned away$`));
     expect(notes(log, /^Zoo full — /)[0].text).not.toContain(`${total} visitors`);
   }, 60_000);
 });

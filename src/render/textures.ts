@@ -154,6 +154,29 @@ Surf grassLike(vec2 uv, bool dry) {
   return s;
 }
 
+// Crack network of a dried crust: x = F2 − F1 (≈ twice the distance to the
+// crack, cell units), y = hash of the crack segment (the same for both cells
+// it separates), z = cell hash. n cells across, periodic.
+vec3 crackNet(vec2 uv, float n, float jitter, float seed) {
+  vec2 p = uv * n;
+  vec2 i = floor(p);
+  vec2 f = p - i;
+  float f1 = 8.0, f2 = 8.0;
+  vec2 c1 = vec2(0.0), c2 = vec2(0.0);
+  for (int y = -1; y <= 1; y++)
+    for (int x = -1; x <= 1; x++) {
+      vec2 o = vec2(float(x), float(y));
+      vec2 c = mod(i + o, vec2(n));
+      vec2 r = o + 0.5 + (hash22(c + seed * 7.31) - 0.5) * jitter - f;
+      float d = dot(r, r);
+      if (d < f1) { f2 = f1; c2 = c1; f1 = d; c1 = c; }
+      else if (d < f2) { f2 = d; c2 = c; }
+    }
+  float h1 = hash12(c1 + seed * 3.17 + 11.0);
+  float h2 = hash12(c2 + seed * 3.17 + 11.0);
+  return vec3(sqrt(f2) - sqrt(f1), hash12(vec2(min(h1, h2), max(h1, h2)) * 91.7 + seed), h1);
+}
+
 Surf dirt(vec2 uv) {
   Surf s;
   float n1 = pfbm(uv, 4.0, 5, 21.0);
@@ -161,15 +184,28 @@ Surf dirt(vec2 uv) {
   s.alb = mix(srgb(96.0, 82.0, 62.0), srgb(126.0, 110.0, 84.0), 0.5 + 0.5 * n1);
   s.alb *= 0.9 + 0.2 * (0.5 + 0.5 * n2);
   s.h = 0.35 + 0.15 * n1 + 0.08 * n2;
-  // faint dry cracks
-  vec4 cr = pvoronoi(uv, 7.0, 0.9, 23.0);
-  float crack = 1.0 - smoothstep(0.0, 0.035, cr.y - cr.x);
-  s.alb *= 1.0 - 0.3 * crack * smoothstep(-0.2, 0.4, n1);
-  s.h -= 0.15 * crack;
-  // sparse pebbles, close to the soil in value (small bright flecks read as noise)
+  // dried crust, mostly in the drier patches: cracks whose width and depth
+  // wander with low-frequency noise, about a third of the segments missing
+  // (cells merge into bigger, irregular plates), plate edges curled up (a
+  // lighter lifted lip, then a darker cupped rim) and fine grain, so it reads
+  // as a dried wallow rather than crazy paving
+  float dry = smoothstep(-0.25, 0.35, n1);
+  vec2 cuv = uv + 0.01 * vec2(pfbm(uv, 11.0, 2, 26.0), pfbm(uv, 11.0, 2, 27.0));
+  vec3 cn = crackNet(cuv, 7.0, 0.9, 23.0);
+  float wv = 0.5 + 0.5 * pfbm(uv, 5.0, 3, 28.0);
+  float open = smoothstep(0.32, 0.42, cn.y) * dry;
+  float w = mix(0.012, 0.07, wv * wv) * open;
+  float e = cn.x;
+  float crack = (1.0 - smoothstep(w * 0.4, w + 0.004, e)) * open;
+  float lip = smoothstep(w, w + 0.025, e) * (1.0 - smoothstep(w + 0.05, w + 0.12, e)) * open;
+  float rim = smoothstep(w + 0.07, w + 0.13, e) * (1.0 - smoothstep(w + 0.16, w + 0.34, e)) * open;
+  s.alb *= (1.0 - crack * mix(0.2, 0.55, wv)) * (1.0 + 0.08 * lip - 0.06 * rim);
+  s.alb *= 1.0 + 0.08 * (hash12(floor(uv * uRes) + 5.3) - 0.5);
+  s.h += 0.06 * lip - 0.03 * rim - 0.22 * crack;
+  // a few pebbles, close to the soil in value (small bright flecks read as noise)
   vec4 v = pvoronoi(uv, 20.0, 0.9, 24.0);
   float r = 0.16 + 0.18 * fract(v.z * 7.0);
-  if (v.z > 0.72) {
+  if (v.z > 0.84) {
     float m = 1.0 - smoothstep(r * 0.7, r, v.x);
     vec3 pc = mix(s.alb * vec3(1.2, 1.18, 1.16), srgb(104.0, 96.0, 86.0), 0.35 + 0.4 * fract(v.z * 13.0));
     s.alb = mix(s.alb, pc, m);

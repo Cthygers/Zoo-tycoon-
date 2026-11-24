@@ -408,38 +408,71 @@ export function groupOf(parts: [MeshData, THREE.Material, string?][]): THREE.Gro
  * group whose material is flagged crownFade (the leaves, and the bark that
  * goes with them): every vertex carries the crown ellipsoid (centre,
  * horizontal and vertical radius, cm) and a dissolve rank shared by its whole
- * card, frond or limb (one connected piece of the mesh), so a crown on the
+ * card, frond or limb (one connected piece of the mesh), so a tree on the
  * camera's view line drops out piece by piece, never as a half-transparent
- * sheet. Every geometry drawn with such a material needs it (BatchedMesh
- * wants one attribute layout per batch).
+ * sheet. Leaf cards get scattered ranks; bark pieces are ranked by how far
+ * out they start (barkRanks), so limbs always go before the limb or trunk
+ * they grow from. `crown` null gives neutral data (no crown: never cut as a
+ * tree) for wood that shares a tree's bark material without being part of a
+ * tree, such as a fallen log, so it still batches with that bark. Every
+ * geometry drawn with such a material needs it (BatchedMesh wants one
+ * attribute layout per batch).
  */
-export function addCrownFade(group: THREE.Object3D, crown: Ellipsoid): void {
+export function addCrownFade(group: THREE.Object3D, crown: Ellipsoid | null): void {
   group.traverse((o) => {
     const mesh = o as THREE.Mesh;
-    if (mesh.isMesh && (mesh.material as THREE.Material).userData.crownFade === true) setCrownAttributes(mesh.geometry, crown);
+    if (!mesh.isMesh) return;
+    const mat = mesh.material as THREE.Material;
+    if (mat.userData.crownFade === true) setCrownAttributes(mesh.geometry, crown, mat.userData.fadeNear === true);
   });
 }
 
-function setCrownAttributes(g: THREE.BufferGeometry, crown: Ellipsoid): void {
+/** Rank given to every piece of a geometry without a crown (switches at a fade of 0.5). */
+const NEUTRAL_RANK = 128;
+
+function setCrownAttributes(g: THREE.BufferGeometry, crown: Ellipsoid | null, bark: boolean): void {
   const n = g.getAttribute('position').count;
   const piece = connectedPieces(g);
+  const barkRank = bark && crown ? barkRanks(g, piece) : null;
   const cm = (v: number) => Math.round(v * 100);
-  const centre = [cm(crown.c.x), cm(crown.c.y), cm(crown.c.z)];
-  const rh = cm(Math.max(crown.r.x, crown.r.z));
-  const ry = cm(crown.r.y);
+  const centre = crown ? [cm(crown.c.x), cm(crown.c.y), cm(crown.c.z)] : [0, 0, 0];
+  const rh = crown ? cm(Math.max(crown.r.x, crown.r.z)) : 0;
+  const ry = crown ? cm(crown.r.y) : 0;
   const c = new Int16Array(n * 4);
   const r = new Int16Array(n * 2);
   for (let i = 0; i < n; i++) {
     c[i * 4] = centre[0];
     c[i * 4 + 1] = centre[1];
     c[i * 4 + 2] = centre[2];
-    // multiplicative hash: neighbouring cards get unrelated ranks
-    c[i * 4 + 3] = Math.imul(piece[i] + 1, 0x9e3779b1) >>> 24;
+    // leaves: a multiplicative hash, so neighbouring cards get unrelated ranks
+    c[i * 4 + 3] = !crown ? NEUTRAL_RANK : barkRank ? barkRank.get(piece[i])! : Math.imul(piece[i] + 1, 0x9e3779b1) >>> 24;
     r[i * 2] = rh;
     r[i * 2 + 1] = ry;
   }
   g.setAttribute('aCrown', new THREE.BufferAttribute(c, 4));
   g.setAttribute('aCrownR', new THREE.BufferAttribute(r, 2));
+}
+
+/**
+ * Dissolve rank (0..255) per bark piece, from its anchor: the vertex nearest
+ * the trunk base (model origin), i.e. where the piece grows from. The trunk
+ * starts at the base and keeps the highest rank; a limb starts on its parent,
+ * farther out, so it ranks lower and goes first: a partly dissolved tree
+ * never leaves a limb floating where its parent was.
+ */
+export function barkRanks(g: THREE.BufferGeometry, piece: Int32Array): Map<number, number> {
+  const pos = g.getAttribute('position');
+  const anchor = new Map<number, number>();
+  for (let i = 0; i < pos.count; i++) {
+    const d = Math.hypot(pos.getX(i), pos.getY(i), pos.getZ(i));
+    const a = anchor.get(piece[i]);
+    if (a === undefined || d < a) anchor.set(piece[i], d);
+  }
+  let far = 1e-3;
+  for (const d of anchor.values()) far = Math.max(far, d);
+  const rank = new Map<number, number>();
+  for (const [p, d] of anchor) rank.set(p, Math.round(255 * (1 - d / far)));
+  return rank;
 }
 
 /** Id of the connected piece (shared vertices) each vertex belongs to (its lowest vertex index). */

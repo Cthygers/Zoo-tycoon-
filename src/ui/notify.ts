@@ -117,6 +117,8 @@ interface ToastRec {
   expiresAt: number;
   /** Measured height (px) once it has been on screen, 0 before. */
   height: number;
+  /** News from the zoo (sim notifications), as opposed to feedback on the player's own action. */
+  fromZoo: boolean;
 }
 
 /** Height (px) the live cards of a toast column take, gaps included (leaving ones don't count). */
@@ -143,6 +145,8 @@ export class Toasts {
   private room = Infinity;
   /** Ongoing-work line at the top of the column (e.g. applying graphics settings), if any. */
   private status: HTMLElement | null = null;
+  /** While set (the zoo menu covers the view), news from the zoo waits; feedback still shows. */
+  private holding = false;
 
   constructor(
     private onFocus: (x: number, z: number) => void,
@@ -153,7 +157,7 @@ export class Toasts {
     return window.innerHeight < 520 ? 2 : 3;
   }
 
-  show(text: string, kind: NotifyKind, focus?: { x: number; z: number }): void {
+  show(text: string, kind: NotifyKind, focus?: { x: number; z: number }, fromZoo = false): void {
     const now = this.clock();
     this.log.add(text, kind, focus, now.day, now.minute);
     // merge repeats of the same message instead of stacking them
@@ -163,11 +167,15 @@ export class Toasts {
       if (dup.root) {
         setText(dup.countEl!, `×${dup.count}`);
         dup.countEl!.style.display = '';
-        this.schedule(dup, performance.now() + (this.queue.length ? MIN_LIFE : LIFE[dup.kind]));
+        this.schedule(dup, performance.now() + (this.waiting() ? MIN_LIFE : LIFE[dup.kind]));
       }
       return;
     }
-    const rec: ToastRec = { text, kind, focus, count: 1, root: null, countEl: null, timer: 0, shownAt: 0, expiresAt: 0, height: 0 };
+    const rec: ToastRec = { text, kind, focus, count: 1, root: null, countEl: null, timer: 0, shownAt: 0, expiresAt: 0, height: 0, fromZoo };
+    if (fromZoo && this.holding) {
+      this.enqueue(rec);
+      return;
+    }
     if (this.list.length >= this.capacity || !this.fits(TOAST_H)) {
       // a warning takes the place of the oldest routine toast rather than waiting behind it
       const routine = urgent(kind) ? this.list.find((t) => !urgent(t.kind)) : undefined;
@@ -211,6 +219,28 @@ export class Toasts {
     this.fill();
   }
 
+  /**
+   * Hold news from the zoo off screen (true while the zoo menu is open: a toast
+   * there would sit on the menu's title row) and let it show again (false).
+   * News already up steps aside, and comes back later if it was barely seen.
+   */
+  hold(on: boolean): void {
+    if (on === this.holding) return;
+    this.holding = on;
+    if (on) {
+      const off: ToastRec[] = [];
+      for (const t of this.list.filter((t) => t.fromZoo)) {
+        this.remove(t, false);
+        if (performance.now() - t.shownAt < MIN_LIFE) off.push(this.requeued(t));
+      }
+      this.queue.unshift(...off);
+      this.trimQueue();
+    }
+    this.fill();
+    // released news that still waits speeds up what is on screen
+    if (!on && this.waiting()) this.hurry();
+  }
+
   /** Show (text) or clear (null) a line about ongoing work, with a spinner, at the top of the column. */
   setStatus(text: string | null): void {
     if (!text) {
@@ -232,9 +262,18 @@ export class Toasts {
     return columnHeight(this.root) - freed + h <= this.room;
   }
 
-  /** Show waiting toasts while there is room for them. */
+  /** Show waiting toasts while there is room for them (news from the zoo waits while held). */
   private fill(): void {
-    while (this.queue.length && this.list.length < this.capacity && this.fits(this.queue[0].height || TOAST_H)) this.display(this.queue.shift()!);
+    for (let i = 0; i < this.queue.length && this.list.length < this.capacity; ) {
+      const t = this.queue[i];
+      if (this.held(t)) {
+        i++;
+        continue;
+      }
+      if (!this.fits(t.height || TOAST_H)) break;
+      this.queue.splice(i, 1);
+      this.display(t);
+    }
   }
 
   /** A fresh record (no DOM yet) for a toast that was evicted early. */
@@ -248,7 +287,17 @@ export class Toasts {
     if (at < 0) this.queue.push(rec);
     else this.queue.splice(at, 0, rec);
     this.trimQueue();
-    this.hurry();
+    if (!this.held(rec)) this.hurry();
+  }
+
+  /** News from the zoo waiting out a hold (it does not hurry what is on screen). */
+  private held(t: ToastRec): boolean {
+    return this.holding && t.fromZoo;
+  }
+
+  /** Something could take a shown toast's place as soon as it leaves. */
+  private waiting(): boolean {
+    return this.queue.some((t) => !this.held(t));
   }
 
   private trimQueue(): void {
@@ -297,7 +346,7 @@ export class Toasts {
     this.list.push(rec);
     this.root.append(root);
     rec.height = root.offsetHeight;
-    this.schedule(rec, rec.shownAt + (this.queue.length ? MIN_LIFE : LIFE[rec.kind]));
+    this.schedule(rec, rec.shownAt + (this.waiting() ? MIN_LIFE : LIFE[rec.kind]));
   }
 
   /** Take a toast off screen; `refill` shows the next waiting one in its place. */

@@ -8,7 +8,7 @@ import * as THREE from 'three';
 import { mergeVertices, toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { hashFloat as hashF, Noise, Rng } from '../../core/rng';
 import { barkMat, barkTextures } from './barks';
-import { addTube, groupOf, MeshData, v3, type V3 } from './geo';
+import { addCrownFade, addTube, groupOf, MeshData, v3, type V3 } from './geo';
 import { barkMaterial, cachedTexture, natureQuality, rockMaterial, type RockMaterial } from './mats';
 import { albedoHeightTexture, Img, lin, mix, pfbm, pworley, sat, sstep } from './tex';
 
@@ -620,7 +620,9 @@ export function buildLog(variant: number): THREE.Group {
   eg.computeVertexNormals();
   const endT = barkTextures('endgrain');
   const endMat = barkMaterial('endgrain', endT.map, endT.normal, { roughness: 0.85, fade: false });
-  const g = groupOf([[bark, barkMat('oak', 0.003), 'bark']]);
+  // the oak trees' bark material, with neutral crown data: one batch for both
+  const g = groupOf([[bark, barkMat('oak', 0.003, true, true), 'bark']]);
+  addCrownFade(g, null);
   const em = new THREE.Mesh(eg, endMat);
   em.name = 'endgrain';
   g.add(em);

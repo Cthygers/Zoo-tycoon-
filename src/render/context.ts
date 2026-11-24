@@ -34,6 +34,12 @@ const SUN_E = 3.4;
  */
 const SUN_LIGHT_HIGH = 0.55;
 const SUN_LIGHT_LOW = 0.85;
+/**
+ * Reddest direct sun (R/B) shown: the model's horizon sun reaches R/B ≈ 10–30,
+ * and at full strength sunlit crowns turn autumn-rust; the eye half adapts to
+ * it, so the lowest sun reads like the golden-hour sun at ≈ 8° instead.
+ */
+const LOW_SUN_RB = 3.0;
 /** Moonlight luminance on the ground for a full moon high in the sky. */
 const MOON_LUM = 0.08;
 /** Moon shadows are softer than sun shadows (PCF radius multiplier). */
@@ -97,10 +103,11 @@ const MORNING_FILL = 0.25;
 /** Share of the fill's desaturation the clear morning air drops: cool morning shade under a warm sun. */
 const MORNING_COOL = 0.5;
 /**
- * Displayed-brightness lift of the low morning sun (≈ 10–20°): with the same
- * B_TABLE as the evening, the first hours read dim and murky instead of fresh.
+ * Displayed-brightness lift of the low morning sun (≈ 10–25°): with the same
+ * B_TABLE as the evening, the first hours (a new zoo starts at 07:30, ≈ 10°)
+ * read dim and olive instead of fresh.
  */
-const MORNING_LIFT = 0.15;
+const MORNING_LIFT = 0.2;
 /**
  * Moonlight fill (hemisphere light) at night: the moonlit sky and ground
  * light what the moon's beam misses — the backs and shaded sides of people
@@ -109,6 +116,15 @@ const MORNING_LIFT = 0.15;
  * irradiance on horizontal ground; ground side: its bounce (BOUNCE_ALBEDO).
  */
 const MOON_FILL = 0.3;
+/**
+ * Night lift of natural ground (groundMaterial uNightLift): under the moon,
+ * sand, straw, soil and lawn sit deep in ACES's toe and crushed to near black
+ * next to paving and moonlit coats; this much more of their moonlit light
+ * brings them back to about their daylight share of the paving's brightness.
+ */
+const NIGHT_GROUND_LIFT = 1.0;
+/** Sun elevation (deg) below which the sky's light starts to turn blue-hour blue (the sky dome: 1.5°). */
+const SKY_LIGHT_BLUE_ELEV = 4;
 /** Blue-hour sky colour (luminance 1), see the sky shader's uTwilight. */
 const TWILIGHT_BLUE = new THREE.Color(0.646, 0.999, 2.056);
 
@@ -269,9 +285,12 @@ export function daylight(atm: AtmosphereModel, sunElev: number, sunCol: THREE.Co
   // the model reddens the mid-morning / late-afternoon sun a little too much;
   // trim it lightly, so a sun below ~25° still reads warm
   const desat = (0.12 + 0.03 * smooth01(4, 12, se)) * (1 - smooth01(25, 45, se));
-  if (desat > 0) {
-    const l = luminance(sunCol);
-    sunCol.lerp(scratchGrey.setRGB(l, l, l), desat);
+  const l = luminance(sunCol);
+  if (desat > 0) sunCol.lerp(scratchGrey.setRGB(l, l, l), desat);
+  // …and the horizon sun down to LOW_SUN_RB (the share k of grey that gives r / b = LOW_SUN_RB)
+  if (sunCol.r > LOW_SUN_RB * sunCol.b) {
+    const k = (sunCol.r - LOW_SUN_RB * sunCol.b) / (sunCol.r - l + LOW_SUN_RB * (l - sunCol.b));
+    sunCol.lerp(scratchGrey.setRGB(l, l, l), k);
   }
   const sunLight = SUN_LIGHT_HIGH + (SUN_LIGHT_LOW - SUN_LIGHT_HIGH) * (1 - smooth01(4, 32, se));
   const sunY = Math.max(Math.sin(sunElev), 0);
@@ -337,7 +356,7 @@ export function airOfDay(hour: number, se: number, sunTint: THREE.Color): number
  * `se` (deg) and morning share `morning` (0…1).
  */
 export function morningLift(se: number, morning: number): number {
-  return 1 + MORNING_LIFT * morning * smooth01(2, 10, se) * (1 - smooth01(20, 30, se));
+  return 1 + MORNING_LIFT * morning * smooth01(2, 10, se) * (1 - smooth01(25, 35, se));
 }
 
 /** Per-tier environment detail (the contract's QualitySettings stay generic). */
@@ -750,9 +769,12 @@ export class RenderContext implements IRenderContext {
       this.lightDir.normalize();
     }
 
-    // ---- sky irradiance and colours (blue hour: see twilightTint)
+    // ---- sky irradiance and colours (blue hour: see twilightTint). The light
+    // the sky sheds turns blue from a little before sunset: it comes mostly
+    // from the blue upper sky, not from the orange horizon band that
+    // dominates the model's irradiance (warm, autumn-orange dusk otherwise)
     const twilight = 0.85 * smooth01(1.5, -4, se);
-    const skyIrr = twilightTint(this.skyIrr.copy(atm.skyIrradiance).multiplyScalar(skyE), twilight);
+    const skyIrr = twilightTint(this.skyIrr.copy(atm.skyIrradiance).multiplyScalar(skyE), 0.85 * smooth01(SKY_LIGHT_BLUE_ELEV, -4, se));
     const nightSky = this.tmpC2.setRGB(0.0009, 0.0017, 0.0042).multiplyScalar(0.5 + 1.6 * moonUp * cel.moonIllum).multiplyScalar(night);
     skyIrr.add(this.tmpC.copy(nightSky).multiplyScalar(2.2));
     const u = this.sky.uniforms;
@@ -812,6 +834,8 @@ export class RenderContext implements IRenderContext {
     this.groundU.uSunDirW.value.copy(this.lightDir);
     this.groundU.uSunCol.value.copy(this.sun.color).multiplyScalar(this.sun.intensity);
     this.groundU.uCloudShadow.value = 0.45 * (1 - night) * Math.min(1, Math.max(0, se / 8));
+    this.groundU.uNightLift.value = NIGHT_GROUND_LIFT * night;
+    this.grass.uniforms.uNightLift.value = NIGHT_GROUND_LIFT * night;
     this.grass.uniforms.uSunDirW.value.copy(this.lightDir);
     this.grass.uniforms.uSunCol.value.copy(this.sun.color).multiplyScalar(this.sun.intensity);
 

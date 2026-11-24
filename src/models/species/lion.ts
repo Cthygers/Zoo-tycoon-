@@ -161,6 +161,15 @@ function bodyPrims(male: boolean): Prim[] {
       ellipsoid('HL_upper', [0.115, 0.71, -0.5], [0.1, 0.22, 0.18], { rot: [-0.1, 0, 0], blend: 0.08, part: 'body' }),
       ellipsoid('HL_upper', [0.07, 0.76, -0.66], [0.075, 0.17, 0.09], { blend: 0.07, part: 'body' }),
     ]),
+    // muscle relief rolling under the coat, a centimetre or two each: the
+    // scapular spine, the triceps mass behind the upper arm, the quadriceps
+    // at the front of the thigh and the hamstrings behind it
+    ...symmetric([
+      ellipsoid('FL_scap', [0.178, 0.9, 0.39], [0.022, 0.13, 0.03], { rot: [-0.3, 0, 0], blend: 0.05, part: 'body' }),
+      ellipsoid('FL_upper', [0.158, 0.68, 0.37], [0.068, 0.11, 0.06], { rot: [-0.45, 0, 0], blend: 0.06, part: 'body' }),
+      ellipsoid('HL_upper', [0.14, 0.67, -0.39], [0.065, 0.13, 0.065], { rot: [0.35, 0, 0], blend: 0.06, part: 'body' }),
+      ellipsoid('HL_upper', [0.125, 0.73, -0.66], [0.06, 0.15, 0.06], { rot: [-0.2, 0, 0], blend: 0.06, part: 'body' }),
+    ]),
   ];
 }
 
@@ -211,6 +220,8 @@ const TAWNY = 0xa07843;
 const CREAM = 0xc9ab82;
 /** Belly and inner legs: paler than the cream of the face, so the underside reads from the side. */
 const BELLY = 0xd8c39e;
+/** Blend of BELLY into the inner upper legs: about 1.2× the flank's brightness there. */
+const INNER_LEG = 0.13;
 /** Mane: tan rim at the face, deep brown at the rear and underside, black-brown locks. */
 const MANE_RIM = 0xb4874c;
 const MANE_MID = 0x6a4627;
@@ -238,12 +249,16 @@ function lionCoat(male: boolean, hs: number, eye: Vec3, eyeR: number) {
     const hw = clamp01(c.pw('head') + c.pw('muzzle') + c.pw('chin') + c.pw('nose') + c.pw('ear'));
     // (not on the head: pale jaws and cheeks read as a bear's face)
     // the pale belly creeps up the lower flank, so it shows from the side
-    const under = clamp01(smooth(0.1, -0.55, c.ny) * smooth(0.85, 0.7, y) + (Math.abs(x) < 0.1 && y < 0.75 ? 0.3 : 0)) * (1 - hw * 0.8);
+    // (only a little down the lower legs, whose inner faces come close to the midline)
+    const legW = clamp01((c.pw('leg') + c.pw('paw')) * 1.5);
+    const under = clamp01(smooth(0.1, -0.55, c.ny) * smooth(0.85, 0.7, y) + (Math.abs(x) < 0.1 && y < 0.75 ? 0.3 : 0)) * (1 - hw * 0.8) * (1 - 0.7 * legW);
     blendHex(c.color, BELLY, under * 0.8);
-    // inner legs pale: limb surfaces below the body that face the other legs
-    const leg = clamp01((c.pw('leg') + c.pw('paw')) * 1.5);
-    const inner = smooth(0.2, -0.5, Math.sign(x) * c.nx) * smooth(0.8, 0.55, y) * (1 - hw);
-    blendHex(c.color, BELLY, inner * (0.3 + 0.25 * leg));
+    // inner legs paler: only the medial face (normal toward the midline) of
+    // the upper forearm and thigh, fading out down the leg, so the outer and
+    // lower legs stay tawny (no cream stockings on the far legs)
+    const medial = smooth(-0.3, -0.7, Math.sign(x) * c.nx);
+    const inner = medial * smooth(0.2, 0.45, y) * smooth(0.8, 0.55, y) * (1 - hw);
+    blendHex(c.color, BELLY, inner * INNER_LEG);
     // muscle masses: a soft darker crease behind the shoulder (triceps) and in
     // front of the thigh (stifle fold), the masses a touch lighter on top, so
     // the flank reads as muscle under the coat rather than a smooth shell
@@ -305,7 +320,7 @@ function lionCoat(male: boolean, hs: number, eye: Vec3, eyeR: number) {
     // tail tuft
     blendHex(c.color, TUFT, smooth(0.15, 0.5, c.pw('tuft')));
     // legs a touch darker than the flanks (they catch a lot of sky light)
-    c.color.multiplyScalar(1 - 0.12 * clamp01((c.pw('leg') + c.pw('paw')) * 1.5));
+    c.color.multiplyScalar(1 - 0.12 * legW);
     // muscle modelling: the grooves around shoulder, elbow and haunch and the
     // flank under the ribs shade in, so the body doesn't read as smooth plastic
     if (c.pw('body') + c.pw('belly') + c.pw('neck') > 0.3) c.color.multiplyScalar(1 - 0.75 * c.ao(0.14));
@@ -316,7 +331,12 @@ function lionCoat(male: boolean, hs: number, eye: Vec3, eyeR: number) {
     // shoulders, the underside and the chest bib, in vertical locks (streaks)
     // with a few paler, sun-bleached tips near the face
     if (male) {
-      const m = c.pw('mane');
+      // the mane's edge hangs in 3–5 cm locks (noise stretched down the hair)
+      // instead of a hard line, and a few dark locks reach below it
+      const m = c.pw('mane') + fbm(x * 24, y * 7, z * 24, 2, 29) * 0.35;
+      // (on the shoulders and chest only: under the belly fringe they read as dirt)
+      const below = smooth(0.07, 0.0, c.pd('mane')) * smooth(0.25, 0.0, m) * smooth(0.6, 0.2, c.ny) * smooth(0.25, 0.35, z) * (1 - hw);
+      if (below > 0) blendHex(c.color, MANE_DARK, below * smooth(0.15, 0.4, fbm(x * 40, y * 5, z * 40, 2, 31)) * 0.7);
       if (m > 0.05) {
         const face = smooth(0.7, 0.86, z) * smooth(0.62, 0.8, y);
         const dark = clamp01(smooth(0.74, 0.45, z) + smooth(0.86, 0.62, y) + smooth(-0.2, -0.7, c.ny) * 0.6) * (1 - face);

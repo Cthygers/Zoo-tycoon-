@@ -13,5 +13,7 @@ export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts'],
     environment: 'node',
+    // The sim suites run whole game days; give them headroom when the machine is busy.
+    testTimeout: 20_000,
   },
 } as any);

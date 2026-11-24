@@ -67,13 +67,15 @@ export function lakeBedKind(world: World, x: number, z: number): LakeBed {
 const LAWN_R = 3;
 
 /**
- * Share of lawn tiles around a dry-grass or dirt tile (0 for other types):
- * a small dry patch inside a lawn is drawn as worn, yellowing turf rather
- * than a beige stain, while a painted savanna keeps its full look.
+ * Share of lawn tiles around a dry-grass or dirt tile, or a mud tile on a
+ * pond's shore (0 for other types): a small dry patch inside a lawn is drawn
+ * as worn, yellowing turf rather than a beige stain, and a pond's mud ring
+ * in a lawn as a narrow, ragged margin the turf grows into (groundMaterial.ts,
+ * grass.ts), while a painted savanna or wetland keeps its full look.
  */
 export function lawnShare(world: World, x: number, z: number): number {
   const t = world.terrain[world.idx(x, z)] as Terrain;
-  if (t !== Terrain.DryGrass && t !== Terrain.Dirt) return 0;
+  if (t !== Terrain.DryGrass && t !== Terrain.Dirt && !(t === Terrain.Mud && nearWater(world, x, z))) return 0;
   let lawn = 0;
   let n = 0;
   for (let dz = -LAWN_R; dz <= LAWN_R; dz++)

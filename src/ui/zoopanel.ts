@@ -100,9 +100,15 @@ export class ZooPanel {
     return !this.root.classList.contains('hidden');
   }
 
+  /** The Messages tab is on screen: news shows up in its list as it comes in. */
+  get readingMessages(): boolean {
+    return this.isOpen && this.tab === 'messages';
+  }
+
   /**
    * The free stretch of the title row (screen px), between the tab's name and the close
-   * button: toasts show there while the menu is open, so feedback (e.g. Save now) is seen.
+   * button: feedback toasts (e.g. Save now) show there while the menu is open; news
+   * from the zoo waits until it closes.
    */
   headGap(): { x0: number; x1: number; top: number } {
     const range = document.createRange();

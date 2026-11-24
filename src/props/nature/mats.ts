@@ -139,16 +139,21 @@ void RE_Direct_Leaf( const in IncidentLight directLight, const in vec3 geometryP
 
 // Canopy multiple scattering: sky light reaching shaded leaves has passed
 // through other leaves, so tint the ambient toward the leaf's own hue
-// (keeps crown interiors green instead of sky-blue). Under the moon a crown
-// is a dark mass: no light through the leaves (above), no silvery sheen off
-// thousands of card faces, and less of the lifted night sky inside it.
+// (keeps crown interiors green instead of sky-blue), and the crown's
+// underside (crown-bent normals facing down) sees mostly the crown above and
+// the ground, not the sky: up to a quarter less ambient there, so crowns get
+// depth instead of a flat lit underside. Under the moon a crown is a dark
+// mass: no light through the leaves (above), no silvery sheen off thousands
+// of card faces, and less of the lifted night sky inside it.
 const LEAF_AMBIENT = /* glsl */ `
 {
   float lfLum = max( dot( diffuseColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) ), 1e-3 );
   vec3 lfHue = clamp( diffuseColor.rgb / lfLum, 0.0, 2.0 );
-  reflectedLight.indirectDiffuse *= mix( vec3( 1.0 ), lfHue, 0.4 ) * ( 1.0 - 0.4 * uLeafNight );
+  float lfUp = dot( normal, normalize( ( viewMatrix * vec4( 0.0, 1.0, 0.0, 0.0 ) ).xyz ) );
+  float lfUnder = mix( 0.75, 1.0, smoothstep( -0.4, 0.6, lfUp ) );
+  reflectedLight.indirectDiffuse *= mix( vec3( 1.0 ), lfHue, 0.4 ) * lfUnder * ( 1.0 - 0.4 * uLeafNight );
   reflectedLight.directSpecular *= 1.0 - 0.8 * uLeafNight;
-  reflectedLight.indirectSpecular *= 1.0 - 0.8 * uLeafNight;
+  reflectedLight.indirectSpecular *= lfUnder * ( 1.0 - 0.8 * uLeafNight );
 }
 `;
 

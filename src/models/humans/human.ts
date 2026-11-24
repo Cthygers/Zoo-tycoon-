@@ -16,7 +16,7 @@ import { RiggedModel, highlightPulse, jointMatrix, type AssetPicker, type CrowdH
 import { disposeAsset } from '../assets';
 import { driver, hash1, unwrapDriver } from '../anim/util';
 import { humanDriver } from '../anim/human';
-import { humanDesign, type HairKind, type HumanBodyKey, type HumanDesign } from './design';
+import { fringeDistance, humanDesign, type HairKind, type HumanBodyKey, type HumanDesign } from './design';
 import {
   HUMAN_BODIES,
   HUMAN_HIGHLIGHT_INDEX,
@@ -43,6 +43,9 @@ export interface HumanAsset extends RigAsset {
 
 const GIRTH: Record<string, number> = { torso: 1, pelvis: 0.85, skirt: 0.7, arm: 0.3, leg: 0.55, neck: 0.25, hand: 0, shoe: 0, head: 0.05, ear: 0, hair: 0.05, hat: 0 };
 
+/** Zone value of a bald man's fringe: under the full-hair edge (4 mm), so it shows as thin, close-cropped hair over the scalp. */
+const FRINGE_COVER = 0.003;
+
 /** Hand region cell (m) per detail level: low keeps the coarse arm grid. */
 const HAND_CELL: readonly number[] = [0, 0.02, 0.014];
 
@@ -62,7 +65,8 @@ function humanBaker(d: HumanDesign): VertexBaker {
       if (s.part === 'arm' || s.part === 'hand') armT = Math.hypot(s.x - sh[0] * side, s.y - sh[1], s.z - sh[2]);
       if (s.part === 'leg' || s.part === 'shoe') legT = Math.hypot(s.x - hp[0] * side, s.y - hp[1], s.z - hp[2]);
       const dHair = s.pd('hair'), dHat = s.pd('hat');
-      const hairD = dHair < 1e2 ? s.pdExcept(notHair) - dHair : -1;
+      const bareScalp = dHair >= 1e2 && dHat >= 1e2 && s.pw('head') > 0.5 && s.pw('ear') < 0.5;
+      const hairD = dHair < 1e2 ? s.pdExcept(notHair) - dHair : bareScalp ? Math.min(fringeDistance(d, s.y, s.z), FRINGE_COVER) : -1;
       const hatD = dHat < 1e2 ? s.pdExcept(notHat) - dHat : -1;
       out[0][v * 4] = armT;
       out[0][v * 4 + 1] = legT;
@@ -155,6 +159,12 @@ function marksOf(d: HumanDesign): HumanMarks {
   return { collarY: m.collarY, waistY: m.waistY, shoeTop: m.shoeTop, eyeL: [...m.eyeL], mouth: [...m.mouth] };
 }
 
+const _tone = new THREE.Color();
+/** A garment colour shifted by up to ±8 % in linear value (≈ ±3 % sRGB) and ±0.01 in hue (r1, r2 uniform 0..1). */
+function garmentTone(hex: number, r1: number, r2: number): number {
+  return _tone.setHex(hex).offsetHSL((r2 - 0.5) * 0.02, 0, 0).multiplyScalar(1 + (r1 - 0.5) * 0.16).getHex();
+}
+
 /** Body id used by the batched material: female + 2 × child. */
 function bodyIndex(female: boolean, child: boolean): number {
   return (female ? 1 : 0) + (child ? 2 : 0);
@@ -209,6 +219,11 @@ export class HumanModel extends RiggedModel implements BatchedModel {
       shoes: app.shoes,
       hat: r(1) < 0.5 ? app.shirt : app.pants,
     };
+    // no two garments of a palette colour are quite the same dye or equally
+    // worn: a slight per-garment tone shift (before a dress copies its top)
+    colors.shirt = garmentTone(colors.shirt, r(11), r(12));
+    colors.pants = garmentTone(colors.pants, r(13), r(14));
+    colors.hat = garmentTone(colors.hat, r(15), r(16));
     let cut: HumanCut = {
       sleeve: r(2) < 0.55 ? 0.13 : 0.56,
       pants: r(3) < (app.child ? 0.5 : 0.25) ? 0.34 : 1.1,

@@ -4,7 +4,7 @@ import { PathType, Terrain } from '../src/core/types';
 import { World } from '../src/core/world';
 import * as THREE from 'three';
 import { buildPoolGrid, poolLight, surfaceBrightness, type WorldEmitter } from '../src/props/lights/nightlights';
-import { applyLampField, lampFieldAt, lampFieldUniforms, resetLampField, writeLampField } from '../src/props/lights/lampField';
+import { applyLampField, figureColourShare, lampFieldAt, lampFieldUniforms, moonShoulder, resetLampField, writeLampField } from '../src/props/lights/lampField';
 
 function lamp(x: number, z: number, y = 3.2): WorldEmitter {
   return { x, y, z, kind: 'lamp', px: x, pz: z, radius: 6.7, intensity: 1 };
@@ -142,8 +142,39 @@ describe('lamp light on creatures', () => {
       fragmentShader: THREE.ShaderLib.physical.fragmentShader,
     } as unknown as THREE.WebGLProgramParametersWithUniforms;
     applyLampField(shader);
-    expect(shader.fragmentShader).toContain('whLampLit = smoothstep(0.15, 0.6, vLampLight) * uLampMark');
+    expect(shader.fragmentShader).toContain('pow(smoothstep(0.05, 0.80, vLampLight) * uLampMark, 0.70)');
+    expect(shader.fragmentShader).toContain('whLampLit = 0.40 * (0.5 - sin(asin(');
     // HDR target: the same linear mark as the pool on the ground (nightlights.ts)
     expect(shader.fragmentShader).toContain('gl_FragColor.a += vLampLight * uLampMark');
+  });
+
+  it('colours figures gradually across a pool fringe instead of flipping one figure at a time', () => {
+    expect(figureColourShare(0.6, 0)).toBe(0);
+    expect(figureColourShare(0.03, 1)).toBe(0);
+    expect(figureColourShare(0.9, 1)).toBe(1);
+    // two guests a metre apart at the fringe (light 0.2 / 0.3) differ by a step, not a switch
+    const a = figureColourShare(0.2, 1);
+    const b = figureColourShare(0.3, 1);
+    expect(a).toBeGreaterThan(0.1);
+    expect(b).toBeLessThan(0.5);
+    expect(b - a).toBeLessThan(0.25);
+    for (let l = 0; l < 1; l += 0.05) expect(figureColourShare(l + 0.05, 1)).toBeGreaterThanOrEqual(figureColourShare(l, 1));
+    // the shader's mark is the inverse of the grade's smoothstep (grade.ts) of that share
+    const share = figureColourShare(0.35, 1);
+    const mark = 0.4 * (0.5 - Math.sin(Math.asin(1 - 2 * share) / 3));
+    const t = mark / 0.4;
+    expect(t * t * (3 - 2 * t)).toBeCloseTo(share, 5);
+  });
+
+  it('keeps a moonlit white coat near a pale wall while guests outside the pools keep their level', () => {
+    // displayed luminance (× exposure) of the round-8 night views, medium
+    const coat = 0.24;
+    const shirt = 0.078;
+    expect(coat * moonShoulder(coat)).toBeGreaterThan(0.11);
+    expect(coat * moonShoulder(coat)).toBeLessThan(0.15);
+    expect(moonShoulder(shirt)).toBeGreaterThan(0.9);
+    expect(moonShoulder(0.03)).toBeGreaterThan(0.995);
+    // monotonic: brighter stays brighter
+    for (let d = 0.02; d < 2; d *= 1.3) expect((d * 1.3) * moonShoulder(d * 1.3)).toBeGreaterThan(d * moonShoulder(d));
   });
 });

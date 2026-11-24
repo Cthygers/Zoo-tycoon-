@@ -229,11 +229,13 @@ function hippoCoat(eye: Vec3) {
     const wetTop = 1.05 + n * 0.2 + fbm(x * 4.5, y * 4.5, z * 4.5, 2, 106) * 0.14 + drip * 0.08;
     const wet = smooth(wetTop, wetTop - 0.12, y) * smooth(-0.95, -0.7, c.ny);
     blendHex(c.color, 0x2f241d, wet * 0.75);
-    // the skin above it has dried to a paler, dusty grey, so the wet band stands out
-    blendHex(c.color, 0x7a6d64, smooth(0.04, 0.3, y - wetTop) * smooth(-0.3, 0.3, c.ny) * 0.3);
+    // the skin above it has dried to a paler, dusty grey (matte: no sky sheen
+    // lifts it), so the wet band stands out
+    blendHex(c.color, 0x7a6d64, smooth(0.04, 0.3, y - wetTop) * smooth(-0.3, 0.3, c.ny) * 0.45);
     c.color2.copy(c.color).multiplyScalar(0.62);
     c.w = 0;
-    c.gloss = 0.1 + 0.4 * wet;
+    // dry skin is matte; only the wet band shines
+    c.gloss = 0.5 * wet;
     // skin creases behind the elbows and in front of the thighs, where the barrel folds as the legs swing
     for (const [zc, lean] of FLANK_CREASES) {
       const d = z - zc - (y - 0.8) * lean;
@@ -271,7 +273,7 @@ function hippoCoat(eye: Vec3) {
       const inner = smooth(0.2, 0.1, ax) * smooth(2.2, 2.04, z) * smooth(1.7, 1.85, z);
       blendHex(c.color, 0x4f3433, k * (1 - inner));
       blendHex(c.color, y > MOUTH_Y ? GUM : TONGUE, k * inner);
-      c.gloss = 0.45 * k + 0.1 * (1 - k);
+      c.gloss = 0.45 * k + c.gloss * (1 - k);
       c.w = 0;
     }
     if (c.part === 'tooth') {
@@ -513,9 +515,9 @@ function design(ctx: DesignContext): CreatureDesign {
       tail: { scale: 0.3, aniso: [1, 1.5, 1] },
     },
     coat: hippoCoat(eye),
-    // moist but not mirror-like: a glossier skin only reflects the sky and reads flat grey
+    // dry, dusty and matte above the wet band (its gloss is baked in the coat)
     // bump 0.3: the neck and leg folds and the fine creases shade in enough to read at mid range
-    look: { skin: 'wrinkled', pattern: 'stripes', roughness: 0.74, sheen: 0.05, grain: 0.012, bump: 0.3, mottle: 0.1 },
+    look: { skin: 'wrinkled', pattern: 'stripes', roughness: 0.9, sheen: 0.12, grain: 0.012, bump: 0.3, mottle: 0.1 },
     eyes: [{ bone: 'head', pos: eye, radius: 0.026, color: 0x2a1609 }],
     anim: driver(makeDriver(ctx.def.height, ctx.def.walkSpeed, ctx.def.runSpeed)),
     babyScale: 0.25,

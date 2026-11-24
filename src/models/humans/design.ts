@@ -31,7 +31,26 @@ export interface HumanDesign {
     shoeTop: number;
     eyeL: Vec3;
     mouth: Vec3;
+    /** Head ellipsoid centre and scale (adult male head = 1), for marks painted on the scalp. */
+    headC: Vec3;
+    headS: number;
   };
+}
+
+/**
+ * Signed distance (m, > 0 inside) to the horseshoe of close-cropped hair a
+ * bald man keeps above the ears and round the back of the head, rising from
+ * the sideburns to the back. Baked as thin hair on bald heads (human.ts), so
+ * they have a hairline instead of a blank mannequin dome.
+ */
+export function fringeDistance(d: HumanDesign, y: number, z: number): number {
+  const k = d.marks.headS;
+  const u = (y - d.marks.headC[1]) / k;
+  const w = (z - d.marks.headC[2]) / k;
+  const back = Math.min(1, Math.max(0, -w / 0.094));
+  const bottom = -0.035 - 0.035 * back;
+  const top = 0.012 + 0.023 * back;
+  return Math.min(0.03 - w, u - bottom, top - u) * k;
 }
 
 /**
@@ -216,6 +235,8 @@ export function humanDesign(key: HumanBodyKey): HumanDesign {
       shoeTop: 0.1 * bs,
       eyeL: H([0.032, 1.655, 0.083]),
       mouth: H([0, 1.585, 0.084]),
+      headC: H([0, 1.645, 0]),
+      headS: bs * hs,
     },
   };
 }

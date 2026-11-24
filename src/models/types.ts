@@ -140,11 +140,20 @@ export interface LookSpec {
   skin: 'fur' | 'hide' | 'smooth' | 'feather' | 'wrinkled';
   /** Per-pixel pattern mode (see CoatSample.s). Default 'none'. */
   pattern?: 'none' | 'stripes' | 'field';
-  /** Base roughness (default 0.86). */
+  /**
+   * Base roughness (default 0.88 fur, 0.8 hide / wrinkled, 0.55 smooth); the
+   * shader spreads it by about ±0.06 in clumps and lowers it where the coat
+   * bakes gloss (eyes, nose leather, wet skin).
+   */
   roughness?: number;
-  /** Soft rim / fuzz term strength 0..1 (default 0.35 for fur). */
+  /**
+   * Silhouette sheen 0..1: a halo in the coat's hue where the surface turns
+   * away from the view — tight on short coats, broad on long hair (default
+   * 0.3 fur, 0.2 feathers, 0.05 otherwise). Fur, feathers and dry skin also
+   * get a weak grazing reflection instead of the white plastic rim.
+   */
   sheen?: number;
-  /** Fur strand / wrinkle scale in metres (default 0.006). */
+  /** Fur strand / wrinkle scale in metres (default 0.006); fur clumps are 5.5× this. */
   grain?: number;
   /** Micro-normal strength 0..1 (default 0.5). */
   bump?: number;

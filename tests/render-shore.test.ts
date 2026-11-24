@@ -8,6 +8,7 @@ import { EventBus } from '../src/core/events';
 import { Terrain } from '../src/core/types';
 import { World } from '../src/core/world';
 import { createGroundMaterial } from '../src/render/groundMaterial';
+import { shoreLawnShares } from '../src/render/grass';
 import { crownCover, LakeBed, lakeBedKind, lawnShare, TileIndexTexture } from '../src/render/terrain';
 import type { GroundTextureSet } from '../src/render/textures';
 import { SHORE_OFFSET_GLSL, WaterSurface } from '../src/render/water';
@@ -71,6 +72,44 @@ describe('dry patches inside lawns', () => {
     tex.update({ x0: 38, z0: 38, x1: 46, z1: 39 });
     expect(a(42, 40) & 3).toBe(LakeBed.Gravel);
     tex.dispose();
+  });
+});
+
+describe('a pond\'s mud ring in a lawn', () => {
+  it('counts the lawn around shore mud only (a wetland or a mud patch away from water keeps its look)', () => {
+    const w = flatWorld(Terrain.Grass);
+    // a pond ringed by one tile of mud, as the New Zoo map lays it out
+    paint(w, 19, 19, 25, 25, Terrain.Mud);
+    paint(w, 20, 20, 24, 24, Terrain.Water);
+    // a mud patch on dry land, and a mud wetland around another pond
+    paint(w, 40, 10, 41, 11, Terrain.Mud);
+    paint(w, 40, 40, 60, 60, Terrain.Mud);
+    paint(w, 48, 48, 52, 52, Terrain.Water);
+    expect(lawnShare(w, 19, 22)).toBeGreaterThan(0.4);
+    expect(lawnShare(w, 40, 10)).toBe(0);
+    expect(lawnShare(w, 47, 50)).toBe(0);
+    const shore = shoreLawnShares(w);
+    expect(shore[22 * MAP_W + 19]).toBe(lawnShare(w, 19, 22));
+    expect(shore[10 * MAP_W + 40]).toBe(0);
+    expect(shore[5 * MAP_W + 5]).toBe(0);
+  });
+
+  it('gives the shore soil back to the turf up the bank in the ground shader, and pales what is left', () => {
+    const t = new THREE.DataArrayTexture();
+    const set: GroundTextureSet = { albedo: t, detail: t, noise: t, waves: t, foliage: t };
+    const ground = createGroundMaterial(set, new THREE.Texture(), { antiTile: false, cloudShadows: false, caustics: false });
+    const shader = { vertexShader: THREE.ShaderLib.standard.vertexShader, fragmentShader: THREE.ShaderLib.standard.fragmentShader, uniforms: {}, defines: {} };
+    ground.material.onBeforeCompile(shader as unknown as THREE.WebGLProgramParametersWithUniforms, {} as THREE.WebGLRenderer);
+    const fs = shader.fragmentShader;
+    // the height above the waterline is known before the layers are blended
+    expect(fs.indexOf('gWy = wy;')).toBeGreaterThan(0);
+    expect(fs.indexOf('gWy = wy;')).toBeLessThan(fs.indexOf('GSample gs = sampleGround('));
+    expect(fs).toContain('back *= smoothstep(0.15, 0.32, up);');
+    expect(fs).toContain('return mixSample(r, sampleLayer(0, wp.xz), back);');
+    expect(fs).toContain('float shoreSoil = gMud * gShoreMud;');
+    // the dirt crust blurs sooner with distance (no 1-px crack net)
+    expect(fs).toMatch(/if \(layer == 2\) \{[^}]*smoothstep\(0\.016, 0\.036/);
+    ground.material.dispose();
   });
 });
 

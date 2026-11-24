@@ -42,7 +42,9 @@ describe('foliage at night', () => {
     const b = new FoliageMaterial();
     const sh = compile(a);
     expect(sh.fragmentShader).toMatch(/uLeafTrans \* \( 1\.0 - uLeafNight \)/);
-    expect(sh.fragmentShader).toContain('reflectedLight.indirectSpecular *= 1.0 - 0.8 * uLeafNight;');
+    expect(sh.fragmentShader).toContain('reflectedLight.indirectSpecular *= lfUnder * ( 1.0 - 0.8 * uLeafNight );');
+    // the crown's underside sees the crown and the ground, not the sky: less ambient there
+    expect(sh.fragmentShader).toContain('float lfUnder = mix( 0.75, 1.0, smoothstep( -0.4, 0.6, lfUp ) );');
     setNatureNight(0.75);
     expect((sh.uniforms.uLeafNight as THREE.IUniform<number>).value).toBe(0.75);
     expect(b.leafNight.value).toBe(0.75);

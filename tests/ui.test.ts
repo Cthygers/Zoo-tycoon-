@@ -114,6 +114,28 @@ describe('Toasts', () => {
     expect(t.log.entries[0].count).toBe(2);
   });
 
+  it('holds news from the zoo while the zoo menu is open, but shows feedback on the player’s own action', () => {
+    const t = make();
+    t.show('Day 2 closed: −$8', 'warn', undefined, true);
+    expect(visible(t)).toEqual(['Day 2 closed: −$8']);
+    // the menu opens: the news steps off its title row, the save feedback shows there
+    t.hold(true);
+    t.setRoom(76);
+    t.show('Tilly is hungry', 'bad', undefined, true);
+    t.show('Game saved', 'good');
+    expect(visible(t)).toEqual(['Game saved']);
+    // the waiting news does not cut the feedback short
+    vi.advanceTimersByTime(2600);
+    expect(visible(t)).toEqual(['Game saved']);
+    // the menu closes: the waiting news comes back
+    t.hold(false);
+    t.setRoom(200);
+    expect(visible(t)).toEqual(['Game saved', 'Day 2 closed: −$8']);
+    vi.advanceTimersByTime(2600);
+    expect(visible(t)).toContain('Tilly is hungry');
+    expect(t.log.entries.map((e) => e.text)).toEqual(['Game saved', 'Tilly is hungry', 'Day 2 closed: −$8']);
+  });
+
   it('logs a message another widget already shows without popping a toast', () => {
     const t = make();
     t.logOnly('Goal complete: Adopt your first animal (+$2,500)', 'good');

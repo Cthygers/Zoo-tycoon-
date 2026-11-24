@@ -4,7 +4,7 @@
 // the lion's mane is two-tone and its belly and inner legs are pale.
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { fitOutfit, hexToLab, looksLikeSkin, randomGuestAppearance } from '../src/sim/names';
+import { fitOutfit, hairReads, hexToLab, looksLikeSkin, randomGuestAppearance } from '../src/sim/names';
 import { SimRng } from '../src/sim/rng';
 import { CreatureFactory } from '../src/models';
 import { assetFromDesign } from '../src/models/assets';
@@ -17,6 +17,10 @@ import type { Simulation } from '../src/sim/simulation';
 import { buildZoo, buyHerd, hire, newSim } from './sim-helpers';
 
 const L = (hex: number) => hexToLab(hex)[0];
+const dE = (a: number, b: number) => {
+  const [p, q] = [hexToLab(a), hexToLab(b)];
+  return Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+};
 
 describe('guest outfits', () => {
   it('never pass for skin, separate top from bottom, and keep pale tops off pale-haired women', () => {
@@ -27,7 +31,51 @@ describe('guest outfits', () => {
       expect(looksLikeSkin(a.pants, a.skin)).toBe(false);
       expect(Math.abs(L(a.shirt) - L(a.pants))).toBeGreaterThanOrEqual(18);
       if (a.female && L(a.hair) > 45) expect(L(a.shirt)).toBeLessThanOrEqual(80);
+      // a woman's top or bottom may be a dress or skirt over bare legs; hair frames the face
+      if (a.female) {
+        expect(dE(a.shirt, a.skin)).toBeGreaterThanOrEqual(25);
+        expect(dE(a.pants, a.skin)).toBeGreaterThanOrEqual(25);
+      }
+      expect(hairReads(a.hair, a.skin)).toBe(true);
     }
+  });
+
+  it('re-dyes hair that melts into the skin to the nearest darker shade that reads, and keeps black hair on the darkest skin', () => {
+    expect(hairReads(0x8b4a2a, 0x8a5a3c)).toBe(false); // dark red on brown
+    expect(hairReads(0xb8b2a8, 0xf3d5c0)).toBe(false); // pale grey on pale
+    expect(hairReads(0x16110e, 0x45291a)).toBe(true); // black on the darkest skin
+    const brown = { skin: 0x8a5a3c, hair: 0x8b4a2a, shirt: 0xc4644a, pants: 0x2a2a2c, shoes: 0x222222, hairStyle: 1 as const, height: 1.64, build: 1, child: false, female: true };
+    fitOutfit(brown);
+    expect(brown.hair).toBe(0x4a3324); // a dark brown, not blonde
+    expect(dE(brown.shirt, brown.skin)).toBeGreaterThanOrEqual(25); // no coral dress on brown skin
+    // nor on darker brown skin, where ΔE alone passes it: same hue family, close in lightness
+    for (const skin of [0x734a30, 0x5c3a25]) {
+      const dark = { ...brown, skin, shirt: 0xc4644a };
+      fitOutfit(dark);
+      expect(dark.shirt).not.toBe(0xc4644a);
+    }
+    const pale = { skin: 0xf3d5c0, hair: 0xb8b2a8, shirt: 0x2f3e55, pants: 0x9a8f7c, shoes: 0x222222, hairStyle: 2 as const, height: 1.77, build: 1, child: false, female: false };
+    fitOutfit(pale);
+    expect(pale.hair).toBe(0x6e6e6e); // still grey, a shade darker
+    const mid = { ...pale, skin: 0x5c3a25, hair: 0x7a5a3c };
+    fitOutfit(mid);
+    expect(mid.hair).toBe(0x241912); // very dark brown, not dark blonde
+  });
+
+  it('halves the bald share on the two palest skins', () => {
+    const rng = new SimRng(5);
+    const bald = { pale: [0, 0], other: [0, 0] };
+    for (let i = 0; i < 20000; i++) {
+      const a = randomGuestAppearance(rng, false);
+      if (a.female) continue;
+      const k = a.skin === 0xf3d5c0 || a.skin === 0xe9c2a2 ? bald.pale : bald.other;
+      k[0] += a.hairStyle === 2 ? 1 : 0;
+      k[1]++;
+    }
+    const pale = bald.pale[0] / bald.pale[1], other = bald.other[0] / bald.other[1];
+    expect(other).toBeCloseTo(0.13, 1);
+    expect(pale / other).toBeGreaterThan(0.35);
+    expect(pale / other).toBeLessThan(0.65);
   });
 
   it('flags the reported look-alikes: tan dress on tan skin, cream top on pale skin', () => {
@@ -73,7 +121,7 @@ describe('guest outfits', () => {
     while (sim.guests.size < 6 && sim.minuteOfDay < 15 * 60) sim.update(0.1);
     expect(sim.guests.size).toBeGreaterThanOrEqual(6);
     // the old palette picks: a tan top on tan skin over tan trousers
-    for (const g of sim.guests.values()) Object.assign(g.appearance, { skin: 0xb98260, shirt: 0x9b6b43, pants: 0x8c7b5e });
+    for (const g of sim.guests.values()) Object.assign(g.appearance, { skin: 0xb98260, shirt: 0x9b6b43, pants: 0x8c7b5e, hair: 0x8b4a2a });
     const save = JSON.parse(JSON.stringify(sim.serialize())) as SimSave;
     const old = createSimulation(new EventBus(), 1) as Simulation;
     old.load(save);
@@ -82,6 +130,7 @@ describe('guest outfits', () => {
       expect(looksLikeSkin(g.appearance.shirt, g.appearance.skin)).toBe(false);
       expect(looksLikeSkin(g.appearance.pants, g.appearance.skin)).toBe(false);
       expect(Math.abs(L(g.appearance.shirt) - L(g.appearance.pants))).toBeGreaterThanOrEqual(18);
+      expect(hairReads(g.appearance.hair, g.appearance.skin)).toBe(true);
     }
   }, 60_000);
 });
@@ -110,6 +159,30 @@ describe('guest walk', () => {
       expect(maxFlex * (180 / Math.PI)).toBeGreaterThan(50);
       expect(maxFlex * (180 / Math.PI)).toBeLessThan(65);
     }
+    h.dispose();
+  });
+
+  it('sets the feet near the line of travel while walking, hip-wide when standing', () => {
+    const f = new CreatureFactory(QUALITY);
+    const h = f.createHuman({ skin: 0xc68e6a, hair: 0x332211, shirt: 0x335577, pants: 0x222222, shoes: 0x111111, hairStyle: 0, height: 1.77, build: 1, child: false, female: false }, 'guest', 3);
+    const m = h as unknown as { rt: { fk(p: unknown): void; wp: THREE.Vector3[]; def: { names: string[] } }; out: unknown };
+    const [ankleL, ankleR] = ['foot.L', 'foot.R'].map((n) => m.rt.def.names.indexOf(n));
+    const width = (speed: number) => {
+      let sum = 0, n = 0;
+      for (let k = 0; k < 300; k++) {
+        h.update(1 / 60, { action: 'walk', speed });
+        if (k < 150) continue;
+        m.rt.fk(m.out);
+        sum += Math.abs(m.rt.wp[ankleL].x - m.rt.wp[ankleR].x);
+        n++;
+      }
+      return sum / n;
+    };
+    const standing = width(0);
+    const walking = width(1.27);
+    expect(standing).toBeGreaterThan(0.16);
+    expect(walking).toBeLessThan(standing * 0.72);
+    expect(walking).toBeGreaterThan(0.08); // the feet never cross over
     h.dispose();
   });
 });

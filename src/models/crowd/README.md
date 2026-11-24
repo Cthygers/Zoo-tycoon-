@@ -51,13 +51,16 @@ world matrix is BatchedMesh's per-instance matrix. In GLSL (after
 Look texels:
 
 * animals (`ANIMAL_LOOK_TEXELS = 1`, crowd/materials.ts): texel 0 = (highlight,
-  growth 0..1, free, free) → fragment `flat varying vec4 vCrLook0`; plus
+  growth 0..1, wetness 0..1 after a swim (RiggedModel.writeLook; thick skins show it), free) → fragment `flat varying vec4 vCrLook0`; plus
   `flat varying vec2 vCrYaw` (instance yaw) — `normalMatrix` is redefined in the
   fragment shader as normalMatrix × instance rotation, so object-space
   micro-normals keep working.
 * people (`HUMAN_LOOK_TEXELS = 6`, humans/material.ts writeHumanLook):
   skin / hair / shirt / pants / shoes / hat colours, sleeve / trouser / coat
-  cut, girth, body id, highlight → `vHm0..5`.
+  cut, girth, body id, highlight → `vHm0..5`. Batched and standalone people
+  share one shading function (humanColorGLSL) and every LOD level of a body
+  uses the batch's one material, so skin wrap, fabric drape and sheen, hair
+  locks and face marks never pop between LODs.
 
 ## Extension points (for species / material work)
 
@@ -92,8 +95,12 @@ Look texels:
 * **Lamp light**: animal and human materials call `applyLampField(shader)`
   (props/lights/lampField.ts) last in onBeforeCompile: one R8 field fetch per
   vertex (`vLampLight`) adds warm lamp irradiance before `<aomap_fragment>` and
-  marks lamp-lit pixels for the night grade (`whLampLit`, or HDR alpha on the
-  post-FX tier). Keep the hooks `<project_vertex>`, `<aomap_fragment>`,
+  marks lamp-lit pixels for the night grade (`whLampLit`, eased over a wide
+  ramp so figures at a pool's fringe are only partly coloured, or HDR alpha on
+  the post-FX tier). On tiers that tone-map in the material it also gives
+  moonlit figures a highlight shoulder (a white coat under the moon reads like
+  a pale wall, not a glow) by scaling `gl_FragColor.rgb` just before
+  `<tonemapping_fragment>`. Keep the hooks `<project_vertex>`, `<aomap_fragment>`,
   `<tonemapping_fragment>`, `<opaque_fragment>` in place. It also inlines
   `<lights_fragment_begin>` without the point-light loop (the field replaces
   the high tier's lamp point lights on figures), so later patches must not

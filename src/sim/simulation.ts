@@ -1062,6 +1062,7 @@ export class Simulation implements ISimulation {
     this.progress.load(s.progress ?? {}, Math.max(0, ...this.ledger.map(runningResult)));
     // before the world: the UI rebuilds its Messages log from these on worldReset
     this.messageLog = (s.messages ?? []).slice(-MESSAGE_LOG_SIZE);
+    if (!s.progress?.bredSpecies) this.progress.recallBredSpecies(this.messageLog);
     this.debtWarned = s.debtWarned ?? false;
     // older saves did not track free starter scenery: everything counts as bought
     this.starterObjectMaxId = s.starterObjectMaxId ?? 0;
@@ -1198,7 +1199,8 @@ export function daySummary(d: LedgerEntry, turnedAway = 0): { text: string; kind
   const other = Math.round(d.other);
   const kind: NotifyKind = running < 0 ? 'warn' : 'info';
   const away = Math.round(turnedAway);
-  const full = away > 0 ? ` — zoo full, ${away} ${away === 1 ? 'visitor' : 'visitors'} turned away` : '';
+  // (a no-break space keeps 'zoo full' together when the toast wraps)
+  const full = away > 0 ? ` — zoo\u00a0full, ${away} ${away === 1 ? 'visitor' : 'visitors'} turned away` : '';
   if (investment === 0 && other === 0) {
     return {
       text: `Day ${d.day} closed: ${fmtMoney(net, { sign: true })} (income ${fmtMoney(d.income)}, running costs ${fmtMoney(d.expenses)})${full}`,

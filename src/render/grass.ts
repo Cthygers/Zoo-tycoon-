@@ -11,7 +11,7 @@ import { hashFloat } from '../core/rng';
 import { Terrain } from '../core/types';
 import type { World } from '../core/world';
 import { OBJECTS_BY_ID } from '../data/objects';
-import { crownCover } from './terrain';
+import { crownCover, lawnShare } from './terrain';
 
 const CELL = 4; // metres
 const CANDIDATES_PER_M2 = 6;
@@ -99,6 +99,7 @@ export interface GrassUniforms {
   uNoise: THREE.IUniform<THREE.Texture>;
   uSunCol: THREE.IUniform<THREE.Color>;
   uSunDirW: THREE.IUniform<THREE.Vector3>;
+  uNightLift: THREE.IUniform<number>;
 }
 
 /** Shared LOD falloff (CPU twin of the vertex-shader function). */
@@ -106,6 +107,17 @@ function falloff(r: number, r0: number, R: number): number {
   const f = r < r0 ? 1 : Math.pow(r0 / r, 1.4);
   const e = Math.min(Math.max((r - R * 0.8) / (R * 0.2), 0), 1);
   return f * (1 - e * e * (3 - 2 * e));
+}
+
+/** Lawn share (terrain.ts lawnShare) from which a pond's mud ring counts as lawn margin (groundMaterial.ts gShoreMud). */
+const SHORE_LAWN_MIN = 0.25;
+
+/** Lawn share of every pond-shore mud tile (0 elsewhere), row-major MAP_W × MAP_H. */
+export function shoreLawnShares(world: World): Float32Array {
+  const out = new Float32Array(MAP_W * MAP_H);
+  for (let z = 0; z < MAP_H; z++)
+    for (let x = 0; x < MAP_W; x++) if (world.terrain[world.idx(x, z)] === Terrain.Mud) out[z * MAP_W + x] = lawnShare(world, x, z);
+  return out;
 }
 
 export class GrassField {
@@ -123,6 +135,8 @@ export class GrassField {
   private density = 1;
   /** Tree crown cover per tile (terrain.ts crownCover), refreshed when the world changes. */
   private cover: Float32Array | null = null;
+  /** Lawn share of pond-shore mud tiles (terrain.ts lawnShare), refreshed with `cover`. */
+  private shoreLawn: Float32Array | null = null;
   private radius = 40;
   private builtCenter = new THREE.Vector2(1e9, 1e9);
   private wantCenter = new THREE.Vector2();
@@ -158,6 +172,7 @@ export class GrassField {
       uNoise: { value: noise },
       uSunCol: { value: new THREE.Color(1, 1, 1) },
       uSunDirW: { value: new THREE.Vector3(0, 1, 0) },
+      uNightLift: { value: 0 },
     };
     const m = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.82, metalness: 0, side: THREE.DoubleSide });
     m.name = 'grass';
@@ -227,6 +242,7 @@ export class GrassField {
           `#include <common>
           uniform vec3 uSunCol;
           uniform vec3 uSunDirW;
+          uniform float uNightLift;
           varying vec3 vGCol;
           varying vec3 vGN;
           varying float vGT;`,
@@ -246,6 +262,9 @@ export class GrassField {
             vec3 vdWorld = normalize((vec4(vdW, 0.0) * viewMatrix).xyz);
             float back = pow(clamp(dot(-vdWorld, uSunDirW), 0.0, 1.0), 3.0);
             reflectedLight.directDiffuse += uSunCol * diffuseColor.rgb * back * vGT * 0.22;
+            // moonlit tufts get the ground's night lift (render/groundMaterial.ts uNightLift)
+            reflectedLight.indirectDiffuse *= 1.0 + uNightLift;
+            reflectedLight.directDiffuse *= 1.0 + uNightLift;
           }`,
         );
     };
@@ -274,6 +293,7 @@ export class GrassField {
   markDirty(): void {
     this.dirty = true;
     this.cover = null;
+    this.shoreLawn = null;
   }
 
   /**
@@ -319,6 +339,7 @@ export class GrassField {
     this.stageCount = 0;
     this.dirty = false;
     this.cover ??= crownCover(this.world);
+    this.shoreLawn ??= shoreLawnShares(this.world);
   }
 
   private fillCell(cx: number, cz: number, center: THREE.Vector2) {
@@ -330,23 +351,30 @@ export class GrassField {
     // nearest point of the cell to the centre: early out
     const nx = Math.min(Math.max(center.x, x0), x0 + CELL),
       nz = Math.min(Math.max(center.y, z0), z0 + CELL);
-    const dmin = Math.max(0, Math.hypot(nx - center.x, nz - center.y) - 4);
+    const dmin = Math.hypot(nx - center.x, nz - center.y);
     if (dmin > R) return;
     const fMax = falloff(dmin, r0, R) * this.density;
     const n = Math.round(CELL * CELL * CANDIDATES_PER_M2);
     const w = this.world;
     for (let k = 0; k < n; k++) {
       const h = hashFloat(cx * 7 + k, cz * 13 - k, 77);
-      // threshold: kept if h < falloff * density (with margin for centre drift)
-      if (h > fMax + 0.12) continue;
+      if (h >= fMax) continue;
       const px = x0 + hashFloat(cx, cz, k * 2 + 1) * CELL;
       const pz = z0 + hashFloat(cx, cz, k * 2 + 2) * CELL;
+      // kept only where the shader can show it (threshold below the falloff at
+      // the tuft; uCenter is the centre this field was built for): tufts that
+      // could never show used to fill the capacity from the field's far rows,
+      // leaving none near the focus
+      if (h >= falloff(Math.hypot(px - center.x, pz - center.y), r0, R) * this.density) continue;
       const tx = Math.floor(px / TILE),
         tz = Math.floor(pz / TILE);
       if (!w.inBounds(tx, tz)) continue;
       const ti = w.idx(tx, tz);
       const ter = w.terrain[ti];
-      if (ter !== Terrain.Grass && ter !== Terrain.DryGrass) continue;
+      // the turf also grows into a pond's mud ring, as the ground shader draws it
+      // (groundMaterial.ts sampleGround): thinning out toward the water
+      const shore = ter === Terrain.Mud && this.shoreLawn ? this.shoreLawn[ti] : 0;
+      if (ter !== Terrain.Grass && ter !== Terrain.DryGrass && shore < SHORE_LAWN_MIN) continue;
       if (w.path[ti]) continue;
       const oid = w.objectGrid[ti];
       if (oid) {
@@ -366,6 +394,7 @@ export class GrassField {
       if (under > 0 && hashFloat(cz - k, cx, 29) < under * 0.5) continue;
       const y = w.heightAt(px, pz);
       if (y < WATER_LEVEL + 0.08) continue;
+      if (shore > 0 && y < WATER_LEVEL + 0.12 + 0.14 * hashFloat(cx - k, cz + k, 41)) continue;
       if (this.stageCount >= this.capacity) return;
       const dry = ter === Terrain.DryGrass;
       const j = this.stageCount * 4;
@@ -374,7 +403,7 @@ export class GrassField {
       this.stagePos[j + 2] = pz;
       this.stagePos[j + 3] = hashFloat(cx + k, cz, 3) * Math.PI * 2;
       const hs = hashFloat(k, cx, cz + 11);
-      this.stagePar[j] = (dry ? 1.7 + hs * 0.5 : 0.55 + hs * 0.35) * (1 - 0.3 * under);
+      this.stagePar[j] = (dry ? 1.7 + hs * 0.5 : 0.55 + hs * 0.35) * (1 - 0.3 * under) * (shore > 0 ? 0.8 : 1);
       this.stagePar[j + 1] = dry ? 1 : 0;
       this.stagePar[j + 2] = hashFloat(cz, k, cx + 5);
       this.stagePar[j + 3] = h / Math.max(this.density, 1e-3);

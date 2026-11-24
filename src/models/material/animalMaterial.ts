@@ -2,8 +2,18 @@
 // onBeforeCompile extension that adds
 //   * a per-pixel coat pattern (stripes / patches) driven by a baked scalar,
 //   * object-space procedural micro-normals (fur strands, wrinkled / cracked hide),
-//   * albedo mottling and a soft fur sheen / rim term,
-//   * glossy patches (eyes, nose leather) from a baked gloss value,
+//   * fur relief: strands right up close and clumps out to mid range, both
+//     running along the hair flow and each faded out by its pixel footprint
+//     before it could shimmer,
+//   * albedo mottling (streaked along the hair flow on fur) and a clumpy
+//     roughness spread,
+//   * a matte coat: fur, feathers and dry skin get a weak, coat-tinted Fresnel
+//     instead of the white grazing reflection that makes them read as plastic,
+//     plus a soft coat-tinted sheen along the silhouette (tight on short coats,
+//     broad on long hair; light shining through the fringe when backlit),
+//   * glossy patches (eyes, nose leather, wet skin) from a baked gloss value;
+//     thick skins are also wet all over right after a swim and dry from the
+//     top down (wetness from the instance's look texel, see RiggedModel),
 //   * 'wrinkled' skin: a network of fine creases (grooves darkened in the
 //     albedo) for elephants, rhinos and hippos instead of the cell plates of
 //     'hide', which read as reptile scales up close, plus deep folds across
@@ -20,6 +30,13 @@ import { applyLampField } from '../../props/lights/lampField';
 import { HIGHLIGHT_FN_GLSL, NOISE_GLSL } from './shaderChunks';
 
 const SKIN_IDS: Record<LookSpec['skin'], number> = { fur: 0, hide: 1, smooth: 2, feather: 3, wrinkled: 4 };
+/**
+ * Fresnel reflectance at grazing angles (glossy parts always keep 1): fibres
+ * and dust scatter the grazing reflection instead of mirroring the sky.
+ */
+const GRAZING_F90: Record<LookSpec['skin'], number> = { fur: 0.25, feather: 0.35, hide: 0.45, wrinkled: 0.4, smooth: 1 };
+/** How much the sheen and the specular take on the coat's own hue (fur scatters light through coloured hair; dust stays neutral). */
+const SHEEN_HUE: Record<LookSpec['skin'], number> = { fur: 0.55, feather: 0.35, hide: 0, wrinkled: 0, smooth: 0 };
 const PATTERN_IDS = { none: 0, stripes: 1, field: 2 } as const;
 
 export interface AnimalMaterialOptions {
@@ -35,6 +52,7 @@ export function createAnimalMaterial(o: AnimalMaterialOptions): THREE.MeshStanda
   const pattern = PATTERN_IDS[look.pattern ?? 'none'];
   const micro = o.detail > 0 ? 1 : 0;
   const juv = look.juvenile ? 1 : 0;
+  const wets = look.skin === 'wrinkled' ? 1 : 0;
   const thick = look.skin === 'hide' || look.skin === 'wrinkled';
   const mat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
@@ -69,6 +87,9 @@ varying vec3 vRestPos;
 varying vec3 vRestNormal;
 #if ${juv} == 1
 varying float vCrGrowth;
+#endif
+#if ${wets} == 1
+varying float vCrWet;
 #endif`,
       )
       .replace(
@@ -84,6 +105,13 @@ vCrGrowth = crTexel(crBase).y;
 #else
 vCrGrowth = 1.0;
 #endif
+#endif
+#if ${wets} == 1
+#ifdef USE_BATCHING
+vCrWet = crTexel(crBase).z;
+#else
+vCrWet = 0.0;
+#endif
 #endif`,
       );
     shader.fragmentShader = shader.fragmentShader
@@ -94,16 +122,24 @@ vCrGrowth = 1.0;
 #define CR_PATTERN ${pattern}
 #define CR_MICRO ${micro}
 #define CR_JUV ${juv}
+#define CR_WETS ${wets}
 #define CR_HIGHLIGHT ${hl}
 uniform float uGrain;
 uniform float uBump;
 uniform float uSheen;
 uniform float uMottle;
 uniform mat3 normalMatrix;
+#define CR_F90 ${GRAZING_F90[look.skin].toFixed(2)}
+#define CR_SHEEN_HUE ${SHEEN_HUE[look.skin].toFixed(2)}
+// albedo of the dust on dry skin (its sheen)
+#define CR_DUST 0.3
 varying vec3 vColor2;
 varying vec4 vPattern;
 varying vec3 vRestPos;
 varying vec3 vRestNormal;
+#if CR_WETS == 1
+varying float vCrWet;
+#endif
 #if CR_JUV == 1
 uniform vec3 uJuvColor;
 uniform float uJuvAmount;
@@ -116,6 +152,22 @@ uniform float uHighlight;
 ${HIGHLIGHT_FN_GLSL}
 #endif
 ${NOISE_GLSL}
+#if CR_SKIN == 0
+// Fur clumps are CR_CLUMP × the strand scale across the hair flow.
+#define CR_CLUMP 5.5
+// Clump height at q (clump units): value noise squashed along the hair flow
+// into locks about 5× longer than wide.
+float cr_clump(vec3 q, vec3 flow) {
+  q += 7.3;
+  return cr_vnoise(q - flow * dot(q, flow) * 0.8);
+}
+// Fur relief (strand units): strands and clumps, weighted by their footprint fades.
+float cr_fur(vec3 q, vec3 flow, float wS, float wC) {
+  float h = wC * 3.0 * cr_clump(q * (1.0 / CR_CLUMP), flow);
+  if (wS > 0.001) h += wS * cr_vnoise(q - flow * dot(q, flow) * 0.85);
+  return h;
+}
+#endif
 #if CR_SKIN == 4
 // A groove along an iso-line of value noise: u = |noise − 0.5|, half-width w
 // (noise units); 1 in the groove, 0 on the plates. Box-filtered over the
@@ -161,6 +213,25 @@ float crFur = 1.0 + max(vPattern.w, 0.0);
 float crGrain = uGrain * crFur;
 float crPix = length(fwidth(vRestPos));
 float crFade = 1.0 - smoothstep(crGrain * 0.35, crGrain * 1.6, crPix);
+// gloss: baked (eyes, nose leather, wet bands), plus a whole thick skin right
+// after a swim, drying from the top down along a ragged line
+float crGloss = vPattern.z;
+#if CR_WETS == 1
+if (vCrWet > 0.0) {
+  float wet = smoothstep(0.0, 0.08, vCrWet * vCrWet * 3.6 - 0.3 - vRestPos.y + (cr_vnoise(vRestPos * 7.0) - 0.5) * 0.16);
+  diffuseColor.rgb *= 1.0 - 0.4 * wet;
+  crGloss = max(crGloss, 0.5 * wet);
+}
+#endif
+#if CR_SKIN == 0
+// hair flow in rest space: back along the body and down the flanks and legs
+// (long hair hangs more steeply), in the surface plane
+vec3 crN0 = normalize(vRestNormal);
+vec3 crFl = mix(vec3(0.0, -0.45, -1.0), vec3(0.0, -1.0, -0.3), clamp((crFur - 1.0) * 0.5, 0.0, 1.0));
+vec3 crFlow = normalize(crFl - crN0 * dot(crN0, crFl) + vec3(0.0, -0.001, 0.0));
+// clumps fade out before their cells shrink under ~2 px (no shimmer)
+float crWC = 1.0 - smoothstep(0.25, 0.7, crPix / (crGrain * CR_CLUMP));
+#endif
 #if CR_PATTERN == 1
 {
   float s = vPattern.x;
@@ -185,10 +256,22 @@ float crFade = 1.0 - smoothstep(crGrain * 0.35, crGrain * 1.6, crPix);
   diffuseColor.rgb = mix(diffuseColor.rgb, vColor2, m);
 }
 #endif
+// clumpy albedo variation on every tier: an 11 cm octave, and a 3 cm one
+// (streaked along the hair flow on fur) that settles to its mean once a pixel
+// spans half a cell, so it never crawls on a moving animal
+float crMo;
 {
-  // clumpy albedo variation (independent of the micro fade so distance views keep texture)
-  float mo = cr_vnoise(vRestPos * 9.0) * 0.6 + cr_vnoise(vRestPos * 31.0) * 0.4;
-  diffuseColor.rgb *= 1.0 + uMottle * (mo - 0.5) * 2.0 * (1.0 - vPattern.z);
+  vec3 q = vRestPos * 31.0;
+  #if CR_SKIN == 0
+  q -= crFlow * dot(q, crFlow) * 0.75;
+  #endif
+  float fine = mix(cr_vnoise(q), 0.5, smoothstep(0.25, 0.6, crPix * 31.0));
+  crMo = cr_vnoise(vRestPos * 9.0) * 0.6 + fine * 0.4;
+  diffuseColor.rgb *= 1.0 + uMottle * (crMo - 0.5) * 2.0 * (1.0 - crGloss);
+  #if CR_SKIN == 0
+  // on every tier the clumps' tips catch a little more light than the partings between them
+  if (crWC > 0.001) diffuseColor.rgb *= 1.0 + 0.36 * crWC * (cr_clump(vRestPos / (crGrain * CR_CLUMP), crFlow) - 0.5) * (1.0 - crGloss);
+  #endif
 }
 #if CR_SKIN == 4
 // grooves are darker (dirt + occlusion), filtered to their average tone where
@@ -206,13 +289,13 @@ float crFq = crPix / crGrain;
     foldShade = mix(foldShade, 1.0 - gd * 0.45 * fold, ff);
   }
   float shade = (1.0 - gd * 1.1 * groove) * foldShade;
-  diffuseColor.rgb *= shade * (1.0 - vPattern.z) + vPattern.z;
+  diffuseColor.rgb *= shade * (1.0 - crGloss) + crGloss;
 }
 #endif
 #if CR_JUV == 1
 {
   // juvenile down / coat: tint toward the juvenile colour, keeping some of the adult light/dark pattern
-  float k = uJuvAmount * (1.0 - smoothstep(0.0, uJuvUntil, vCrGrowth)) * (1.0 - vPattern.z);
+  float k = uJuvAmount * (1.0 - smoothstep(0.0, uJuvUntil, vCrGrowth)) * (1.0 - crGloss);
   float l = dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722));
   float lj = max(dot(uJuvColor, vec3(0.2126, 0.7152, 0.0722)), 1e-3);
   vec3 juv = uJuvColor * mix(1.0, clamp(l / lj, 0.3, 2.5), uJuvKeep);
@@ -223,25 +306,46 @@ float crFq = crPix / crGrain;
       .replace(
         '#include <roughnessmap_fragment>',
         `#include <roughnessmap_fragment>
-roughnessFactor = mix(roughnessFactor, 0.16, vPattern.z);`,
+// matte with a clumpy spread (never one uniform sheen); glossy parts smooth
+roughnessFactor = clamp(roughnessFactor + (crMo - 0.5) * 0.12, 0.0, 0.97);
+roughnessFactor = mix(roughnessFactor, 0.16, crGloss);`,
+      )
+      .replace(
+        '#include <lights_physical_fragment>',
+        `#include <lights_physical_fragment>
+// the coat's hue at unit luminance: tints the sheen and the fibres' specular
+vec3 crHue = mix(vec3(1.0), clamp(diffuseColor.rgb / max(dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722)), 0.01), 0.0, 3.0), CR_SHEEN_HUE);
+material.specularF90 = mix(CR_F90, 1.0, crGloss);
+material.specularColor = mix(vec3(0.04) * crHue, vec3(0.04), crGloss);
+material.specularColorBlended = mix(material.specularColor, diffuseColor.rgb, metalnessFactor);`,
       )
       .replace(
         '#include <normal_fragment_maps>',
         `#include <normal_fragment_maps>
 #if CR_MICRO == 1
-if (crFade > 0.001 && vPattern.z < 0.5) {
+#if CR_SKIN == 0
+{
+  // fur relief: strands only right up close, clumps out to mid range; each
+  // fades out before its cells shrink under ~2 px (no shimmer, no aliasing)
+  float wS = 1.0 - smoothstep(0.25, 0.7, crPix / crGrain);
+  if (crWC > 0.001 && crGloss < 0.5) {
+    vec3 p = vRestPos / crGrain;
+    float e = 0.35;
+    float h0 = cr_fur(p, crFlow, wS, crWC);
+    vec3 g = vec3(cr_fur(p + vec3(e, 0.0, 0.0), crFlow, wS, crWC) - h0, cr_fur(p + vec3(0.0, e, 0.0), crFlow, wS, crWC) - h0, cr_fur(p + vec3(0.0, 0.0, e), crFlow, wS, crWC) - h0) / e;
+    vec3 gv = normalMatrix * g;
+    gv -= normal * dot(gv, normal);
+    normal = normalize(normal - gv * uBump * 0.35 * sqrt(crFur));
+  }
+}
+#else
+if (crFade > 0.001 && crGloss < 0.5) {
   // height field h(p) in rest (object) space; gradient by central differences,
   // transformed to view space (smooth per pixel, no derivative blockiness)
   vec3 p = vRestPos / crGrain;
   vec3 g = vec3(0.0);
   float e = 0.35;
-  #if CR_SKIN == 0
-    vec3 n0 = normalize(vRestNormal);
-    vec3 fl = mix(vec3(0.0, -0.45, -1.0), vec3(0.0, -1.0, -0.3), clamp((crFur - 1.0) * 0.5, 0.0, 1.0));
-    vec3 flow = normalize(fl - n0 * dot(n0, fl) + vec3(0.0, -0.001, 0.0));
-    // squash coordinates along the hair flow → elongated strands
-    #define CR_H(q) cr_vnoise((q) - flow * dot((q), flow) * 0.85)
-  #elif CR_SKIN == 1
+  #if CR_SKIN == 1
     #define CR_H(q) (smoothstep(0.0, 0.18, cr_cells((q) * 0.9)) * 0.7 + cr_vnoise((q) * 3.1) * 0.3)
   #elif CR_SKIN == 3
     #define CR_H(q) cr_vnoise((q) * vec3(1.0, 1.0, 0.3))
@@ -260,11 +364,12 @@ if (crFade > 0.001 && vPattern.z < 0.5) {
   gv -= normal * dot(gv, normal);
   normal = normalize(normal - gv * uBump * 0.35 * crFade * sqrt(crFur));
 }
+#endif
 #if CR_SKIN == 4
 {
   // fold relief, faded at its own (larger) scale
   float ff = (1.0 - smoothstep(crGrain * CR_FOLD * 0.35, crGrain * CR_FOLD * 1.6, crPix)) * max(-vPattern.w, 0.0);
-  if (ff > 0.001 && vPattern.z < 0.5) {
+  if (ff > 0.001 && crGloss < 0.5) {
     vec3 p = vRestPos / (crGrain * CR_FOLD);
     float e = 0.3;
     float fq = max(crFq / CR_FOLD, e);
@@ -281,9 +386,22 @@ if (crFade > 0.001 && vPattern.z < 0.5) {
       .replace(
         '#include <opaque_fragment>',
         `{
-  float rim = 1.0 - saturate(dot(normal, normalize(vViewPosition)));
-  rim = rim * rim * rim * rim;
-  outgoingLight += uSheen * (1.0 - vPattern.z) * rim * (totalDiffuse * 0.9 + diffuseColor.rgb * 0.04);
+  // sheen: hairs (or dust) seen side-on near the silhouette scatter the light
+  // that falls on the coat, so the edge gets a soft halo in the coat's hue
+  // instead of a hard plastic line: a tight edge on short coats, a broad one
+  // on long hair; when backlit, light shines through the fringe. It follows
+  // the surface's own normal (micro-normals would speckle it).
+  float crEdge = pow(1.0 - saturate(dot(nonPerturbedNormal, geometryViewDir)), mix(4.0, 2.0, smoothstep(0.006, 0.02, crGrain)));
+  vec3 crHalo = totalDiffuse;
+  #if NUM_DIR_LIGHTS > 0
+  // (directLight still holds the key light with its shadow after the light loop)
+  crHalo += directLight.color * BRDF_Lambert(diffuseColor.rgb) * 0.35 * pow2(saturate(dot(-geometryViewDir, directLight.direction)));
+  #endif
+  #if CR_SKIN == 1 || CR_SKIN == 4
+  // dry skin: the dust on it catches the light in its own pale tone
+  crHalo *= CR_DUST / max(dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722)), 0.02);
+  #endif
+  outgoingLight += uSheen * (1.0 - crGloss) * crEdge * crHalo * crHue;
 }
 #if CR_HIGHLIGHT == 1
 outgoingLight = crHighlightFurOf(outgoingLight, uHighlight, vPattern.w);

@@ -543,7 +543,7 @@ function design(ctx: DesignContext): CreatureDesign {
       tail: { scale: 0.34, aniso: [1, 2, 1] },
     },
     coat: rhinoCoat(eye, male),
-    look: { skin: 'wrinkled', pattern: 'stripes', roughness: 0.9, sheen: 0.05, grain: 0.014, bump: 0.5, mottle: 0.18 },
+    look: { skin: 'wrinkled', pattern: 'stripes', roughness: 0.9, sheen: 0.15, grain: 0.014, bump: 0.5, mottle: 0.18 },
     eyes: [{ bone: 'head', pos: eye, radius: 0.018, color: 0x1e140c }],
     anim: driver(makeDriver(ctx.def.height, ctx.def.walkSpeed, ctx.def.runSpeed)),
     babyScale: 0.3,

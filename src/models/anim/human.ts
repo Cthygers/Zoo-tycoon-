@@ -60,6 +60,12 @@ const TOE_OFF_PITCH = 0.6;
 const HEEL_PER_LEG = 0.19;
 /** Swing foot lift (× leg length): peaks early, behind the body, so the knee folds ≈ 55–60°. */
 const SWING_LIFT = 0.12;
+/**
+ * Share of the standing foot spacing (hip width) given up while walking: feet
+ * land close to the line of travel (≈ 11 cm between the feet for a man,
+ * against ≈ 19 cm standing), not on two wide rails.
+ */
+const WALK_NARROW = 0.4;
 
 /**
  * Legs: walking cycle (stance / swing) or planted standing. The planted foot
@@ -88,6 +94,7 @@ function legs(ctx: AnimCtx, st: HumanState, pose: Pose): void {
     }
     pitch *= a;
     _C.copy(leg.r.contact);
+    _C.x *= 1 - WALK_NARROW * a;
     _C.z += dz;
     _C.y += dy * a;
     if (pitch < 0) {

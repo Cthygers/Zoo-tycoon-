@@ -6,9 +6,10 @@
 // varying the animal material declares automatically reaches batched and LOD
 // meshes. Per-instance parameters arrive through the batch data texture:
 //
-//   look texel 0 = (highlight, growth 0..1, user0, user1)
+//   look texel 0 = (highlight, growth 0..1, wetness 0..1, user1)
 //     → fragment: `flat varying vec4 vCrLook0` (x = highlight amount,
-//        y = growth — e.g. for a juvenile tint, z/w free for extensions)
+//        y = growth — e.g. for a juvenile tint, z = wetness after a swim
+//        (RiggedModel.writeLook; thick skins read it as vCrWet), w free for extensions)
 //     → fragment: `flat varying vec2 vCrYaw` (cos, sin of the instance yaw);
 //        `normalMatrix` is redefined as normalMatrix × instance rotation so
 //        object-space micro-normals stay correct for every instance.

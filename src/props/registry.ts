@@ -13,11 +13,11 @@ import type { QualitySettings } from '../core/contracts';
  *  - material.userData.foliage = true       → leaves / fronds / stems: near-camera fade (see lod/fade.ts)
  *  - material.userData.fadeNear = true      → solid parts (bark, cactus): fade only while the camera is
  *      inside / right next to the plant (never cut by the view hole)
- *  - material.userData.crownFade = true     → with foliage: whole tree crowns drop out (card by card) when the camera → focus
- *      line passes through them; with fadeNear: the bark goes with its crown (limb by limb, trunk included). Every
+ *  - material.userData.crownFade = true     → with foliage (leaves) or fadeNear (bark): the whole tree drops out (piece by
+ *      piece, leaves, limbs and trunk together) when the camera → focus line passes through its crown or limbs. Every
  *      geometry drawn with it needs the crown attributes (nature/geo.ts addCrownFade)
- *  - material.userData.trunkRadius = number → with fadeNear: distance (m) from the trunk axis inside which the view hole
- *      never cuts (default 0.9, lod/fade.ts TRUNK_R)
+ *  - material.userData.trunkRadius = number → with fadeNear only: distance (m) from the trunk axis inside which the view
+ *      hole never cuts (default 0.9, lod/fade.ts TRUNK_R)
  * Mesh userData conventions:
  *  - mesh.userData.noShadow = true          → never cast shadows (tiny details, glass)
  */

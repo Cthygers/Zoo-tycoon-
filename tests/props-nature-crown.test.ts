@@ -8,7 +8,7 @@ import type { QualitySettings } from '../src/core/contracts';
 import { PROP_SPECS } from '../src/props/registry';
 import '../src/props/nature';
 import { applyFade, fadeModeOf, updateFade, fadeUniforms } from '../src/props/lod/fade';
-import { addCrownFade, connectedPieces } from '../src/props/nature/geo';
+import { addCrownFade, barkRanks, connectedPieces } from '../src/props/nature/geo';
 
 const QUALITY: QualitySettings = { level: 'low', pixelRatio: 1, antialias: false, shadows: true, shadowMapSize: 1024, grassDensity: 0.25, postFX: false, detailDistance: 26, creatureDetail: 0 };
 
@@ -65,8 +65,8 @@ describe('tree crown dissolve data', () => {
     }
   }, 60000);
 
-  it('is on the bark that goes with a crown, with one rank per limb; a fallen log keeps plain bark', () => {
-    for (const id of ['tree_acacia', 'tree_oak', 'tree_palm', 'bamboo', 'bush_savanna']) {
+  it('is on the bark that goes with a crown, ranked so limbs go before what they grow from', () => {
+    for (const id of ['tree_acacia', 'tree_baobab', 'tree_oak', 'tree_pine', 'tree_birch', 'tree_palm', 'bamboo', 'bush_savanna']) {
       const spec = PROP_SPECS[id];
       for (const obj of [spec.build(0, QUALITY), spec.buildLod!(0, QUALITY)]) {
         const bark = meshes(obj).filter((m) => fadeModeOf(m.material as THREE.Material) === 'crownSolid');
@@ -75,14 +75,50 @@ describe('tree crown dissolve data', () => {
         const c = g.getAttribute('aCrown') as THREE.BufferAttribute;
         expect(c?.count, id).toBe(g.getAttribute('position').count);
         expect(g.getAttribute('aCrownR')?.count, id).toBe(g.getAttribute('position').count);
+        const pos = g.getAttribute('position');
+        const piece = connectedPieces(g);
+        // one rank per piece; the piece rooted nearest the trunk base ranks highest
+        let root = 0;
+        for (let i = 0; i < pos.count; i++) {
+          expect(c.getW(i), id).toBe(c.getW(piece[i]));
+          if (Math.hypot(pos.getX(i), pos.getY(i), pos.getZ(i)) < Math.hypot(pos.getX(root), pos.getY(root), pos.getZ(root))) root = i;
+        }
+        for (let i = 0; i < pos.count; i++) expect(c.getW(i), id).toBeLessThanOrEqual(c.getW(root));
         // branching trees: the limbs are separate tubes and drop out one by one
         if (id !== 'tree_palm') expect(new Set(Array.from({ length: c.count }, (_, i) => c.getW(i))).size, id).toBeGreaterThan(1);
       }
     }
-    const log = meshes(PROP_SPECS.log_fallen.build(0, QUALITY));
-    for (const m of log) {
-      expect(fadeModeOf(m.material as THREE.Material)).not.toBe('crownSolid');
-      expect(m.geometry.getAttribute('aCrown')).toBeUndefined();
+  }, 60000);
+
+  it('ranks bark pieces by how far from the trunk base they start', () => {
+    // a trunk from the base, a limb from 2 m up, a twig from 3 m up (separate tubes)
+    const pos: number[] = [];
+    const idx: number[] = [];
+    for (const [y0, x1] of [[0, 0], [2, 1.5], [3, 2.5]]) {
+      const b = pos.length / 3;
+      pos.push(0.1, y0, 0, -0.1, y0, 0, x1, y0 + 1, 0);
+      idx.push(b, b + 1, b + 2);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setIndex(idx);
+    const rank = barkRanks(g, connectedPieces(g));
+    expect([rank.get(0), rank.get(3), rank.get(6)]).toEqual([247, 85, 0]);
+  });
+
+  it('gives a fallen log the oak bark material with neutral crown data, so they share a batch', () => {
+    const logBark = meshes(PROP_SPECS.log_fallen.build(0, QUALITY)).filter((m) => m.name === 'bark');
+    const oakBark = meshes(PROP_SPECS.tree_oak.build(0, QUALITY)).filter((m) => fadeModeOf(m.material as THREE.Material) === 'crownSolid');
+    expect(logBark.length).toBe(1);
+    expect(logBark[0].material).toBe(oakBark[0].material);
+    const g = logBark[0].geometry;
+    const layout = (geo: THREE.BufferGeometry) => Object.keys(geo.attributes).sort().map((k) => `${k}:${geo.getAttribute(k).itemSize}:${(geo.getAttribute(k) as THREE.BufferAttribute).array.constructor.name}`).join();
+    expect(layout(g)).toBe(layout(oakBark[0].geometry));
+    // no crown (radii 0: never cut as a tree) and one mid rank (switches at a fade of 0.5)
+    const c = g.getAttribute('aCrown') as THREE.BufferAttribute;
+    const r = g.getAttribute('aCrownR') as THREE.BufferAttribute;
+    for (let i = 0; i < c.count; i += 7) {
+      expect([r.getX(i), r.getY(i), c.getW(i)]).toEqual([0, 0, 128]);
     }
   }, 60000);
 });
@@ -99,6 +135,7 @@ describe('near-camera fade shader', () => {
     expect(crown.vertexShader).toContain('attribute vec4 aCrown;');
     expect(crown.fragmentShader).toContain('if ( vPropFade > vPropRank ) discard;');
     expect(crown.fragmentShader).not.toMatch(/diffuseColor\.a \*=|FD_BAYER/);
+    expect(crown.vertexShader).not.toContain('#define PROP_FADE_SOLID');
 
     const bark = new THREE.MeshStandardMaterial();
     bark.userData.fadeNear = true;
@@ -117,10 +154,16 @@ describe('near-camera fade shader', () => {
     expect(fadeModeOf(treeBark)).toBe('crownSolid');
     applyFade(treeBark, 'crownSolid');
     const tb = compile(treeBark).vertexShader;
-    expect(tb).toContain('#define PROP_FADE_SOLID');
     expect(tb).toContain('#define PROP_FADE_CROWN');
-    expect(tb).toContain('f = max( f, propCrownF( M, uFadeCam + dir * max( tEnd, 0.0 ) ) );');
+    expect(tb).not.toContain('#define PROP_FADE_SOLID');
     expect(treeBark.customProgramCacheKey()).not.toBe(bark.customProgramCacheKey());
+    // leaves and bark of a tree: one decision per instance (no per-vertex hole, lens or limb cut)
+    for (const sh of [crown.vertexShader, tb]) {
+      expect(sh).toContain('float tree = smoothstep( 0.45, 0.55, max( instF, propTreeF( M, uFadeCam + dir * max( tEnd, 0.0 ), grow ) * uFadeCrown ) );');
+      // never held in the second half of the dissolve (a bare trunk with a few limbs)
+      expect(sh).toContain('return tree < 0.5 ? tree : 1.0;');
+      expect(sh.indexOf('float propTreeF( mat4 M')).toBeGreaterThan(sh.indexOf('attribute vec2 aCrownR;'));
+    }
   });
 
   it('removes whole crowns only in close views', () => {
