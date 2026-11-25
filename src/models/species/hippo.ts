@@ -193,10 +193,11 @@ function tailPrims(): Prim[] {
 // ---------------------------------------------------------------------------
 // Coat
 
-// grey-mauve back over pinkish-brown flanks, pink underside and face: a
-// readable, warm form at mid range instead of a charcoal shape
-const TOP = 0x625753;
-const SIDE = 0x76655f;
+// grey-brown back and flanks, pink only on the underside, face, ears, eye
+// rims and in the creases: a readable form at mid range that is neither a
+// charcoal shape nor a pink clay pig
+const TOP = 0x76685e;
+const SIDE = 0x887466;
 const PINK = 0xa97d70;
 const BELLY = 0x9c786c;
 const GUM = 0xc98583;
@@ -222,9 +223,9 @@ function hippoCoat(eye: Vec3) {
     const face = clamp01(c.pw('muzzle') + c.pw('chin')) * smooth(0.2, -0.6, c.ny - 0.2) + c.pw('head') * smooth(1.0, 0.75, y) * 0.6;
     blendHex(c.color, PINK, clamp01(face) * 0.75);
     // reddish "blood sweat" sheen
-    blendHex(c.color, 0x7a4b3a, smooth(0.15, 0.45, fbm(x * 3, y * 3, z * 3, 2, 103)) * 0.14);
+    blendHex(c.color, 0x7a4b3a, smooth(0.15, 0.45, fbm(x * 3, y * 3, z * 3, 2, 103)) * 0.1);
     // broad warmer, browner patches on the flanks (no flat grey)
-    blendHex(c.color, 0x7f6559, smooth(-0.05, 0.3, fbm(x * 0.8, y * 0.8, z * 0.8, 2, 105)) * 0.45 * smooth(0.7, 0.1, c.ny));
+    blendHex(c.color, 0x7e6c5a, smooth(-0.05, 0.3, fbm(x * 0.8, y * 0.8, z * 0.8, 2, 105)) * 0.45 * smooth(0.7, 0.1, c.ny));
     // dry skin is matte: it only darkens and shines for a while after a swim
     // (the instance's wetness, see animalMaterial). Creases and folds are a
     // darker, pinker brown.
@@ -232,16 +233,21 @@ function hippoCoat(eye: Vec3) {
     blendHex(c.color2, 0x6e4740, 0.45);
     c.w = 0;
     c.gloss = 0;
-    // skin creases behind the elbows and in front of the thighs, where the barrel folds as the legs swing
+    // skin creases behind the elbows and in front of the thighs, where the
+    // barrel folds as the legs swing. One phase step spans 25 cm, more than the
+    // 14 cm band: the material's phase jitter wanders the crease and breaks it
+    // where it leaves the band, but never adds a second line that crosses it
+    // (an X-shaped mark).
     for (const [zc, lean] of FLANK_CREASES) {
       const d = z - zc - (y - 0.8) * lean;
       if (Math.abs(d) < 0.07 && ax > 0.3) {
-        c.s = d / 0.1 + n * 0.1;
-        c.w = 0.16 * smooth(0.07, 0.02, Math.abs(d)) * smooth(0.45, 0.6, y) * smooth(1.2, 1.0, y);
+        c.s = d / 0.25 + n * 0.1;
+        c.w = 0.12 * smooth(0.07, 0.02, Math.abs(d)) * smooth(0.45, 0.6, y) * smooth(1.2, 1.0, y);
       }
     }
-    // deep skin folds across the stubby legs and the neck; the barrel stays smooth
-    c.fold = Math.max(0.2, clamp01((c.pw('leg') + c.pw('foot')) * 1.3), c.pw('neck') * smooth(0.6, 0.9, z));
+    // deep skin folds across the stubby legs and the neck, a faint broken
+    // network on the barrel (as the elephant's)
+    c.fold = Math.max(0.35, clamp01((c.pw('leg') + c.pw('foot')) * 1.6), clamp01(c.pw('neck') * 1.4) * smooth(0.6, 0.9, z));
     // neck folds
     if (c.part === 'neck' || (c.pw('neck') > 0.3 && z > 0.8)) {
       c.s = (z - 0.95) / 0.075 + n * 0.8;

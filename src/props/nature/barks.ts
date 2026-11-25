@@ -191,7 +191,7 @@ function genBirch(img: Img): void {
   // lenticels: short horizontal dark dashes (wrapping)
   const dark: RGB = lin(0x2a2522);
   const brown: RGB = lin(0x5a4a3e);
-  for (let k = 0; k < 170; k++) {
+  for (let n = 0; n < 170; n++) {
     const cx = rnd() * W;
     const cy = rnd() * H;
     const len = (6 + rnd() * rnd() * 46) * k;
@@ -206,7 +206,7 @@ function genBirch(img: Img): void {
       }
   }
   // dark rough patches (old branch scars, "chevrons") and peeling curls
-  for (let k = 0; k < 7; k++) {
+  for (let n = 0; n < 7; n++) {
     const cx = rnd() * W;
     const cy = rnd() * H;
     const s = (6 + rnd() * 14) * k;
@@ -221,7 +221,7 @@ function genBirch(img: Img): void {
       }
   }
   const peel = lin(0xb8957a);
-  for (let k = 0; k < 10; k++) {
+  for (let n = 0; n < 10; n++) {
     const cx = rnd() * W;
     const cy = rnd() * H;
     const len = (20 + rnd() * 40) * k;

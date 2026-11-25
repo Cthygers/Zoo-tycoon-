@@ -480,9 +480,10 @@ function birchParts(variant: number): TreeParts {
     aoInner: 0.5,
     tint: (p, b, out) => {
       if (b.level === 0) {
-        // black fissured base, patchy above
-        const dark = 1 - sstep(0.3, 1.6 + bn.noise3(p.x * 3, p.y, p.z * 3) * 0.5, p.y);
-        const k = 1 - dark * 0.72;
+        // black fissured base, patchy above (trunk rings are ~1 m apart: the
+        // ramp starts above the first one so the base reads dark)
+        const dark = 1 - sstep(0.5, 2 + bn.noise3(p.x * 3, p.y, p.z * 3) * 0.5, p.y);
+        const k = 1 - dark * 0.78;
         out[0] = k;
         out[1] = k;
         out[2] = k * 0.98;

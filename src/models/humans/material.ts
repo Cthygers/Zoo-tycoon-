@@ -44,6 +44,26 @@ export interface HumanCut {
   coat: number;
   /** Girth inflation (m) applied along the normal × per-vertex girth weight. */
   inflate: number;
+  /** Garment print and small style choices (humanStyle bits; 0 = plain). */
+  style?: number;
+}
+
+/** Prints of a top (humanStyle). Plain is the most common; staff wear plain. */
+export const HUMAN_PRINTS = { plain: 0, stripes: 1, check: 2, ringer: 3, graphic: 4, marl: 5 } as const;
+
+export interface HumanStyle {
+  print: number;
+  /** Pale rubber soles (trainers) instead of soles in the shoe's own dark tone. */
+  lightSole: boolean;
+  /** Close-cropped stubble on a bald scalp and the jaw (adult men). */
+  stubble: boolean;
+  /** V-neck instead of a crew neck. */
+  vNeck: boolean;
+}
+
+/** Pack a HumanStyle into one small integer (exact in a float texel): print in bits 0–2, then sole, stubble, V-neck. */
+export function humanStyle(s: HumanStyle): number {
+  return (s.print & 7) | (s.lightSole ? 8 : 0) | (s.stubble ? 16 : 0) | (s.vNeck ? 32 : 0);
 }
 
 export interface HumanMarks {
@@ -68,6 +88,8 @@ interface HumanUniforms {
   uEye: { value: THREE.Vector3 };
   uMouth: { value: THREE.Vector3 };
   uMicro: { value: number };
+  /** humanStyle bits. */
+  uStyle: { value: number };
   /** Selection highlight amount (0 = off; pulsed by HumanModel). */
   uHighlight: { value: number };
 }
@@ -85,6 +107,8 @@ interface ColorExpr {
   marks: string;
   eye: string;
   mouth: string;
+  /** humanStyle bits (float) */
+  style: string;
 }
 
 const FRAG_HELPERS = `${NOISE_GLSL}
@@ -95,6 +119,15 @@ float hm_step(float edge, float v) { float a = max(fwidth(v), 1e-4); return smoo
 float hm_mark(vec3 p, vec3 c, vec3 r, float fp) {
   vec3 rw = sqrt(r * r + fp * fp);
   return (1.0 - smoothstep(0.3, 1.0, length((p - c) / rw))) * (r.x * r.y) / (rw.x * rw.y);
+}
+// Stripes of period 1 (0 / 1 halves) box-filtered over w periods: exact
+// coverage, so they settle to an even 0.5 tint instead of aliasing as they
+// shrink toward the pixel size.
+float hm_stripe(float x, float w) {
+  w = max(w, 1e-4);
+  vec2 a = vec2(x - 0.5 * w, x + 0.5 * w);
+  vec2 i = floor(a) * 0.5 + max(fract(a) - 0.5, 0.0);
+  return (i.y - i.x) / w;
 }`;
 
 // Detail that is not geometry (fabric drape, hair locks, face marks) is sized
@@ -119,10 +152,18 @@ float hmHair = 0.0;
   float armT = vZone.x;
   float legT = vZone.y;
   float y = vRestPos.y;
+  float hmBs = hmMarks.z * 10.0; // body scale (shoe top is 0.1 × body scale)
+  float hmStyle = ${e.style};
+  float hmPrint = floor(mod(hmStyle, 8.0) + 0.5);
   float onArm = hm_step(0.0, armT);
   float onLeg = hm_step(0.0, legT);
   float trunk = (1.0 - onArm) * (1.0 - onLeg);
-  float neckCut = 1.0 - hm_step(hmMarks.x, y);
+  // the neckline dips at the front (a crew neck ≈ 2.5 cm, a V-neck to a point),
+  // not a painted ring round the neck
+  float front = smoothstep(-0.01, 0.06, vRestPos.z / hmBs);
+  float vNeck = mod(floor(hmStyle / 32.0), 2.0);
+  float neckY = hmMarks.x - hmBs * front * mix(0.026 * (1.0 - smoothstep(0.0, 0.065, abs(vRestPos.x) / hmBs)), 0.075 - 1.3 * abs(vRestPos.x) / hmBs, vNeck);
+  float neckCut = 1.0 - hm_step(neckY, y);
   float upper = trunk * hm_step(hmMarks.y, y) * neckCut;
   float lower = trunk * (1.0 - hm_step(hmMarks.y, y));
   float sleeve = onArm * (1.0 - hm_step(hmCut.x, armT));
@@ -135,16 +176,71 @@ float hmHair = 0.0;
   // smooth plastic tone)
   float drape = (cr_vnoise(vRestPos * vec3(22.0, 6.0, 22.0)) - 0.5) * (1.0 - smoothstep(0.016, 0.032, hmPix));
   if (uMicro > 0.5) drape += (cr_vnoise(vRestPos * vec3(45.0, 14.0, 45.0) + 7.3) - 0.5) * 0.6 * (1.0 - smoothstep(0.008, 0.016, hmPix));
-  hmCol = mix(hmCol, ${e.pants} * (1.0 + drape * 0.26), pantsM);
-  hmCol = mix(hmCol, ${e.shirt} * (1.0 + drape * 0.22), shirtM);
+  // jeans (blue bottoms): worn pale on the thigh fronts and knees
+  vec3 hmPantsCol = ${e.pants};
+  float jeans = step(1.6 * hmPantsCol.r, hmPantsCol.b) * step(1.2 * hmPantsCol.g, hmPantsCol.b);
+  float wear = onLeg * smoothstep(0.0, 0.08, vRestPos.z / hmBs + 0.02) * (0.6 + 0.8 * cr_vnoise(vRestPos * vec3(18.0, 5.0, 18.0)));
+  hmPantsCol *= 1.0 + 0.35 * jeans * wear;
+  // a skirt (the only garment on the trunk below the seat) hangs in soft
+  // flutes that deepen toward the hem, not a smooth bell
+  float skirtFold = trunk * (1.0 - smoothstep(0.72, 0.8, y / hmBs)) * (1.0 - smoothstep(0.62, 0.86, y / hmBs));
+  float flutes = sin(atan(vRestPos.z, vRestPos.x) * 9.0 + 2.0 * cr_vnoise(vRestPos * 12.0));
+  hmPantsCol *= 1.0 - 0.14 * skirtFold * (0.5 + 0.5 * flutes);
+  hmCol = mix(hmCol, hmPantsCol * (1.0 + drape * 0.26), pantsM);
+  // tops: prints in the top's own contrast colour (cream on dark tops, navy on
+  // pale ones), each settling to its mean tint before its pattern reaches the
+  // pixel size
+  vec3 hmShirtCol = ${e.shirt};
+  float shirtLum = dot(hmShirtCol, vec3(0.2126, 0.7152, 0.0722));
+  vec3 hmContrast = shirtLum < 0.22 ? vec3(0.72, 0.7, 0.66) : vec3(0.035, 0.045, 0.08);
+  if (hmPrint == 1.0) {
+    float sp = 0.045 * hmBs;
+    float st = hm_stripe(y / sp, hmPix / sp);
+    hmShirtCol = mix(hmShirtCol, hmContrast, 0.75 * st);
+  } else if (hmPrint == 2.0) {
+    float cp = 0.06 * hmBs;
+    float u = (vRestPos.x + vRestPos.z) * 0.7;
+    float sy = hm_stripe(y / cp, hmPix / cp);
+    float su = hm_stripe(u / cp + 0.25, hmPix / cp);
+    hmShirtCol *= (1.0 - 0.32 * sy) * (1.0 - 0.32 * su) * (1.0 + 0.25 * sy * su * step(shirtLum, 0.22));
+  } else if (hmPrint == 4.0) {
+    // a slightly worn chest print
+    vec2 gq = vec2(vRestPos.x, y - hmMarks.x + 0.17 * hmBs) / (hmBs * vec2(0.065, 0.045));
+    float gw = hmPix / (0.05 * hmBs);
+    float graphic = (1.0 - smoothstep(1.0 - gw, 1.0 + gw, max(abs(gq.x), abs(gq.y)))) * smoothstep(0.04, 0.07, vRestPos.z / hmBs);
+    graphic *= 0.85 - 0.3 * cr_vnoise(vRestPos * 60.0) * (1.0 - smoothstep(0.008, 0.016, hmPix));
+    hmShirtCol = mix(hmShirtCol, hmContrast, graphic * trunk);
+  } else if (hmPrint == 5.0) {
+    // heathered marl: flecks lighter and darker than the yarn's mean
+    hmShirtCol *= 1.0 + 0.3 * (cr_vnoise(vRestPos * vec3(40.0, 18.0, 40.0) + 5.1) - 0.5) * (1.0 - smoothstep(0.016, 0.032, hmPix));
+  }
+  // hems: the rib round the neck, the doubled hem of each sleeve and of the
+  // top (a ringer tee has them in its contrast colour), each a little darker
+  // where the fabric folds over
+  float rib = trunk * hm_step(neckY - 0.014 * hmBs, y);
+  float cuff = onArm * hm_step(hmCut.x - 0.018 * hmBs, armT);
+  float hem = trunk * (1.0 - hm_step(hmMarks.y + 0.025 * hmBs, y));
+  float hems = max(max(rib, cuff), hem * step(hmCut.z, 0.0));
+  hmShirtCol = hmPrint == 3.0 ? mix(hmShirtCol, hmContrast, max(rib, cuff)) : hmShirtCol * (1.0 - 0.12 * hems);
+  hmCol = mix(hmCol, hmShirtCol * (1.0 + drape * 0.22), shirtM);
   // waistband under the hem of the top (not on a lab coat): separates top and bottom
   float belt = trunk * (1.0 - hm_step(hmMarks.y, y)) * hm_step(hmMarks.y - 0.03, y) * step(hmCut.z, 0.0);
   hmCol = mix(hmCol, ${e.pants} * 0.4, belt);
+  // trouser hems: the break above the shoe, the turn-up of shorts
+  float pantsHem = max(1.0 - hm_step(hmMarks.z + 0.03 * hmBs, y), onLeg * hm_step(hmCut.y - 0.02 * hmBs, legT));
+  hmCol *= 1.0 - 0.16 * pantsHem * pantsM;
+  // skin just past a sleeve or a short trouser leg sits in its opening's shade
+  float openingShade = onArm * (1.0 - hm_step(hmCut.x + 0.022 * hmBs, armT)) + onLeg * (1.0 - hm_step(hmCut.y + 0.022 * hmBs, legT));
+  hmCol *= 1.0 - 0.18 * openingShade * (1.0 - max(shirtM, pantsM));
   float clothM = max(shirtM, pantsM);
   hmRough = mix(hmRough, 0.93 - drape * 0.1, clothM);
   float shoe = onLeg * (1.0 - hm_step(hmMarks.z, y));
-  hmCol = mix(hmCol, ${e.shoes}, shoe);
-  hmRough = mix(hmRough, 0.55, shoe);
+  // a sole (pale rubber on trainers) under a darker welt line
+  float sole = 1.0 - hm_step(0.022 * hmBs, y);
+  float welt = (1.0 - hm_step(0.03 * hmBs, y)) * (1.0 - sole);
+  vec3 soleCol = mod(floor(hmStyle / 8.0), 2.0) > 0.5 ? vec3(0.62, 0.6, 0.56) : ${e.shoes} * 0.55;
+  hmCol = mix(hmCol, mix(${e.shoes} * (1.0 - 0.3 * welt), soleCol, sole), shoe);
+  hmRough = mix(hmRough, mix(0.55, 0.85, sole), shoe);
   vec3 hmEye = ${e.eye};
   float hk = (hmEye.y - ${e.mouth}.y) / 0.07; // head scale (adult 1)
   vec3 fq = (vRestPos - vec3(0.0, hmEye.y, hmEye.z)) / hk; // face frame: eye line, eye depth
@@ -155,7 +251,10 @@ float hmHair = 0.0;
   // roughness and broader 4 cm clumps that still show at the closest zoom.
   // Each detail settles to its mean before its cells reach pixel size.
   float hairWave = (cr_vnoise(vRestPos * vec3(50.0, 32.0, 50.0) + 3.1) - 0.5) * (1.0 - smoothstep(0.012, 0.024, hmPix));
-  float hairM = max(hm_step(0.004 + 0.005 * hairWave, vZone.z), 0.6 * smoothstep(-0.003, 0.004, vZone.z));
+  // and in coarser tufts that still show at the closest zoom (they only pull
+  // the edge back, so a bald man's stubble fringe keeps its cover)
+  float hairTufts = cr_vnoise(vRestPos * vec3(22.0, 14.0, 22.0) + 8.3) * (1.0 - smoothstep(0.024, 0.048, hmPix));
+  float hairM = max(hm_step(0.004 + 0.005 * hairWave + 0.006 * hairTufts, vZone.z), 0.6 * smoothstep(-0.003, 0.004, vZone.z));
   float locks = (cr_vnoise(vRestPos * vec3(45.0, 10.0, 45.0)) - 0.5) * (1.0 - smoothstep(0.008, 0.016, hmPix));
   float hairLift = mix(0.74, 1.06, smoothstep(-0.1, 0.07, fq.y));
   float clumps = (cr_vnoise(vRestPos * vec3(24.0, 6.0, 24.0) + 11.7) - 0.5) * (1.0 - smoothstep(0.016, 0.032, hmPix));
@@ -201,6 +300,13 @@ float hmHair = 0.0;
   hmCol *= mix(vec3(1.0), vec3(1.05, 0.94, 0.92), noseTip * face);
   hmCol *= mix(vec3(1.0), vec3(0.92, 0.8, 0.78), ear * face);
   hmCol *= mix(vec3(1.0), vec3(0.97, 0.9, 0.86), crown * face);
+  // stubble (style bit): a shaved scalp and a shadow of beard along the jaw
+  // and chin in the hair's colour; a bare crown has skin's sheen, not chalk
+  float stubble = mod(floor(hmStyle / 16.0), 2.0);
+  float jaw = hm_mark(fx, vec3(0.03, -0.095, 0.0), vec3(0.04, 0.04, 0.06), fpk) + hm_mark(fq, vec3(0.0, -0.105, 0.012), vec3(0.03, 0.025, 0.03), fpk);
+  vec3 stubbleCol = min(${e.hair}, ${e.skin} * 0.62);
+  hmCol = mix(hmCol, stubbleCol, stubble * face * clamp(0.28 * crown + 0.3 * min(jaw, 1.0), 0.0, 0.3));
+  hmRough = mix(hmRough, 0.45, crown * face);
   vec2 er = vec2(0.012, 0.0048);
   vec2 ew = sqrt(er * er + fp * fp);
   vec3 de = (q - hmEye) / vec3(ew, 0.01 + 0.5 * fp);
@@ -219,8 +325,33 @@ float hmHair = 0.0;
   hmCol = mix(hmCol, ${e.skin} * vec3(0.4, 0.27, 0.25), mouthLine * face * 0.85);
   hmCol = mix(hmCol, vec3(0.03, 0.022, 0.018), eye * face);
 }
+// dark skin, for the moonlit skin toe (props/lights/lampField.ts LF_SKIN)
+float hmSkinDark = 1.0 - smoothstep(0.04, 0.2, dot(${e.skin}, vec3(0.2126, 0.7152, 0.0722)));
 diffuseColor.rgb *= hmCol;`;
 }
+
+/**
+ * Tousled hair (after <begin_vertex>, rest space): the hair surface lifts and
+ * dips by up to ≈ 1 cm in lumps a few cm wide, so its outline is uneven
+ * instead of a helmet's; the hairline (first 2 mm) and hats stay put. Its own
+ * value noise: the shared NOISE_GLSL holds fragment-only functions.
+ */
+const HAIR_TOUSLE_PARS = `float hm_vhash(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.zyx + 31.32);
+  return fract((p.x + p.y) * p.z);
+}
+float hm_vnoise(vec3 x) {
+  vec3 i = floor(x);
+  vec3 f = fract(x);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(hm_vhash(i), hm_vhash(i + vec3(1.0, 0.0, 0.0)), f.x), mix(hm_vhash(i + vec3(0.0, 1.0, 0.0)), hm_vhash(i + vec3(1.0, 1.0, 0.0)), f.x), f.y),
+             mix(mix(hm_vhash(i + vec3(0.0, 0.0, 1.0)), hm_vhash(i + vec3(1.0, 0.0, 1.0)), f.x), mix(hm_vhash(i + vec3(0.0, 1.0, 1.0)), hm_vhash(i + 1.0), f.x), f.y), f.z);
+}`;
+const HAIR_TOUSLE_GLSL = `if (zone.z > 0.0 && zone.w <= 0.0) transformed += normal * (smoothstep(0.002, 0.012, zone.z) * (hm_vnoise(position * vec3(38.0, 16.0, 38.0)) - 0.4) * 0.016);`;
+
+/** Dark bare skin gets the moonlit skin toe of applyLampField (hmSkin, hmSkinDark: set by humanColorGLSL). */
+const SKIN_TOE_DEFINE = '#define LF_SKIN (hmSkin * hmSkinDark)';
 
 const ROUGHNESS_GLSL = `#include <roughnessmap_fragment>
 roughnessFactor = hmRough;`;
@@ -266,6 +397,7 @@ export function createHumanMaterial(colors: HumanColors, cut: HumanCut, marks: H
     uEye: { value: new THREE.Vector3(...marks.eyeL) },
     uMouth: { value: new THREE.Vector3(...marks.mouth) },
     uMicro: { value: detail > 0 ? 1 : 0 },
+    uStyle: { value: cut.style ?? 0 },
     uHighlight: { value: 0 },
   };
   mat.userData.human = u;
@@ -279,14 +411,16 @@ attribute vec4 zone;
 attribute float girth;
 uniform vec4 uCut;
 varying vec4 vZone;
-varying vec3 vRestPos;`,
+varying vec3 vRestPos;
+${HAIR_TOUSLE_PARS}`,
       )
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
 vZone = zone;
 vRestPos = position;
-transformed += normal * (uCut.w * girth);`,
+transformed += normal * (uCut.w * girth);
+${HAIR_TOUSLE_GLSL}`,
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
@@ -298,9 +432,11 @@ uniform vec3 uMarks;
 uniform vec3 uEye;
 uniform vec3 uMouth;
 uniform float uMicro;
+uniform float uStyle;
 uniform float uHighlight;
 varying vec4 vZone;
 varying vec3 vRestPos;
+${SKIN_TOE_DEFINE}
 ${FRAG_HELPERS}
 ${HIGHLIGHT_FN_GLSL}`,
       )
@@ -317,6 +453,7 @@ ${HIGHLIGHT_FN_GLSL}`,
           marks: 'uMarks',
           eye: 'uEye',
           mouth: 'uMouth',
+          style: 'uStyle',
         }),
       )
       .replace('#include <roughnessmap_fragment>', ROUGHNESS_GLSL)
@@ -324,7 +461,7 @@ ${HIGHLIGHT_FN_GLSL}`,
       .replace('#include <opaque_fragment>', `${SKIN_CLOTH_LIGHT_GLSL}\noutgoingLight = crHighlightOf(outgoingLight, uHighlight);\n#include <opaque_fragment>`);
     applyLampField(shader);
   };
-  mat.customProgramCacheKey = () => 'creature-human-v4';
+  mat.customProgramCacheKey = () => 'creature-human-v5';
   return mat;
 }
 
@@ -344,9 +481,11 @@ export function setHumanColors(mat: HumanMaterial, c: HumanColors): void {
 /**
  * Per-instance look texels of a batched human:
  *   0 = (skin.rgb, sleeve)    1 = (hair.rgb, pants)     2 = (shirt.rgb, coat)
- *   3 = (pants.rgb, inflate)  4 = (shoes.rgb, body id)  5 = (hat.rgb, highlight)
+ *   3 = (pants.rgb, inflate)  4 = (shoes.rgb, body id + HUMAN_BODIES × style)
+ *   5 = (hat.rgb, highlight)
  * Colours are linear RGB. The body id (0..3 = female + 2 × child) selects the
- * face / collar landmarks from uniform arrays (they depend on the body only).
+ * face / collar landmarks from uniform arrays (they depend on the body only);
+ * style is the humanStyle bits (prints, soles, stubble, neckline).
  */
 export const HUMAN_LOOK_TEXELS = 6;
 /** Number of body types (female × child). */
@@ -367,7 +506,7 @@ export function writeHumanLook(dst: Float32Array, o: number, colors: HumanColors
   put(1, colors.hair, cut.pants);
   put(2, colors.shirt, cut.coat);
   put(3, colors.pants, cut.inflate);
-  put(4, colors.shoes, body);
+  put(4, colors.shoes, body + HUMAN_BODIES * (cut.style ?? 0));
   put(5, colors.hat, highlight);
 }
 
@@ -400,7 +539,8 @@ flat varying vec4 vHm1;
 flat varying vec4 vHm2;
 flat varying vec4 vHm3;
 flat varying vec4 vHm4;
-flat varying vec4 vHm5;`,
+flat varying vec4 vHm5;
+${HAIR_TOUSLE_PARS}`,
       `vHm0 = crTexel(crBase);
 vHm1 = crTexel(crBase + 1);
 vHm2 = crTexel(crBase + 2);
@@ -412,7 +552,8 @@ vHm5 = crTexel(crBase + 5);`,
       `#include <begin_vertex>
 vZone = zone;
 vRestPos = position;
-transformed += normal * (vHm3.w * girth);`,
+transformed += normal * (vHm3.w * girth);
+${HAIR_TOUSLE_GLSL}`,
     );
     shader.fragmentShader = shader.fragmentShader
       .replace(
@@ -424,6 +565,7 @@ uniform vec3 uHmMouth[${n}];
 uniform float uMicro;
 varying vec4 vZone;
 varying vec3 vRestPos;
+${SKIN_TOE_DEFINE}
 flat varying vec4 vHm0;
 flat varying vec4 vHm1;
 flat varying vec4 vHm2;
@@ -435,7 +577,8 @@ ${HIGHLIGHT_FN_GLSL}`,
       )
       .replace(
         '#include <color_fragment>',
-        `int hmBody = clamp(int(vHm4.w + 0.5), 0, ${n - 1});
+        `float hmPacked = floor(vHm4.w + 0.5);
+int hmBody = clamp(int(mod(hmPacked, ${HUMAN_BODIES.toFixed(1)})), 0, ${n - 1});
 ${humanColorGLSL({
   skin: 'vHm0.rgb',
   hair: 'vHm1.rgb',
@@ -447,6 +590,7 @@ ${humanColorGLSL({
   marks: 'uHmMarks[hmBody]',
   eye: 'uHmEye[hmBody]',
   mouth: 'uHmMouth[hmBody]',
+  style: `floor(hmPacked / ${HUMAN_BODIES.toFixed(1)})`,
 })}`,
       )
       .replace('#include <roughnessmap_fragment>', ROUGHNESS_GLSL)
@@ -454,6 +598,6 @@ ${humanColorGLSL({
       .replace('#include <opaque_fragment>', `${SKIN_CLOTH_LIGHT_GLSL}\noutgoingLight = crHighlightOf(outgoingLight, vHm5.w);\n#include <opaque_fragment>`);
     applyLampField(shader);
   };
-  mat.customProgramCacheKey = () => `creature-human-batch-v4-${n}`;
+  mat.customProgramCacheKey = () => `creature-human-batch-v5-${n}`;
   return { material: mat, depth: crowdDepthMaterial(u), uniforms: [u] };
 }

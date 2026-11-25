@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import type { QualitySettings } from '../src/core/contracts';
 import { PROP_SPECS } from '../src/props/registry';
 import '../src/props/nature';
-import { applyFade, fadeModeOf, updateFade, fadeUniforms, TREE_GONE, TREE_KEEP_R, TREE_SHADOW_R } from '../src/props/lod/fade';
+import { applyFade, applyOccluderCut, casterDepthMaterial, fadeModeOf, updateFade, fadeUniforms, FOLLOW_CUT_D, OCCLUDER_D, OCCLUDER_R, OCCLUDER_SHARE, OCCLUDER_SIDE, setFollowCut, TREE_GONE, TREE_KEEP_R, TREE_SHADOW_R } from '../src/props/lod/fade';
 import { windDepthMaterial } from '../src/props/wind';
 import { addCrownFade, barkRanks, connectedPieces } from '../src/props/nature/geo';
 
@@ -169,13 +169,16 @@ describe('near-camera fade shader', () => {
     expect(treeBark.customProgramCacheKey()).not.toBe(bark.customProgramCacheKey());
     // leaves and bark of a tree: one decision per instance (no per-vertex hole, lens or limb cut)
     for (const sh of [crown.vertexShader, tb]) {
-      expect(sh).toContain('float tree = max( instF, propTreeF( M, uFadeCam + dir * max( tEnd, 0.0 ), grow ) * uFadeCrown * between );');
+      expect(sh).toContain('float hit = propTreeF( M, uFadeCam + dir * max( tEnd, 0.0 ), mix( grow, 0.50, uFadeFollow * ( 1.0 - uFadeCrown ) ) ) * between;');
+      expect(sh).toContain('float fade = propTreeFade( max( instF, hit * uFadeCrown ) );');
       // the crown thins by at most half over a wide band, then the tree goes whole
-      expect(sh).toContain(`float fade = tree < ${TREE_GONE.toFixed(2)} ? 0.5 * smoothstep( 0.15, ${TREE_GONE.toFixed(2)}, tree ) : 1.0;`);
+      expect(sh).toContain(`return tree < ${TREE_GONE.toFixed(2)} ? 0.5 * smoothstep( 0.15, ${TREE_GONE.toFixed(2)}, tree ) : 1.0;`);
       // bark stays whole until the tree goes (no bare trunk or skeleton)
-      expect(sh).toContain(`fade = step( ${TREE_GONE.toFixed(2)}, tree );`);
+      expect(sh).toContain(`return step( ${TREE_GONE.toFixed(2)}, tree );`);
       expect(sh.indexOf('float propTreeF( mat4 M')).toBeGreaterThan(sh.indexOf('attribute vec2 aCrownR;'));
     }
+    expect(tb).toContain('#define PROP_FADE_BARK');
+    expect(crown.vertexShader.indexOf('#define PROP_FADE_BARK')).toBe(-1);
   });
 
   it('keeps the tree the camera looks at and only removes trees clearly between camera and subject', () => {
@@ -220,6 +223,93 @@ describe('near-camera fade shader', () => {
     expect(bd.customProgramCacheKey()).toBe('props-wind-depth');
   });
 
+  it('cuts crowns on the camera → subject line while following, up to FOLLOW_CUT_D, and only in the far part of the line', () => {
+    const leaf = new THREE.MeshStandardMaterial();
+    leaf.userData.foliage = true;
+    leaf.userData.crownFade = true;
+    applyFade(leaf, 'crown');
+    const sh = compile(leaf).vertexShader;
+    // trees run the fade while following even where the free-camera hole is gone (beyond ~42 m)
+    expect(sh).toContain('#define PROP_FADE_ON ( uFadeParams.w > 0.0 || uFadeFollow > 0.0 )');
+    // the follow term: the same per-tree hit (keep rules included), past the first 40 % of the line
+    expect(sh).toContain('return max( fade, propTreeFade( hit * uFadeFollow * smoothstep( 0.35, 0.45, tc ) ) );');
+    // other foliage and solid parts keep the free-camera gate
+    const fern = new THREE.MeshStandardMaterial();
+    fern.userData.foliage = true;
+    applyFade(fern, 'foliage');
+    expect(compile(fern).vertexShader).toContain('#define PROP_FADE_ON uFadeParams.w > 0.0');
+
+    // a followed tree's shadow goes with it at any distance (after the near-camera shadow limit)
+    const depth = windDepthMaterial(Object.assign(new THREE.MeshStandardMaterial({ alphaTest: 0.5 }), { userData: { foliage: true, crownFade: true, sway: 0.011 } }))!;
+    const dv = compileDepth(depth).vertexShader;
+    expect(dv.indexOf('fade *= 1.0 - smoothstep( 12.0')).toBeLessThan(dv.indexOf('return max( fade, propTreeFade( hit * uFadeFollow'));
+
+    const subject = new THREE.Vector3(0, 0, 0);
+    const camAt = (d: number) => new THREE.Vector3(0, d * 0.5, d * 0.866);
+    try {
+      // free camera: no follow cut at any distance
+      for (const d of [8, 30, 44]) {
+        updateFade(camAt(d), subject, true);
+        expect(fadeUniforms.uFadeFollow.value).toBe(0);
+        expect(fadeUniforms.uFadeOccl.value).toBe(0);
+      }
+      setFollowCut(subject);
+      updateFade(camAt(34), subject, true);
+      expect(fadeUniforms.uFadeFollow.value).toBe(1);
+      expect(fadeUniforms.uFadeCrown.value).toBe(0);
+      updateFade(camAt(FOLLOW_CUT_D - 1), subject, true);
+      expect(fadeUniforms.uFadeFollow.value).toBe(1);
+      // past the free-camera range the line still tracks the camera
+      expect(fadeUniforms.uFadeParams.value.w).toBe(0);
+      expect(fadeUniforms.uFadeCam.value.distanceTo(camAt(FOLLOW_CUT_D - 1))).toBeLessThan(1e-6);
+      updateFade(camAt(FOLLOW_CUT_D + 4), subject, true);
+      expect(fadeUniforms.uFadeFollow.value).toBe(0);
+      // the fade tier switch turns it off too
+      updateFade(camAt(30), subject, false);
+      expect(fadeUniforms.uFadeFollow.value).toBe(0);
+    } finally {
+      setFollowCut(null);
+    }
+  });
+
+  it('hands the follow cuts back over FOLLOW_RELEASE_S when following ends (no pop)', () => {
+    const cam = new THREE.Vector3(0, 6, 8);
+    const subject = new THREE.Vector3(0, 0, 0);
+    try {
+      setFollowCut(subject, 0.016);
+      updateFade(cam, subject, true);
+      expect(fadeUniforms.uFadeFollow.value).toBe(1);
+      setFollowCut(null, 0.3);
+      updateFade(cam, subject, true);
+      expect(fadeUniforms.uFadeFollow.value).toBeCloseTo(0.5, 5);
+      expect(fadeUniforms.uFadeOccl.value).toBeCloseTo(0.5, 5);
+      setFollowCut(null, 0.3);
+      updateFade(cam, subject, true);
+      expect(fadeUniforms.uFadeFollow.value).toBe(0);
+      expect(fadeUniforms.uFadeOccl.value).toBe(0);
+    } finally {
+      setFollowCut(null);
+    }
+  });
+
+  it('aims the cuts at the followed subject, not at the ground point at the screen centre', () => {
+    const cam = new THREE.Vector3(0, 6, 8);
+    const subject = new THREE.Vector3(0, 0, 0);
+    const beyond = new THREE.Vector3(0, 0, -12); // a subject framed low: the screen centre hits the ground behind it
+    try {
+      setFollowCut(subject);
+      updateFade(cam, beyond, true);
+      expect(fadeUniforms.uFadeFocus.value.toArray()).toEqual([0, 1.1, 0]);
+      // the camera is 10 m from the subject: close enough for the occluder cut
+      expect(fadeUniforms.uFadeOccl.value).toBe(1);
+      setFollowCut(null);
+      updateFade(cam, beyond, true);
+      expect(fadeUniforms.uFadeFocus.value.toArray()).toEqual([0, 1.1, -12]);
+    } finally {
+      setFollowCut(null);
+    }
+  });
+
   it('removes whole crowns only in close views', () => {
     const cam = new THREE.Vector3(0, 4, 10);
     updateFade(cam, new THREE.Vector3(0, 0, 0), true);
@@ -228,5 +318,63 @@ describe('near-camera fade shader', () => {
     expect(fadeUniforms.uFadeCrown.value).toBe(0);
     updateFade(cam, new THREE.Vector3(0, 0, 0), false);
     expect(fadeUniforms.uFadeCrown.value).toBe(0);
+  });
+});
+
+describe('follow-mode occluder cut (fences, small structures)', () => {
+  it('dissolves whole pieces near the camera on the camera → subject line, only while following close', () => {
+    const m = new THREE.MeshStandardMaterial();
+    const key = m.customProgramCacheKey();
+    applyOccluderCut(m);
+    applyOccluderCut(m);
+    const sh = compile(m);
+    expect(sh.vertexShader.match(/#define PROP_FADE_OCCLUDER/g)?.length).toBe(1);
+    // runs only while the occluder cut is on (never in free-camera play)
+    expect(sh.vertexShader).toContain('#define PROP_FADE_ON uFadeOccl > 0.0');
+    // one value per instance, from its origin: within OCCLUDER_R of the camera, OCCLUDER_SIDE of the line, in front of the subject
+    expect(sh.vertexShader).toContain(`float nearR = max( ${OCCLUDER_R.toFixed(2)}, ${OCCLUDER_SHARE.toFixed(2)} * len );`);
+    expect(sh.vertexShader).toContain('float near = 1.0 - smoothstep( nearR - 0.25, nearR, length( co ) );');
+    expect(sh.vertexShader).toContain(`( 1.0 - smoothstep( ${(OCCLUDER_SIDE - 0.15).toFixed(2)}, ${OCCLUDER_SIDE.toFixed(2)}, side ) )`);
+    // at least a metre in front of the subject
+    expect(sh.vertexShader).toContain('( 1.0 - smoothstep( len - 1.3, len - 1.0, t ) )');
+    expect(sh.vertexShader).toContain('return propOccluderAt( o );');
+    // a screen-space threshold, not the rank: the whole piece dissolves evenly
+    expect(sh.fragmentShader).toContain('if ( vPropFade > 0.3 + 0.4 * fract( 52.9829189');
+    expect(sh.fragmentShader).not.toContain('vPropFade > vPropRank');
+    expect(m.customProgramCacheKey()).toBe(`${key}|propoccl`);
+
+    // vegetation keeps its own fade
+    const leaf = new THREE.MeshStandardMaterial();
+    leaf.userData.foliage = true;
+    applyFade(leaf, 'foliage');
+    applyOccluderCut(leaf);
+    expect(compile(leaf).vertexShader).not.toContain('#define PROP_FADE_OCCLUDER');
+
+    const subject = new THREE.Vector3(0, 0, 0);
+    const camAt = (d: number) => new THREE.Vector3(0, d * 0.42, d * 0.906);
+    try {
+      setFollowCut(subject);
+      updateFade(camAt(5.25), subject, true);
+      expect(fadeUniforms.uFadeOccl.value).toBe(1);
+      updateFade(camAt(OCCLUDER_D + 3.5), subject, true);
+      expect(fadeUniforms.uFadeOccl.value).toBe(0);
+      setFollowCut(null);
+      updateFade(camAt(5.25), subject, true);
+      expect(fadeUniforms.uFadeOccl.value).toBe(0);
+    } finally {
+      setFollowCut(null);
+    }
+  });
+});
+
+describe('shared shadow casters (still bark)', () => {
+  it('drop a removed tree\'s trunk and limb shadows, never a piece without crown data', () => {
+    const d = casterDepthMaterial();
+    expect(casterDepthMaterial()).toBe(d);
+    const sh = compileDepth(d);
+    for (const def of ['PROP_FADE_CROWN', 'PROP_FADE_SHADOW', 'PROP_FADE_BARK', 'PROP_FADE_TREES_ONLY']) expect(sh.vertexShader).toContain(`#define ${def}`);
+    expect(sh.vertexShader).toContain('if ( aCrownR.y < 1.0 ) return 0.0;');
+    expect(sh.fragmentShader).toContain('if ( vPropFade > vPropRank ) discard;');
+    expect(d.customProgramCacheKey()).toBe('props-caster-depth|treeshadow');
   });
 });

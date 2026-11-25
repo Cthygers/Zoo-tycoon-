@@ -200,19 +200,22 @@ function bearDriver(p: QuadParams, b: BearAnim): AnimDriver<PRState> {
       rig.fkBone(pose, leg.r.upper);
       const Hj = rig.wp[leg.r.upper];
       const reach = leg.reach;
+      // one side a little looser than the other, so the pose is not a mirror image
+      const loose = leg.side === ((ctx.seed & 2) === 0 ? 1 : -1) ? 1 : 0;
       if (!leg.front) {
-        // hind legs stretched out behind, soles turned up ("frog" lying)
-        const dy = Math.max(0, Hj.y - 0.1);
-        const back = Math.sqrt(Math.max(0, (reach * 0.9) ** 2 - dy * dy));
-        _A.set(Hj.x + leg.side * 0.05, 0.1, Hj.z - back);
-        _P.set(0, -1, 0.15).normalize();
-        placeLegPole(ctx, pose, leg, _A, _P, -2.75, -2.95);
+        // hind legs folded beside the belly: knee drawn forward, hock on the
+        // ground beside the rump, sole flat with the toes forward (straight
+        // legs stretched out behind read as a collapsed animal)
+        _A.set(Hj.x + leg.side * (0.12 + 0.06 * loose) * reach, 0.09, Hj.z - (0.12 + 0.1 * loose) * reach);
+        _P.set(leg.side * 0.45, -0.25, 1).normalize();
+        placeLegPole(ctx, pose, leg, _A, _P, -0.42, -0.2);
         continue;
       }
-      // forearms flat along the ground, elbows tucked down and back (not winged out)
+      // forearms flat along the ground, elbows tucked down and back (not winged
+      // out); the looser one drawn back a little and in toward the other
       const dy = Math.max(0, Hj.y - 0.08);
-      const fwd = Math.sqrt(Math.max(0, (reach * 0.93) ** 2 - dy * dy));
-      _A.set(Hj.x * 0.95, 0.08, Hj.z + fwd);
+      const fwd = Math.sqrt(Math.max(0, (reach * (0.93 - 0.07 * loose)) ** 2 - dy * dy));
+      _A.set(Hj.x * (0.95 - 0.12 * loose), 0.08, Hj.z + fwd);
       _P.set(0, -0.7, -1).normalize();
       placeLegPole(ctx, pose, leg, _A, _P, -0.5, -0.05);
     }

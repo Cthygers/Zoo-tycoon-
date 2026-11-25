@@ -34,12 +34,41 @@ export const DEFAULT_LIMITS: CameraLimits = {
 /**
  * Where a followed entity is: its ground position and, optionally, the height
  * (m above its feet) the camera should look at once zoomed in close, so a
- * person or animal sits in the middle of the view instead of its feet.
+ * person or animal sits in the middle of the view instead of its feet, and
+ * the closest zoom it can be framed at (never closer than followMinDistance).
  */
-export type FollowFn = () => { x: number; z: number; lookHeight?: number } | null;
+export type FollowFn = () => { x: number; z: number; lookHeight?: number; minDistance?: number } | null;
 
-/** Distance (m) from which the look point starts rising from the ground to the followed entity's lookHeight (reached at followMinDistance). */
+/**
+ * Distance (m) from which the look point starts rising from the ground to the
+ * followed entity's lookHeight, for a subject framed at followMinDistance; a
+ * subject that needs a farther closest zoom starts rising proportionally farther.
+ */
 const LIFT_FROM = 12;
+
+/**
+ * Closest follow distance per metre of a subject's height and of its body
+ * length: on a 20:9 phone a 5 m giraffe shows from its head down to its hooves
+ * at 8.5 m, and a 6 m elephant shows whole beside the info sheet from about
+ * 6.5 m. Smaller subjects stay at followMinDistance.
+ */
+const FIT_PER_HEIGHT = 1.7;
+const FIT_PER_LENGTH = 1.1;
+/** Look-point height as a share of the subject's height: the chest or middle of most subjects… */
+const LOOK_SHARE = 0.55;
+/** …rising for subjects from TALL_FROM to TALL_FULL metres high, so a giraffe's head stays in frame. */
+const LOOK_SHARE_TALL = 0.7;
+const TALL_FROM = 3;
+const TALL_FULL = 5;
+
+/**
+ * Close-up framing of a followed subject of the given standing height and
+ * body length (m, as drawn): the height to look at and the closest zoom.
+ */
+export function followFraming(height: number, length: number): { lookHeight: number; minDistance: number } {
+  const share = LOOK_SHARE + (LOOK_SHARE_TALL - LOOK_SHARE) * THREE.MathUtils.clamp((height - TALL_FROM) / (TALL_FULL - TALL_FROM), 0, 1);
+  return { lookHeight: share * height, minDistance: Math.max(FIT_PER_HEIGHT * height, FIT_PER_LENGTH * length) };
+}
 
 const _ray = new THREE.Ray();
 const _v = new THREE.Vector3();
@@ -62,10 +91,13 @@ export class CameraController {
   /** Called when follow mode ends (user panned or the entity disappeared). */
   onFollowEnd: (() => void) | null = null;
   /**
-   * Closest zoom right now: followMinDistance while following; when following
-   * ends close up it eases back out to minDistance (no jump).
+   * Closest zoom right now: the followed subject's closest zoom while
+   * following, minDistance otherwise. A floor that rises (following ends close
+   * up, or a taller subject is picked) eases out, carrying the view with it.
    */
   private floor: number;
+  /** Closest zoom for the followed subject (followMinDistance or more, see followFraming). */
+  private followFloor: number;
   /** Height (m) of the look point above the ground target (rises when close to a followed entity). */
   private lift = 0;
   /** Screen x (NDC) a followed entity is kept at: the middle of the view the side panels leave clear. */
@@ -100,6 +132,7 @@ export class CameraController {
   ) {
     this.limits = { ...DEFAULT_LIMITS, ...limits };
     this.floor = this.limits.minDistance;
+    this.followFloor = this.limits.followMinDistance;
     this.target.set(WORLD_W / 2, 0, WORLD_H * 0.8);
     this.target.y = this.groundHeight(this.target.x, this.target.z);
     this.applyPose();
@@ -286,7 +319,9 @@ export class CameraController {
   /** Follow a moving entity until the user pans or fn returns null. */
   follow(fn: FollowFn, distance?: number): void {
     this.followFn = fn;
-    this.floor = this.limits.followMinDistance;
+    this.followFloor = this.subjectFloor(fn());
+    // a lower floor applies at once (the view does not move); a higher one eases in (update)
+    this.floor = Math.min(this.floor, this.followFloor);
     this.screenX = this.followScreenX;
     this.anim = null;
     this.velX = this.velZ = 0;
@@ -299,13 +334,22 @@ export class CameraController {
     this.onFollowEnd?.();
   }
 
-  /** After following: raise the closest zoom back to the free camera's, carrying a close view smoothly out with it. */
-  private easeFloorOut(dt: number): void {
-    const minD = this.limits.minDistance;
-    if (this.floor >= minD) return;
-    this.floor = Math.max(this.floor, Math.min(this.distance, minD));
-    this.floor += (minD - this.floor) * (1 - Math.exp(-dt * 4));
-    if (minD - this.floor < 0.01) this.floor = minD;
+  private subjectFloor(p: ReturnType<FollowFn>): number {
+    return Math.max(this.limits.followMinDistance, p?.minDistance ?? 0);
+  }
+
+  /**
+   * Move the closest zoom to `want`: lowering it is immediate; raising it (after
+   * following, or for a taller subject) eases, carrying a closer view smoothly out.
+   */
+  private easeFloor(want: number, dt: number): void {
+    if (this.floor >= want) {
+      this.floor = want;
+      return;
+    }
+    this.floor = Math.max(this.floor, Math.min(this.distance, want));
+    this.floor += (want - this.floor) * (1 - Math.exp(-dt * 4));
+    if (want - this.floor < 0.01) this.floor = want;
     if (this.distance < this.floor) this.distance = this.floor;
   }
 
@@ -409,13 +453,14 @@ export class CameraController {
         this.target.x += (p.x - Math.cos(this.yaw) * w - this.target.x) * f;
         this.target.z += (p.z + Math.sin(this.yaw) * w - this.target.z) * f;
         this.clampTarget();
-        const L = this.limits;
-        lookHeight = (p.lookHeight ?? 0) * THREE.MathUtils.smoothstep(LIFT_FROM - this.distance, 0, LIFT_FROM - L.followMinDistance);
+        this.followFloor = this.subjectFloor(p);
+        const liftFrom = (LIFT_FROM * this.followFloor) / this.limits.followMinDistance;
+        lookHeight = (p.lookHeight ?? 0) * THREE.MathUtils.smoothstep(liftFrom - this.distance, 0, liftFrom - this.followFloor);
         offX = p.x - this.target.x;
         offZ = p.z - this.target.z;
       }
     }
-    if (!this.followFn) this.easeFloorOut(dt);
+    this.easeFloor(this.followFn ? this.followFloor : this.limits.minDistance, dt);
     const ease = 1 - Math.exp(-dt * 5);
     this.lift += (lookHeight - this.lift) * ease;
     this.focusOff.x += (offX - this.focusOff.x) * ease;

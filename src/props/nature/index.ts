@@ -35,7 +35,7 @@ import {
 } from './trees';
 
 export { atlasSteps, paintAtlasesOffThread } from './atlases';
-export { disposeNatureResources, natureResourceStats, setNatureNight, withQuality } from './mats';
+export { disposeNatureResources, natureResourceStats, setNatureNight, setNatureNightGround, withQuality } from './mats';
 
 type Builder = (v: number) => THREE.Object3D;
 /** Wrap a builder so it runs at the tier of the QualitySettings it is given. */

@@ -20,7 +20,8 @@
 //    their own batch;
 //  - LOD: templates whose PropSpec has buildLod get both versions; objects
 //    swap by camera distance with hysteresis (checked every few frames).
-// Vegetation materials get a near-camera fade (lod/fade.ts); lamps and lit
+// Vegetation materials get a near-camera fade (lod/fade.ts), structures the
+// follow-mode occluder cut (lod/fade.ts applyOccluderCut); lamps and lit
 // windows get ground light pools + halos (lights/nightlights.ts). Templates are
 // built for the types in use while loading (prewarm), others on first use.
 
@@ -39,7 +40,7 @@ import { findEmitters, NightLights, type LocalEmitter } from './lights/nightligh
 import { LitterRenderer } from './litter';
 import { frustumToArray, InstancedBatch, MultiBatch, supportsMultiDraw, type CullView, type InstParams, type PropBatch } from './lod/batched';
 import { autoLod } from './lod/autolod';
-import { applyFade, fadeModeOf, fadeUniforms, updateFade } from './lod/fade';
+import { applyFade, applyOccluderCut, casterDepthMaterial, fadeModeOf, fadeUniforms, updateFade } from './lod/fade';
 import { propsTier, type PropsTier } from './lod/tiers';
 import { concreteMaterial, disposePropMaterials, projectBoxUVs, surfaceTextures } from './materials';
 import { atlasSteps, disposeNatureResources, paintAtlasesOffThread, setNatureNight, withQuality } from './nature';
@@ -60,6 +61,9 @@ const LOD_FAR = 2.2;
  * shadow-only batch: tree trunks move a few cm, less than a shadow-map texel.
  */
 const SHADOW_STILL_SWAY = 0.005;
+
+/** Categories of built props that the follow-mode occluder cut may remove near the camera. */
+const OCCLUDER_CATEGORIES: ReadonlySet<ObjectDef['category']> = new Set(['amenity', 'decoration', 'enrichment', 'facility', 'feeder', 'shelter', 'shop']);
 
 // ---------------------------------------------------------------------------
 // Templates
@@ -82,6 +86,8 @@ interface TemplatePart {
   shadowBatch?: MultiBatch | null;
   /** Per-instance colour when the part's material was merged into a shared tinted one. */
   tint: THREE.Color | null;
+  /** Part of a structure: its batch material takes the follow-mode occluder cut. */
+  occluder: boolean;
 }
 
 interface Template {
@@ -208,8 +214,10 @@ export class PropsLayer implements IPropsLayer {
   private batchList: PropBatch[] = [];
   /** Shadow-only batches by depth-pass side + index layout (also in batchList). */
   private shadowBatches = new Map<string, MultiBatch>();
-  /** Position-only copies of caster geometries for the shadow-only batches. */
+  /** Position + crown-data copies of caster geometries for the shadow-only batches. */
   private shadowGeos = new WeakMap<THREE.BufferGeometry, THREE.BufferGeometry>();
+  /** Zeros viewed as the crown data of casters without a crown (never written). */
+  private noCrown = new Int16Array(0);
   /** Geometries created by splitting multi-material meshes (owned). */
   private splitGeos: THREE.BufferGeometry[] = [];
   readonly backend: 'instanced' | 'batched';
@@ -378,6 +386,9 @@ export class PropsLayer implements IPropsLayer {
         else parts.push(lp);
       }
     }
+    // (not lamp posts: thin, and their halo would hang in the air without them)
+    const lamp = cat === 'amenity' && OBJECTS_BY_ID[defId].light === true;
+    if (cat && OCCLUDER_CATEGORIES.has(cat) && !lamp) for (const p of parts) p.occluder = true;
     let emitters = findEmitters(parts.filter((p) => p.levels & 1));
     if (emitters.length === 0 && OBJECTS_BY_ID[defId]?.light) {
       // lit def without glowing parts: a soft pool in front (+Z)
@@ -418,6 +429,7 @@ export class PropsLayer implements IPropsLayer {
           levels,
           batch: null,
           tint: null,
+          occluder: false,
         });
       }
     });
@@ -501,6 +513,7 @@ export class PropsLayer implements IPropsLayer {
       this.batches.set(key, b);
       this.batchList.push(b);
     }
+    if (part.occluder) applyOccluderCut(mat);
     part.batch = b;
     return b;
   }
@@ -525,6 +538,8 @@ export class PropsLayer implements IPropsLayer {
         mat.shadowSide = side;
         b = new MultiBatch(mat, this.quality.shadows, this.objRoot, true);
         b.mesh.layers.set(SHADOW_ONLY_LAYER);
+        // still tree bark casts from here: it leaves with its tree near the camera
+        b.mesh.customDepthMaterial = casterDepthMaterial();
         this.shadowBatches.set(key, b);
         this.batchList.push(b);
       }
@@ -533,12 +548,27 @@ export class PropsLayer implements IPropsLayer {
     return b;
   }
 
-  /** Position-only copy of a geometry (attributes shared) for a shadow-only batch. */
+  /**
+   * Copy of a geometry for a shadow-only batch (attributes shared): position
+   * and the crown data the batch's depth material reads, zeros (no crown,
+   * never fades) where the geometry has none.
+   */
   private shadowGeometry(g: THREE.BufferGeometry): THREE.BufferGeometry {
     let s = this.shadowGeos.get(g);
     if (!s) {
       s = new THREE.BufferGeometry();
-      s.setAttribute('position', g.getAttribute('position'));
+      const pos = g.getAttribute('position');
+      s.setAttribute('position', pos);
+      const crown = g.getAttribute('aCrown');
+      const crownR = g.getAttribute('aCrownR');
+      if (crown && crownR) {
+        s.setAttribute('aCrown', crown);
+        s.setAttribute('aCrownR', crownR);
+      } else {
+        if (this.noCrown.length < pos.count * 4) this.noCrown = new Int16Array(Math.max(pos.count * 4, this.noCrown.length * 2));
+        s.setAttribute('aCrown', new THREE.BufferAttribute(this.noCrown.subarray(0, pos.count * 4), 4));
+        s.setAttribute('aCrownR', new THREE.BufferAttribute(this.noCrown.subarray(0, pos.count * 2), 2));
+      }
       if (g.index) s.setIndex(g.index);
       if (!g.boundingSphere) g.computeBoundingSphere();
       s.boundingSphere = g.boundingSphere;

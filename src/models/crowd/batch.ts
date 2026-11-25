@@ -349,6 +349,8 @@ export class FilteredBatch extends THREE.BatchedMesh {
 }
 
 export const DATA_WIDTH = 2048;
+/** Queued update spans beyond which the next upload is whole (three merges spans per row, then sends one call each). */
+const MAX_QUEUED_SPANS = 64;
 
 /**
  * FilteredBatch whose instances carry a block of `stride` RGBA float texels in
@@ -366,8 +368,19 @@ export class SkinnedBatch extends FilteredBatch {
   private dirtyLo = new Int32Array(0);
   private dirtyHi = new Int32Array(0);
   private anyDirty = false;
-  /** A new texture's first upload must be whole: update ranges would leave the rest of it undefined. */
+  /**
+   * The next upload must be whole (a new texture: update ranges would leave the
+   * rest of it undefined). Stays set until the renderer has uploaded it.
+   */
   private uploadWhole = true;
+  /**
+   * Flushed spans the renderer has not uploaded yet. three uploads a data
+   * texture only when it draws a program that samples it, so while the batch is
+   * culled (off screen, or no instance visible) the spans of every flush must
+   * stay queued; dropping them left stale look texels on the GPU (a penguin
+   * drawn with growth 0 wore the grey chick down).
+   */
+  private queued = false;
 
   constructor(
     name: string,
@@ -395,7 +408,9 @@ export class SkinnedBatch extends FilteredBatch {
     this.data = data;
     const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.FloatType);
     tex.needsUpdate = true;
+    tex.onUpdate = () => this.uploaded(tex);
     this.uploadWhole = true;
+    this.queued = true;
     this.dirtyLo = new Int32Array(h).fill(w);
     this.dirtyHi = new Int32Array(h);
     this.anyDirty = false;
@@ -458,10 +473,10 @@ export class SkinnedBatch extends FilteredBatch {
 
   /** Upload the texels written since the last flush (call once per frame after writing). */
   flush(): void {
-    if (!this.anyDirty && !this.uploadWhole) return;
+    if (!this.anyDirty) return;
     const tex = this.texture;
     const w = tex.image.width;
-    tex.clearUpdateRanges();
+    if (!this.queued) tex.clearUpdateRanges();
     if (!this.uploadWhole) {
       let dirty = 0;
       for (let r = 0; r < this.dirtyLo.length; r++) {
@@ -470,14 +485,24 @@ export class SkinnedBatch extends FilteredBatch {
         tex.addUpdateRange((r * w + this.dirtyLo[r]) * 4, n * 4);
         dirty += n;
       }
-      // mostly rewritten (a crowd of walkers): one whole upload beats a call per row
-      if (this.dirtyLo.length > 1 && dirty * 4 >= this.maxUsed * this.stride * 3) tex.clearUpdateRanges();
+      // mostly rewritten (a crowd of walkers), or spans piled up over the frames
+      // the batch was culled: one whole upload beats a call per span
+      const rewritten = this.dirtyLo.length > 1 && dirty * 4 >= this.maxUsed * this.stride * 3;
+      if (rewritten || tex.updateRanges.length > MAX_QUEUED_SPANS) this.uploadWhole = true;
     }
+    if (this.uploadWhole) tex.clearUpdateRanges();
     tex.needsUpdate = true;
-    this.uploadWhole = false;
+    this.queued = true;
     this.anyDirty = false;
     this.dirtyLo.fill(w);
     this.dirtyHi.fill(0);
+  }
+
+  /** The renderer uploaded `tex` (three calls Texture.onUpdate after each upload). */
+  private uploaded(tex: THREE.DataTexture): void {
+    if (tex !== this.texture) return;
+    this.queued = false;
+    this.uploadWhole = false;
   }
 
   dispose(): void {

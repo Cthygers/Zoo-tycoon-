@@ -63,4 +63,20 @@ describe('resting poses', () => {
     // stiffly stretched legs keep the ankle ≈ 0.63–0.71 reaches from the hip
     for (const l of Object.values(legs)) expect(l.hip.distanceTo(l.ankle)).toBeLessThan(0.6 * l.reach);
   });
+
+  for (const species of ['grizzly', 'polarbear']) {
+    it(`${species} lying on its belly folds its hind legs beside the body`, { timeout: 60_000 }, async () => {
+      await f.preload([species]);
+      // this seed rests lying on the belly (the other variant sits on the rump)
+      const legs = settledLegs(f, species, 'sit', 6, 6);
+      for (const id of ['HL', 'HR']) {
+        const l = legs[id];
+        // hind legs stretched out behind the rump (≈ 0.9 reach) read as a collapsed bear
+        expect(l.hip.distanceTo(l.ankle)).toBeLessThan(0.5 * l.reach);
+        expect(l.ankle.z - l.hip.z).toBeGreaterThan(-0.35 * l.reach);
+        expect(l.knee.z).toBeGreaterThan(l.hip.z);
+        expect(l.ankle.y).toBeLessThan(0.15);
+      }
+    });
+  }
 });

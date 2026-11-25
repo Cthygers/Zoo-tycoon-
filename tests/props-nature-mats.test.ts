@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { FoliageMaterial, RockMaterial, setNatureNight } from '../src/props/nature/mats';
+import { barkTextures } from '../src/props/nature/barks';
+import { FoliageMaterial, LEAF_PARAMS, RockMaterial, setNatureNight, setNatureNightGround, withQuality } from '../src/props/nature/mats';
 import { buildIceRocks } from '../src/props/nature/rocks';
 
 /** Run a material's onBeforeCompile on a copy of the physical shader source. */
@@ -52,6 +53,27 @@ describe('foliage at night', () => {
   });
 });
 
+describe('ground plants under the moon', () => {
+  it("take the moonlit ground's look (neutral light, lift, grade mark); tree crowns do not", () => {
+    const grass = new FoliageMaterial();
+    grass.groundPlant.value = 1;
+    const sh = compile(grass);
+    expect(sh.fragmentShader).toContain('float ngK = uNightLift * (vLfGround);');
+    expect(sh.fragmentShader).toContain('whLampLit = lfNightMark;');
+    // tree-sheet cards: bushes by their low crown centre (crown data from the near-camera fade)
+    expect(sh.vertexShader).toContain('vLfGround = max( uLfGround, 1.0 - smoothstep( 180.0, 320.0, aCrown.y ) );');
+    expect((sh.uniforms.uLfGround as THREE.IUniform<number>).value).toBe(1);
+    const crown = new FoliageMaterial();
+    expect((compile(crown).uniforms.uLfGround as THREE.IUniform<number>).value).toBe(0);
+    expect(grass.clone().groundPlant.value).toBe(1);
+    setNatureNightGround(0.8);
+    expect((sh.uniforms.uNightLift as THREE.IUniform<number>).value).toBe(0.8);
+    setNatureNightGround(0);
+    expect(LEAF_PARAMS.ground.groundPlant).toBe(true);
+    expect('groundPlant' in LEAF_PARAMS.trees).toBe(false);
+  });
+});
+
 describe('ice rockery', () => {
   it('is near-white glacial ice with crisp fracture planes, blue only where light runs deep', () => {
     const g = buildIceRocks(0);
@@ -74,5 +96,31 @@ describe('ice rockery', () => {
     expect(lum / col.count).toBeGreaterThan(0.5);
     expect(rb / col.count).toBeGreaterThan(0.6);
     expect(flatShared / (nrm.count / 3)).toBeGreaterThan(0.15);
+  });
+});
+
+describe('silver birch bark', () => {
+  /** Mean linear luminance and the fraction of near-black texels of an sRGB8 albedo map. */
+  function albedoStats(t: THREE.DataTexture): { mean: number; dark: number } {
+    const d = t.image.data as Uint8Array;
+    const toLin = (c: number): number => (c <= 10 ? c / 255 / 12.92 : Math.pow((c / 255 + 0.055) / 1.055, 2.4));
+    const n = d.length / 4;
+    let sum = 0;
+    let dark = 0;
+    for (let i = 0; i < n; i++) {
+      const l = 0.2126 * toLin(d[i * 4]) + 0.7152 * toLin(d[i * 4 + 1]) + 0.0722 * toLin(d[i * 4 + 2]);
+      sum += l;
+      if (l < 0.1) dark++;
+    }
+    return { mean: sum / n, dark: dark / n };
+  }
+
+  it('is white bark with a sprinkle of dark lenticels at both texture sizes', () => {
+    for (const q of ['medium', 'low'] as const) {
+      const s = withQuality(q, () => albedoStats(barkTextures('birch').map));
+      expect(s.mean).toBeGreaterThan(0.45);
+      expect(s.dark).toBeGreaterThan(0.005);
+      expect(s.dark).toBeLessThan(0.12);
+    }
   });
 });

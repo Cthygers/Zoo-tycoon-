@@ -44,8 +44,20 @@
 // canes; wind.ts windDepthMaterial + fadeDepthPatch): a tree removed within
 // ~12 m of the camera takes it along, so no crown-shaped shadow lies on empty
 // ground in a close view. Still bark casts from the shared shadow-only
-// batches (props/layer.ts), which carry no crown data, so its trunk's shadow
-// stays.
+// batches (props/layer.ts), whose depth material (casterDepthMaterial) makes
+// the same decision for every piece that carries crown data (the rest of
+// those batches carries zero crown data and never fades).
+//
+// While the camera follows a subject (setFollowCut, driven from the view's
+// follow state) two more cuts run, both off in free-camera play:
+//   - crowns the camera → subject line crosses in its far 60 % go, tree by
+//     tree as above (thinning, then whole), up to FOLLOW_CUT_D of zoom, with
+//     their shadows: a followed animal is not lost behind a leaf wall;
+//   - at the closest follow zooms, fence pieces and small structures standing
+//     on that line near the camera (OCCLUDER_R, or the near OCCLUDER_SHARE of
+//     the line) and at least a metre in front of the subject dissolve as
+//     whole pieces (applyOccluderCut: an instance-wide decision, dithered over
+//     a short band so a piece does not pop).
 
 import * as THREE from 'three';
 
@@ -67,6 +79,10 @@ export const fadeUniforms = {
   uFadeMargin: { value: new THREE.Vector2(2.5, 1.5) },
   /** Strength of the crown term (0..1): only close views remove whole crowns. */
   uFadeCrown: { value: 0 },
+  /** Strength of the follow cut of crowns on the camera → subject line (0..1; 0 = free camera). */
+  uFadeFollow: { value: 0 },
+  /** Strength of the near-camera occluder cut (0..1; closest follow zooms only). */
+  uFadeOccl: { value: 0 },
 };
 
 /** Height above the trunk base (m) from which the view hole cuts solid parts (limbs, not the trunk). */
@@ -79,6 +95,20 @@ export const TREE_KEEP_R = 3;
 export const TREE_GONE = 0.6;
 /** Horizontal camera → trunk distance (m) within which a removed tree's foliage shadow goes too (fully back 4 m farther). */
 export const TREE_SHADOW_R = 12;
+/** Camera → subject distance (m) up to which the follow cut removes crowns on the line (fully back 3 m farther). */
+export const FOLLOW_CUT_D = 45;
+/** Hole radius (m) the follow cut grows a crown by: only crowns the line really crosses go. */
+const FOLLOW_GROW = 0.5;
+/** Share of the camera → subject line, from the camera, where the follow cut leaves crowns alone (they are below the line). */
+const FOLLOW_SKIP = 0.4;
+/** Camera → subject distance (m) up to which occluders on the line are cut (fully back 3 m farther). */
+export const OCCLUDER_D = 11;
+/** Horizontal camera → piece distance (m) within which a fence piece or small structure on the line is cut… */
+export const OCCLUDER_R = 4;
+/** … or within this share of the horizontal camera → subject distance, if farther (a feeder in front of a giraffe followed from 8 m). */
+export const OCCLUDER_SHARE = 0.65;
+/** Horizontal distance (m) of a piece's origin from the camera → subject line within which it counts as on the line. */
+export const OCCLUDER_SIDE = 1.4;
 
 const FADE_PARS_VERT = /* glsl */ `
 uniform vec3 uFadeCam;
@@ -86,6 +116,8 @@ uniform vec3 uFadeFocus;
 uniform vec4 uFadeParams;
 uniform vec2 uFadeMargin;
 uniform float uFadeCrown;
+uniform float uFadeFollow;
+uniform float uFadeOccl;
 varying float vPropFade;
 varying float vPropRank;
 #ifdef PROP_FADE_CROWN
@@ -125,14 +157,51 @@ float propTreeF( mat4 M, vec3 lineEnd, float grow ) {
   return ( 1.0 - smoothstep( 0.8, 1.0, min( crownD, limbD ) ) ) * step( 1.0, aCrownR.y );
 }
 #endif
+#ifdef PROP_FADE_CROWN
+// per-tree cut strength → fade: the crown thins card by card over a wide band
+// (≈2-3 m of zoom), at most by half while the bark stays whole, then the whole
+// tree goes at once: further thinning would leave a bare trunk and main limbs
+float propTreeFade( float tree ) {
+#ifdef PROP_FADE_BARK
+  return step( ${TREE_GONE.toFixed(2)}, tree );
+#else
+  return tree < ${TREE_GONE.toFixed(2)} ? 0.5 * smoothstep( 0.15, ${TREE_GONE.toFixed(2)}, tree ) : 1.0;
+#endif
+}
+#endif
+#ifdef PROP_FADE_OCCLUDER
+// a fence piece or small structure (origin o) standing near the camera on the
+// camera → subject line, in front of the subject; one value per instance
+float propOccluderAt( vec3 o ) {
+  vec2 co = o.xz - uFadeCam.xz;
+  vec2 cs = uFadeFocus.xz - uFadeCam.xz;
+  float len = max( length( cs ), 1e-3 );
+  vec2 dir = cs / len;
+  float t = dot( co, dir );
+  float side = abs( co.x * dir.y - co.y * dir.x );
+  // narrow bands: a piece is in or out; the dither only softens the switch
+  float nearR = max( ${OCCLUDER_R.toFixed(2)}, ${OCCLUDER_SHARE.toFixed(2)} * len );
+  float near = 1.0 - smoothstep( nearR - 0.25, nearR, length( co ) );
+  float onLine = ( 1.0 - smoothstep( ${(OCCLUDER_SIDE - 0.15).toFixed(2)}, ${OCCLUDER_SIDE.toFixed(2)}, side ) )
+               * smoothstep( -0.3, 0.0, t ) * ( 1.0 - smoothstep( len - 1.3, len - 1.0, t ) );
+  return near * onLine * uFadeOccl;
+}
+#endif
 // p = world vertex, M = instance matrix (origin = trunk base / object origin)
 float propFadeAt( vec3 p, mat4 M ) {
   vec3 o = M[ 3 ].xyz;
+#ifdef PROP_FADE_OCCLUDER
+  return propOccluderAt( o );
+#else
+#ifdef PROP_FADE_TREES_ONLY
+  // shared shadow casters: only pieces with crown data (tree bark) go
+  if ( aCrownR.y < 1.0 ) return 0.0;
+#endif
   float k = uFadeParams.w;
   // whole instance: the camera stands inside / right next to this plant
-  float ir = uFadeParams.x * k;
+  float ir = max( uFadeParams.x * k, 1e-3 );
   float instF = ( 1.0 - smoothstep( ir * 0.85, ir, length( uFadeCam.xz - o.xz ) ) )
-              * ( 1.0 - smoothstep( o.y + 12.0, o.y + 16.0, uFadeCam.y ) );
+              * ( 1.0 - smoothstep( o.y + 12.0, o.y + 16.0, uFadeCam.y ) ) * step( 1e-4, k );
   // a cylinder around the view line, in front of the focus
   vec3 ab = uFadeFocus - uFadeCam;
   float len = max( length( ab ), 1e-3 );
@@ -150,19 +219,16 @@ float propFadeAt( vec3 p, mat4 M ) {
   // also keep a tree standing well in front of the subject (a wall of limbs)
   float between = smoothstep( ${TREE_KEEP_R.toFixed(1)}, ${(TREE_KEEP_R + 1).toFixed(1)}, length( o.xz - uFadeFocus.xz ) )
                 * ( 1.0 - smoothstep( -0.04, 0.04, tc - 1.0 + ${TREE_KEEP_R.toFixed(1)} / len ) );
-  float tree = max( instF, propTreeF( M, uFadeCam + dir * max( tEnd, 0.0 ), grow ) * uFadeCrown * between );
-  // the crown thins card by card over a wide band (≈2-3 m of zoom), at most
-  // by half while the bark stays whole, then the whole tree goes at once:
-  // further thinning would leave a bare trunk and main limbs
-  float fade = tree < ${TREE_GONE.toFixed(2)} ? 0.5 * smoothstep( 0.15, ${TREE_GONE.toFixed(2)}, tree ) : 1.0;
-#ifdef PROP_FADE_BARK
-  fade = step( ${TREE_GONE.toFixed(2)}, tree );
-#endif
+  // beyond the close views the follow cut grows crowns by a small radius only
+  float hit = propTreeF( M, uFadeCam + dir * max( tEnd, 0.0 ), mix( grow, ${FOLLOW_GROW.toFixed(2)}, uFadeFollow * ( 1.0 - uFadeCrown ) ) ) * between;
+  float fade = propTreeFade( max( instF, hit * uFadeCrown ) );
 #ifdef PROP_FADE_SHADOW
   // its shadow goes with it only near the camera (close views)
   fade *= 1.0 - smoothstep( ${TREE_SHADOW_R.toFixed(1)}, ${(TREE_SHADOW_R + 4).toFixed(1)}, length( uFadeCam.xz - o.xz ) );
 #endif
-  return fade;
+  // following: crowns the line crosses beyond its first stretch (nearer ones
+  // stand below the line), at any zoom up to FOLLOW_CUT_D, shadow included
+  return max( fade, propTreeFade( hit * uFadeFollow * smoothstep( ${(FOLLOW_SKIP - 0.05).toFixed(2)}, ${(FOLLOW_SKIP + 0.05).toFixed(2)}, tc ) ) );
 #else
   vec3 ap = p - uFadeCam;
   float t = dot( ap, dir );
@@ -181,6 +247,7 @@ float propFadeAt( vec3 p, mat4 M ) {
   return max( max( instF, lensF ), lineF );
 #endif
 #endif
+#endif
 }
 `;
 
@@ -191,7 +258,7 @@ vPropRank = ( aCrown.w + 0.5 ) / 256.0;
 #else
 vPropRank = 0.5;
 #endif
-if ( uFadeParams.w > 0.0 ) {
+if ( PROP_FADE_ON ) {
   #if defined( USE_BATCHING )
     mat4 fdM = modelMatrix * batchingMatrix;
   #elif defined( USE_INSTANCING )
@@ -212,6 +279,14 @@ varying float vPropRank;
 // the same on a whole card, so instance-wide terms drop whole cards
 const FADE_DISCARD = /* glsl */ `
 if ( vPropFade > vPropRank ) discard;
+`;
+
+// occluders: an instance-wide value against a screen-space threshold
+// (interleaved gradient noise), so a piece dissolves evenly as a whole; the
+// threshold spans only the middle of the range, so a piece that is nearly in
+// or out is whole or gone, never a sprinkle of specks
+const OCCLUDER_DISCARD = /* glsl */ `
+if ( vPropFade > 0.3 + 0.4 * fract( 52.9829189 * fract( dot( gl_FragCoord.xy, vec2( 0.06711056, 0.00583715 ) ) ) ) ) discard;
 `;
 
 interface FadeData {
@@ -248,7 +323,7 @@ export function applyFade(m: THREE.Material, mode: FadeMode): void {
   const solid = mode === 'solid';
   const define =
     (solid ? `#define PROP_FADE_SOLID\n#define PROP_TRUNK_R ${trunkR.toFixed(2)}\n` : '') +
-    (mode === 'crown' || mode === 'crownSolid' ? '#define PROP_FADE_CROWN\n' : '') +
+    (mode === 'crown' || mode === 'crownSolid' ? `#define PROP_FADE_CROWN\n${FOLLOW_ON}` : FREE_ON) +
     (mode === 'crownSolid' ? '#define PROP_FADE_BARK\n' : '');
   m.onBeforeCompile = function (shader, renderer) {
     prev.call(this, shader, renderer);
@@ -261,18 +336,45 @@ export function applyFade(m: THREE.Material, mode: FadeMode): void {
   m.needsUpdate = true;
 }
 
-function patchFadeShader(shader: THREE.WebGLProgramParametersWithUniforms, define: string): void {
+/** When a patched vertex runs the fade at all: trees also while the follow cut is on. */
+const FREE_ON = '#define PROP_FADE_ON uFadeParams.w > 0.0\n';
+const FOLLOW_ON = '#define PROP_FADE_ON ( uFadeParams.w > 0.0 || uFadeFollow > 0.0 )\n';
+
+function patchFadeShader(shader: THREE.WebGLProgramParametersWithUniforms, define: string, discard = FADE_DISCARD): void {
   shader.uniforms.uFadeCam = fadeUniforms.uFadeCam;
   shader.uniforms.uFadeFocus = fadeUniforms.uFadeFocus;
   shader.uniforms.uFadeParams = fadeUniforms.uFadeParams;
   shader.uniforms.uFadeMargin = fadeUniforms.uFadeMargin;
   shader.uniforms.uFadeCrown = fadeUniforms.uFadeCrown;
+  shader.uniforms.uFadeFollow = fadeUniforms.uFadeFollow;
+  shader.uniforms.uFadeOccl = fadeUniforms.uFadeOccl;
   shader.vertexShader = shader.vertexShader
     .replace('#include <common>', `#include <common>\n${define}${FADE_PARS_VERT}`)
     .replace('#include <project_vertex>', `#include <project_vertex>\n${FADE_VERT}`);
   shader.fragmentShader = shader.fragmentShader
     .replace('#include <common>', `#include <common>\n${FADE_PARS_FRAG}`)
-    .replace('#include <clipping_planes_fragment>', `${FADE_DISCARD}\n#include <clipping_planes_fragment>`);
+    .replace('#include <clipping_planes_fragment>', `${discard}\n#include <clipping_planes_fragment>`);
+}
+
+const occluderData = new WeakSet<THREE.Material>();
+
+/**
+ * Patch a fence or structure material with the near-camera occluder cut
+ * (idempotent; see the header): while following at the closest zooms, a piece
+ * near the camera on the camera → subject line dissolves as a whole. Apply
+ * last. Its shadow stays (the piece is still there, only not drawn).
+ */
+export function applyOccluderCut(m: THREE.Material): void {
+  if (occluderData.has(m) || fadeData.has(m)) return;
+  occluderData.add(m);
+  const prev = m.onBeforeCompile;
+  const prevKey = m.customProgramCacheKey.call(m);
+  m.onBeforeCompile = function (shader, renderer) {
+    prev.call(this, shader, renderer);
+    patchFadeShader(shader, '#define PROP_FADE_OCCLUDER\n#define PROP_FADE_ON uFadeOccl > 0.0\n', OCCLUDER_DISCARD);
+  };
+  m.customProgramCacheKey = () => `${prevKey}|propoccl`;
+  m.needsUpdate = true;
 }
 
 /**
@@ -285,8 +387,29 @@ function patchFadeShader(shader: THREE.WebGLProgramParametersWithUniforms, defin
 export function fadeDepthPatch(m: THREE.Material): ((shader: THREE.WebGLProgramParametersWithUniforms) => void) | null {
   const mode = fadeModeOf(m);
   if (mode !== 'crown' && mode !== 'crownSolid') return null;
-  const define = `#define PROP_FADE_CROWN\n#define PROP_FADE_SHADOW\n${mode === 'crownSolid' ? '#define PROP_FADE_BARK\n' : ''}`;
+  const define = `#define PROP_FADE_CROWN\n#define PROP_FADE_SHADOW\n${FOLLOW_ON}${mode === 'crownSolid' ? '#define PROP_FADE_BARK\n' : ''}`;
   return (shader) => patchFadeShader(shader, define);
+}
+
+let casterDepth: THREE.MeshDepthMaterial | null = null;
+
+/**
+ * Depth material of the shared shadow-only batches (props/layer.ts), where
+ * still bark casts with buildings, rocks and logs: pieces with crown data
+ * (a tree's trunk and limbs) take the visible bark's per-tree decision, so a
+ * tree removed near the camera leaves no trunk or limb shadow; pieces with
+ * zero crown data never fade. Every geometry drawn with it needs aCrown /
+ * aCrownR (zero-filled where there is no crown).
+ */
+export function casterDepthMaterial(): THREE.MeshDepthMaterial {
+  if (!casterDepth) {
+    const d = new THREE.MeshDepthMaterial();
+    const define = `#define PROP_FADE_CROWN\n#define PROP_FADE_SHADOW\n#define PROP_FADE_BARK\n#define PROP_FADE_TREES_ONLY\n${FOLLOW_ON}`;
+    d.onBeforeCompile = (shader) => patchFadeShader(shader, define);
+    d.customProgramCacheKey = () => 'props-caster-depth|treeshadow';
+    casterDepth = d;
+  }
+  return casterDepth;
 }
 
 /** Program cache key suffix matching `fadeDepthPatch` ('' when it does not apply). */
@@ -310,23 +433,48 @@ export interface FadeTuning {
   maxDist: number;
 }
 
+let following = false;
+const followSubject = new THREE.Vector3();
+/** Seconds over which the follow cuts hand crowns and occluders back after following ends (thinning, no pop). */
+const FOLLOW_RELEASE_S = 0.6;
+let followWeight = 0;
+
+/**
+ * Follow mode of the cuts (see the header): call every frame with the
+ * followed subject's position (its feet, world space) while the camera
+ * follows one, null otherwise (free-camera rules only). While following, the
+ * cuts aim at the subject, not at the ground point at the screen centre,
+ * which lies well beyond a subject framed below the centre. Pass the frame's
+ * `dt` so the cuts hand back over FOLLOW_RELEASE_S after following ends;
+ * without it null switches them off at once.
+ */
+export function setFollowCut(subject: { x: number; y: number; z: number } | null, dt = Infinity): void {
+  if (subject) followSubject.set(subject.x, subject.y, subject.z);
+  followWeight = subject ? 1 : Math.max(0, followWeight - dt / FOLLOW_RELEASE_S);
+  following = followWeight > 0;
+}
+
 /**
  * Update the shared fade uniforms from the camera and the point it looks at.
  * `focus` is the ground point at the screen centre.
  */
 export function updateFade(camPos: THREE.Vector3, focus: THREE.Vector3, enabled: boolean, tuning: FadeTuning = { maxDist: 42 }): void {
   const u = fadeUniforms;
-  const d = camPos.distanceTo(focus);
+  const follow = enabled && following;
+  const aim = follow ? followSubject : focus;
+  const d = camPos.distanceTo(aim);
   // hole size: full when close, shrinking to nothing by maxDist (smooth so nothing pops)
   const k = enabled ? 1 - THREE.MathUtils.smoothstep(d, tuning.maxDist * 0.7, tuning.maxDist) : 0;
   u.uFadeParams.value.w = k;
   // whole trees only in close views: from mid distance a tree on the view
   // line is part of the picture (and never half dissolved, see FADE_PARS_VERT)
   u.uFadeCrown.value = enabled ? 1 - THREE.MathUtils.smoothstep(d, tuning.maxDist * 0.55, tuning.maxDist * 0.75) : 0;
-  if (k <= 0) return;
+  u.uFadeFollow.value = follow ? followWeight * (1 - THREE.MathUtils.smoothstep(d, FOLLOW_CUT_D, FOLLOW_CUT_D + 3)) : 0;
+  u.uFadeOccl.value = follow ? followWeight * (1 - THREE.MathUtils.smoothstep(d, OCCLUDER_D, OCCLUDER_D + 3)) : 0;
+  if (k <= 0 && u.uFadeFollow.value <= 0) return;
   u.uFadeCam.value.copy(camPos);
   // aim at the subject's body, not its feet
-  _dir.copy(focus);
+  _dir.copy(aim);
   _dir.y += 1.1;
   u.uFadeFocus.value.copy(_dir);
   u.uFadeParams.value.x = THREE.MathUtils.clamp(d * 0.3, 2.2, 5.5);

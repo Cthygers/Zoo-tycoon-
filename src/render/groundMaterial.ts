@@ -385,12 +385,13 @@ GSample sampleTiles(vec3 wp, vec4 nzA, vec4 nzB, vec4 nzC, vec4 nzD) {
 
 GSample sampleGround(vec3 wp, vec4 nzA, vec4 nzB, vec4 nzC, vec4 nzD) {
   GSample r = sampleTiles(wp, nzA, nzB, nzC, nzD);
-  // a pond's mud ring in a lawn: the turf takes the bank back above a ragged
-  // line ~15–30 cm over the water, leaving a soil margin about a metre wide
+  // a pond's mud ring in a lawn: the turf takes the bank back down to the
+  // water, its lowest few cm wet and darker (the bank's wet band), with only
+  // ragged bits of mud at the waterline (a metre-wide soil ring read as a dark band)
   float back = gMud * gShoreMud;
   if (back < 0.01) return r;
-  float up = gWy + (nzC.b * 0.55 + nzD.g * 0.45 - 0.5) * 0.35 + (nzD.r - 0.5) * 0.1;
-  back *= smoothstep(0.15, 0.32, up);
+  float up = gWy + (nzC.b * 0.55 + nzD.g * 0.45 - 0.5) * 0.08 + (nzD.r - 0.5) * 0.04;
+  back *= smoothstep(-0.01, 0.04, up);
   if (back < 0.01) return r;
   gMud -= back;
   gGrassy = min(1.0, gGrassy + back);

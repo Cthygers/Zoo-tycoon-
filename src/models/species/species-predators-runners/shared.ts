@@ -189,10 +189,13 @@ export function lieSide(ctx: AnimCtx, st: QuadState, pose: Pose, side: number, k
     const reach = leg.reach * k.reach;
     const upper = leg.side === side; // the legs on the upper flank
     // stretch outward along the ground, upper legs a little forward / back of
-    // the lower ones; bent legs reach less far out and draw the paws forward
-    const out = reach * (1 - 0.4 * bend);
-    const fwd = (leg.front ? 0.18 + 0.2 * bend : -0.12 + 0.55 * bend) * reach;
-    _A.set(H.x + side * out, 0, H.z + fwd + (upper ? (leg.front ? 0.12 : -0.1) * reach : 0));
+    // the lower ones; bent legs reach less far out and draw the paws forward:
+    // the upper hind paw toward the belly, the lower forepaw in under the chin
+    const tuck = leg.front && !upper ? bend : 0;
+    const out = reach * (1 - 0.5 * bend) * (1 - 0.35 * tuck) * (upper ? 1 - 0.2 * bend : 1);
+    const fwd = (leg.front ? 0.18 + 0.2 * bend + 0.12 * tuck : -0.12 + 0.55 * bend) * reach;
+    const stagger = upper ? (leg.front ? 0.12 : -0.1 + 0.2 * bend) * reach : 0;
+    _A.set(H.x + side * out, 0, H.z + fwd + stagger);
     _A.y = upper ? Math.max(0.1, k.hipsY * 0.75) : 0.07;
     _q.setFromAxisAngle(_X, leg.front ? 0.5 + 0.7 * bend : -0.35 - 0.3 * bend).premultiply(_q2);
     const qt = _q;

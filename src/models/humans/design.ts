@@ -122,8 +122,11 @@ export function humanDesign(key: HumanBodyKey): HumanDesign {
     // pelvis / seat
     ellipsoid('hips', [0, 0.95, -0.01], [0.155 * hipW, 0.1, 0.105], { blend: 0.06, part: 'pelvis' }),
     ellipsoid('hips', [0, 0.92, -0.05], [0.13 * hipW, 0.09, 0.08], { blend: 0.05, part: 'pelvis' }),
-    // shoulders (deltoids)
-    ...symmetric([ellipsoid('upperArm.L', [0.168 * shW, 1.405, -0.015], [0.05, 0.05, 0.052], { blend: 0.05, part: 'arm', region: 'armL' })], (n) => n.replace('.L', '.R').replace('armL', 'armR')),
+    // shoulders: deltoids drawn down into the arm (not round caps that read
+    // as puffed sleeves) under a trapezius sloping from the neck, so the
+    // shoulder line falls from the collar instead of a square shelf
+    ...symmetric([ellipsoid('upperArm.L', [0.17 * shW, 1.395, -0.015], [0.046, 0.058, 0.05], { blend: 0.06, part: 'arm', region: 'armL' })], (n) => n.replace('.L', '.R').replace('armL', 'armR')),
+    ...symmetric([ellipsoid('chest', [0.075 * shW, 1.442, -0.03], [0.085 * shW, 0.03, 0.05], { rot: [0, 0, -0.32], blend: 0.05, part: 'torso' })]),
     // neck
     cone('neck', [0, 1.44, -0.02], [0, 1.56, -0.005], 0.055, 0.047, { blend: 0.04, part: 'neck' }),
   ];
@@ -155,7 +158,8 @@ export function humanDesign(key: HumanBodyKey): HumanDesign {
         ellipsoid('hips', [0, 0.8, -0.012], [0.158 * hipW, 0.13, 0.125], { blend: 0.05, part: 'skirt', skin: 1.3 }),
         // the hem rides on the thighs (left / right halves) so it follows the
         // legs when walking and lies over the lap when sitting
-        ...symmetric([ellipsoid('thigh.L', [0.07 * hipW, 0.62, -0.012], [0.11 * hipW, 0.075, 0.155], { blend: 0.12, part: 'skirt', skin: 1.6 })]),
+        // (shallow front to back: a deep hem reads as a bell)
+        ...symmetric([ellipsoid('thigh.L', [0.07 * hipW, 0.62, -0.012], [0.11 * hipW, 0.075, 0.14], { blend: 0.12, part: 'skirt', skin: 1.6 })]),
       ]
     : [];
   const body: Prim[] = [...torso, ...skirt, ...symmetric(armL, mirrorSide), ...symmetric(legL, mirrorSide)];

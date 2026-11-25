@@ -84,6 +84,7 @@ describe('crowd texture uploads', () => {
     // a new texture's first upload is whole (no update ranges)
     b.flush();
     expect(tex.updateRanges.length).toBe(0);
+    tex.onUpdate?.(tex); // (the renderer calls this after each upload)
     const v0 = tex.version;
     // nothing written (creature not re-posed this frame): no upload
     b.flush();

@@ -10,7 +10,7 @@ import type { IGameUI, QualityLevel, SimSpeed, UIDeps } from '../core/contracts'
 import type { Habitat, SelectionRef, Tool } from '../core/types';
 import { OBJECTS_BY_ID } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
-import { CameraController } from './camera';
+import { CameraController, followFraming } from './camera';
 import { buildCatalog, type CatalogItem, type Category, type CategoryId } from './catalog';
 import { Coach } from './coach';
 import { Dock } from './dock';
@@ -32,6 +32,8 @@ export { CameraController } from './camera';
 export interface GameUIHandle extends IGameUI {
   readonly camera: CameraController;
   readonly tools: ToolManager;
+  /** The animal or person the camera follows (null for the free camera). */
+  readonly followed: SelectionRef | null;
   select(sel: SelectionRef | null): void;
   setTool(tool: Tool): void;
   startMove(sel: SelectionRef): void;
@@ -78,7 +80,7 @@ class GameUI implements GameUIHandle {
   private offs: (() => void)[] = [];
   private selection: SelectionRef | null = null;
   private followSel: SelectionRef | null = null;
-  private followPos = { x: 0, z: 0, lookHeight: 0 };
+  private followPos = { x: 0, z: 0, lookHeight: 0, minDistance: 0 };
   private vw = window.innerWidth;
   private vh = window.innerHeight;
   private affordAcc = 0;
@@ -506,17 +508,26 @@ class GameUI implements GameUIHandle {
     }
     const sim = this.deps.sim;
     const pos = this.followPos;
-    const get = (): { x: number; z: number; lookHeight: number } | null => {
+    const get = (): typeof pos | null => {
       const a = sel.kind === 'animal' ? sim.animals.get(sel.id) : undefined;
       const p = sel.kind === 'guest' ? sim.guests.get(sel.id) : sel.kind === 'staff' ? sim.staff.get(sel.id) : undefined;
       const e = a ?? p;
       if (!e) return null;
       pos.x = e.x;
       pos.z = e.z;
-      // close up the camera looks at a person's chest or an animal's middle, not its feet
-      // (juveniles are drawn at 0.4 → 1 of the adult size as they grow)
-      if (a) pos.lookHeight = 0.55 * (SPECIES_BY_ID[a.speciesId]?.height ?? 1) * (0.4 + 0.6 * a.growth);
-      else if (p) pos.lookHeight = 0.6 * p.appearance.height;
+      if (a) {
+        // close up the camera looks at an animal's middle (a tall one's upper body), not its feet,
+        // from far enough to frame it (juveniles are drawn at 0.4 → 1 of the adult size as they grow)
+        const sp = SPECIES_BY_ID[a.speciesId];
+        const size = 0.4 + 0.6 * a.growth;
+        const f = followFraming((sp?.height ?? 1) * size, (sp?.length ?? 1) * size);
+        pos.lookHeight = f.lookHeight;
+        pos.minDistance = f.minDistance;
+      } else if (p) {
+        // a person's chest, at the camera's closest follow zoom
+        pos.lookHeight = 0.6 * p.appearance.height;
+        pos.minDistance = 0;
+      }
       return pos;
     };
     if (!get()) return;
@@ -799,6 +810,10 @@ class GameUI implements GameUIHandle {
       this.layoutToasts();
       if (this.followSel) this.keepFollowClear();
     }
+  }
+
+  get followed(): SelectionRef | null {
+    return this.camera.following ? this.followSel : null;
   }
 
   get focus(): THREE.Vector3 {

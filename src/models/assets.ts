@@ -2,6 +2,7 @@
 
 import * as THREE from 'three';
 import { buildGeometry, coatBaker } from './build/geometry';
+import { addFurShell } from './build/furShell';
 import { createAnimalMaterial } from './material/animalMaterial';
 import { resolveRoles } from './rig/roles';
 import { unwrapDriver } from './anim/util';
@@ -15,6 +16,8 @@ export function assetFromDesign(key: string, design: CreatureDesign, detail: 0 |
     coatBaker(design.coat),
     design.eyes ?? [],
   );
+  // long hair on fur coats gets a raised shell of lock tips (LOD 0 only, see furShell.ts)
+  const geometry = design.look.skin === 'fur' ? addFurShell(built.geometry) : built.geometry;
   const roles = resolveRoles(built.rig, design.roles);
   const size = built.bounds.getSize(new THREE.Vector3());
   const center = built.bounds.getCenter(new THREE.Vector3());
@@ -23,7 +26,7 @@ export function assetFromDesign(key: string, design: CreatureDesign, detail: 0 |
   const sphere = new THREE.Sphere(new THREE.Vector3(center.x, center.y * 0.6, center.z), r + center.y * 0.4);
   return {
     key,
-    geometry: built.geometry,
+    geometry,
     rig: built.rig,
     roles,
     design,
@@ -33,7 +36,7 @@ export function assetFromDesign(key: string, design: CreatureDesign, detail: 0 |
     sphere,
     height: design.height ?? built.bounds.max.y,
     radius: design.radius ?? 0.5 * Math.max(size.x, size.z),
-    triangles: built.triangles,
+    triangles: geometry.getIndex()!.count / 3,
     buildMs: built.ms,
     detail,
   };

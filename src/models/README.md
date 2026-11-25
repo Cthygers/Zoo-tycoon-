@@ -17,6 +17,7 @@ sdf/prims.ts        primitives + helpers (ellipsoid, cone, capsule, roundBox, sp
                     symmetric, mirrorX, transformPrims, transformPoint, scalePrims)
 sdf/mesher.ts       surface nets (block culling, Newton projection, SDF normals)
 build/geometry.ts   regions/ownership, skin weights, vertex baking, eyes
+build/furShell.ts   raised shell of lock tips over long hair (fur ≥ 2.6) on the full mesh only
 rig/rig.ts          RigDef, Pose, RigRuntime (FK), TwoBoneChain (IK), rotLocal/rotParent
 anim/quadruped.ts   quadruped driver + building blocks (gait IK, lie, sit, swim, call …)
 anim/biped.ts       two-legged animal driver (birds, penguins; primate starting point)
@@ -26,7 +27,8 @@ coat/coat.ts        coat helpers (fbm, voronoi, mixHex, blendHex, belly …)
 kit/quadruped.ts    quadSkeleton(), legPrims(), hoof(), surfacePoint(), seat(), withRegion()
 kit/generic.ts      genericQuadruped(), genericUpright(), paletteCoat() (placeholders)
 material/*.ts       animal material (vertex colours + per-pixel pattern, fur strands / clumps and hide
-                    micro-normals faded by pixel footprint, matte grazing reflection, coat-tinted sheen)
+                    micro-normals faded by pixel footprint, long hair with darker partings and a fur shell of lock
+                    tips up close, matte grazing reflection, coat-tinted sheen)
 humans/*.ts         human body design (bald fringe baked in the zone attribute), skin / fabric / hair / face material, held items, HumanFactory
 species/*.ts        ONE FILE PER SPECIES (default export SpeciesModel); index.ts = registry
 ```
@@ -174,7 +176,9 @@ swing, lie & sit style, graze reach, call head/jaw, swim sink). Lying
 `carpusZ` ≈ 0 puts the folded carpus under the chest with the cannon lying
 back beneath it, `hockZ` ≈ 0 rests the hock beside the belly instead of
 behind the rump (giraffe, camel); side-lying predators (`SideLie.bend`, bears)
-draw their paws in with bent knees and elbows. Override or add actions by
+draw their paws in with bent knees and elbows, and bears lying on the belly
+fold their hind legs beside it (knee forward, hock on the ground, sole flat)
+instead of stretching them out behind. Override or add actions by
 spreading:
 
 ```ts

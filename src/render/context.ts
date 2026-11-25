@@ -21,7 +21,7 @@ import { qualitySettings } from './quality';
 import { SkyDome } from './sky';
 import { TerrainMesh, TileIndexTexture } from './terrain';
 import { GroundTextures } from './textures';
-import { WaterSurface } from './water';
+import { WaterSurface, type Swimmer } from './water';
 
 /** Top-of-atmosphere sun irradiance in renderer light units. */
 const SUN_E = 3.4;
@@ -878,6 +878,11 @@ export class RenderContext implements IRenderContext {
   }
 
   // ------------------------------------------------------------ focus / shadows
+  /** Ripples around this frame's swimming animals (water.ts WAKES), the nearest to the focus first. */
+  setWakes(swimmers: readonly Swimmer[]): void {
+    this.water.setWakes(swimmers, this.focus.x, this.focus.z);
+  }
+
   setFocus(x: number, z: number, viewRadius: number): void {
     this.focus.set(x, this.world.heightAt(x, z), z);
     this.viewRadius = Math.max(5, viewRadius);

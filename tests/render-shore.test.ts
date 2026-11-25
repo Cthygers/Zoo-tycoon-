@@ -94,7 +94,7 @@ describe('a pond\'s mud ring in a lawn', () => {
     expect(shore[5 * MAP_W + 5]).toBe(0);
   });
 
-  it('gives the shore soil back to the turf up the bank in the ground shader, and pales what is left', () => {
+  it('gives the shore soil back to the turf down to a thin edge at the water, and pales what is left', () => {
     const t = new THREE.DataArrayTexture();
     const set: GroundTextureSet = { albedo: t, detail: t, noise: t, waves: t, foliage: t };
     const ground = createGroundMaterial(set, new THREE.Texture(), { antiTile: false, cloudShadows: false, caustics: false });
@@ -104,7 +104,11 @@ describe('a pond\'s mud ring in a lawn', () => {
     // the height above the waterline is known before the layers are blended
     expect(fs.indexOf('gWy = wy;')).toBeGreaterThan(0);
     expect(fs.indexOf('gWy = wy;')).toBeLessThan(fs.indexOf('GSample gs = sampleGround('));
-    expect(fs).toContain('back *= smoothstep(0.15, 0.32, up);');
+    // the turf reaches to within ~10 cm of the waterline: a thin muddy edge, not a metre-wide soil band
+    const back = fs.match(/back \*= smoothstep\((-?[\d.]+), ([\d.]+), up\);/);
+    expect(back).not.toBeNull();
+    expect(Number(back![1])).toBeLessThan(Number(back![2]));
+    expect(Number(back![2])).toBeLessThanOrEqual(0.1);
     expect(fs).toContain('return mixSample(r, sampleLayer(0, wp.xz), back);');
     expect(fs).toContain('float shoreSoil = gMud * gShoreMud;');
     // the dirt crust blurs sooner with distance (no 1-px crack net)

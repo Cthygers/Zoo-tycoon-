@@ -7,10 +7,11 @@ import { Capacitor } from '@capacitor/core';
 import { createAudio } from './audio';
 import { CLOSE_HOUR, OPEN_HOUR, QUALITY_KEY, SAVE_KEY, SOUND_KEY } from './core/constants';
 import type { QualityLevel } from './core/contracts';
+import type { AnimalState } from './core/types';
 import { EventBus } from './core/events';
 import { createCreatureFactory } from './models';
-import { createPropsLayer, paintAtlasesOffThread } from './props';
-import { createRenderContext, detectQuality } from './render';
+import { createPropsLayer, paintAtlasesOffThread, setFollowCut, setNatureNightGround } from './props';
+import { createRenderContext, detectQuality, nightGroundLevel } from './render';
 import { NEW_ZOO_START_MINUTE, createSimulation } from './sim';
 import { createGameUI, showLoadingScreen, showMainMenu } from './ui';
 import { createEntityViews } from './views';
@@ -200,6 +201,9 @@ async function boot() {
   events.on('litterRemoved', () => (litterDirty = true));
   events.on('worldReset', () => (litterDirty = true));
 
+  // moonlit ground plants (grass clumps, ferns, reeds, bushes) take the moonlit ground's look
+  const natureNightGround = () => nightGroundLevel(Math.asin(ctx.sunDirection.y) * (180 / Math.PI));
+
   // Compile and first-draw every shader program behind the loading screen, a
   // few materials per frame (see loader.ts): props, creatures, night lights and
   // the selection ring all exist now. Warming up at night also draws the
@@ -208,6 +212,7 @@ async function boot() {
     ctx.setTimeOfDay(minute, sim.day);
     ctx.settle();
     creatures.update(ctx.camera);
+    setNatureNightGround(natureNightGround());
     props.update(0, ctx.nightFactor, ctx.camera);
     ctx.update(0);
   };
@@ -258,6 +263,8 @@ async function boot() {
     return 1000 / (ctx.quality.level === 'low' ? 30 : 60);
   };
   let nextRender = 0;
+  // this frame's swimming animals, for their ripples on the water (one list, refilled per frame)
+  const swimmers: AnimalState[] = [];
 
   const frame = (now: number) => {
     rafId = 0;
@@ -276,13 +283,20 @@ async function boot() {
       ctx.setTimeOfDay(sim.minuteOfDay, sim.day);
       ui.update(dt);
       views.update(dt);
+      // the follow cuts of crowns and near occluders (props/lod/fade.ts) aim at the followed subject as drawn
+      const followed = ui.followed;
+      setFollowCut(followed ? views.positionOf(followed) : null, dt);
       creatures.update(ctx.camera);
       syncQuality();
       if (litterDirty) {
         litterDirty = false;
         props.setLitter(sim.litter.values());
       }
+      setNatureNightGround(natureNightGround());
       props.update(dt, ctx.nightFactor, ctx.camera);
+      swimmers.length = 0;
+      for (const a of sim.animals.values()) if (a.action === 'swim') swimmers.push(a);
+      ctx.setWakes(swimmers);
       audio.update(dt, ctx.camera, ui.focus);
       ctx.update(dt);
       ctx.render();

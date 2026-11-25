@@ -4,7 +4,7 @@ import { PathType, Terrain } from '../src/core/types';
 import { World } from '../src/core/world';
 import * as THREE from 'three';
 import { buildPoolGrid, poolLight, surfaceBrightness, type WorldEmitter } from '../src/props/lights/nightlights';
-import { applyLampField, figureColourShare, lampFieldAt, lampFieldUniforms, moonShoulder, moonToe, resetLampField, writeLampField } from '../src/props/lights/lampField';
+import { applyLampField, figureColourShare, lampFieldAt, lampFieldUniforms, lampReach, moonShoulder, moonToe, resetLampField, skinMoonToe, writeLampField } from '../src/props/lights/lampField';
 import { viewExposure } from '../src/render/grade';
 
 function lamp(x: number, z: number, y = 3.2): WorldEmitter {
@@ -197,5 +197,64 @@ describe('lamp light on creatures', () => {
     // the whole moonlit curve stays monotonic
     const tone = (d: number) => d * moonShoulder(d) * moonToe(d);
     for (let d = 0.001; d < 2; d *= 1.1) expect(tone(d * 1.1)).toBeGreaterThan(tone(d));
+  });
+
+  it('reads the field out along the normal, further up the figure: a warm side facing the pool, not a whole-figure flip', () => {
+    const shader = {
+      uniforms: {},
+      vertexShader: THREE.ShaderLib.physical.vertexShader,
+      fragmentShader: THREE.ShaderLib.physical.fragmentShader,
+    } as unknown as THREE.WebGLProgramParametersWithUniforms;
+    applyLampField(shader);
+    const vs = shader.vertexShader;
+    expect(vs).toContain('vec3 lfN = normalize((vec4(transformedNormal, 0.0) * viewMatrix).xyz);');
+    expect(vs).toContain('vec2 lfAt = lfPos.xz + lfN.xz * (0.20 + 0.50 * max(transformed.y, 0.0));');
+    // the normal exists before the field fetch
+    expect(vs.indexOf('#include <defaultnormal_vertex>')).toBeLessThan(vs.indexOf('vec3 lfN'));
+    expect(lampReach(0)).toBeCloseTo(0.2, 5);
+    expect(lampReach(1.7)).toBeGreaterThan(0.9);
+    expect(lampReach(1.7)).toBeLessThan(1.2);
+    // a guest a metre outside a lamp-lit neighbour: the side facing the pool
+    // reads the neighbour's light at chest height, the far side less than its own
+    const field = (x: number) => Math.max(0, Math.min(1, 0.9 - 0.3 * x)); // pool light falling off to x = 3 m
+    const at = 2.6;
+    const toward = field(at - lampReach(1.3));
+    expect(figureColourShare(field(at), 1)).toBeLessThan(0.15);
+    expect(figureColourShare(toward, 1)).toBeGreaterThan(0.3);
+    expect(field(at + lampReach(1.3))).toBeLessThanOrEqual(field(at));
+  });
+
+  it('keeps a dark face under the moon about a sixth of a white shirt, with pale skin untouched and every curve monotonic', () => {
+    // displayed (× exposure) moonlit luminance: white shirt ≈ 0.072, a face of
+    // albedo 0.054 (skin 5c3a25) beside it ≈ 0.005
+    const aces = (d: number) => {
+      const v = d / 0.6;
+      return (v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.432951) + 0.238081);
+    };
+    const shirt = 0.072, face = 0.005;
+    expect(aces(face * moonToe(face)) / aces(shirt)).toBeLessThan(0.05); // the old void
+    expect(aces(face * skinMoonToe(face, 1)) / aces(shirt)).toBeGreaterThan(1 / 7);
+    // not past the albedo ratio of a mid-brown skin (0.19 / 0.79)
+    expect(aces(face * skinMoonToe(face, 1)) / aces(shirt)).toBeLessThan(0.25);
+    // outside the dark-skin mask it is the ordinary toe
+    for (const d of [0.002, 0.01, 0.05]) expect(skinMoonToe(d, 0)).toBe(moonToe(d));
+    // monotonic for every mask value: a face keeps its lit and shaded side
+    for (const dark of [0.3, 0.7, 1]) {
+      const tone = (d: number) => d * moonShoulder(d) * skinMoonToe(d, dark);
+      for (let d = 0.0005; d < 1; d *= 1.08) expect(tone(d * 1.08)).toBeGreaterThan(tone(d));
+    }
+  });
+
+  it('gives materials that define LF_SKIN the skin toe, and leaves the rest alone', () => {
+    const shader = {
+      uniforms: {},
+      vertexShader: THREE.ShaderLib.physical.vertexShader,
+      fragmentShader: THREE.ShaderLib.physical.fragmentShader,
+    } as unknown as THREE.WebGLProgramParametersWithUniforms;
+    applyLampField(shader);
+    const fs = shader.fragmentShader;
+    expect(fs).toContain('#ifdef LF_SKIN');
+    expect(fs).toContain('lfToe = max(lfToe, 1.0 + 6.50 * (LF_SKIN) * exp(-lfD / 0.018));');
+    expect(fs).toContain('float lfTone = pow(1.0 + lfX2 * lfX2, -0.125) * lfToe;');
   });
 });

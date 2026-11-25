@@ -12,6 +12,8 @@ import { SPECIES_MODELS } from '../src/models/species';
 import { SPECIES_BY_ID } from '../src/data/species';
 import type { LookSpec } from '../src/models/types';
 import { DRY_SECONDS, nextWetness } from '../src/models/model';
+import { withoutFurShell } from '../src/models/build/furShell';
+import { LodChain } from '../src/models/lod/lod';
 
 function fragment(material: THREE.Material): string {
   const src = THREE.ShaderLib.standard;
@@ -82,6 +84,41 @@ describe('animal surface shading', () => {
     expect(low).toContain('#define CR_MICRO 0');
     expect(low).toContain('if (crWC > 0.001) diffuseColor.rgb *=');
   });
+
+  it('halves the clump relief of pale coats and wanders their locks across the hair flow', () => {
+    const fs = fragment(createAnimalMaterial({ look: { skin: 'fur' }, detail: 1 }));
+    expect(fs).toContain('float wC = crWC * (1.0 - 0.5 * pale);');
+    expect(fs).toContain('vec4 jit = vec4(normalize(cross(crN0, crFlow)), pale * 0.06 / (crGrain * CR_CLUMP));');
+    expect(fs).toContain('qc += jit.xyz * ((cr_vnoise(qc * 0.5 + 3.7) - 0.5) * jit.w);');
+  });
+
+  it('raises a fur shell of lock tips on long hair, faded by the lock footprint, on every tier', () => {
+    const vertex = (look: LookSpec, detail: 0 | 1) => {
+      const src = THREE.ShaderLib.standard;
+      const shader = { vertexShader: src.vertexShader, fragmentShader: src.fragmentShader, uniforms: THREE.UniformsUtils.clone(src.uniforms), defines: {} };
+      createAnimalMaterial({ look, detail }).onBeforeCompile(shader as unknown as THREE.WebGLProgramParametersWithUniforms, {} as THREE.WebGLRenderer);
+      return shader.vertexShader;
+    };
+    for (const detail of [0, 1] as const) {
+      const fs = fragment(batchedAnimalMaterials({ skin: 'fur' }, detail).material);
+      const cut = fs.indexOf('if (crShell && lock < 1.02 - 0.55 * crNear * smoothstep(1.6, 2.1, vPattern.w)) discard;');
+      expect(cut).toBeGreaterThan(fs.indexOf('vec3 crFlow ='));
+      expect(fs).toContain('float crNear = 1.0 - smoothstep(0.22, 0.4, crPix / lockW);');
+      // the shell flag is not a gloss
+      expect(fs).toContain('float crGloss = max(vPattern.z, 0.0);');
+      // shell vertices stand out along the normal before skinning
+      const vs = vertex({ skin: 'fur' }, detail);
+      const lift = vs.indexOf('if (pattern.z < -0.5) transformed += normal * (0.02 * (pattern.w - 1.5));');
+      expect(lift).toBeGreaterThan(vs.indexOf('#include <begin_vertex>'));
+      expect(lift).toBeLessThan(vs.indexOf('#include <skinning_vertex>'));
+    }
+    // fur only: skins compile the shell out
+    const fs = fragment(createAnimalMaterial({ look: { skin: 'wrinkled' }, detail: 1 }));
+    const cut = fs.indexOf('if (crShell && lock');
+    const block = fs.lastIndexOf('#if ', cut);
+    expect(fs.slice(block, block + 16)).toBe('#if CR_SKIN == 0');
+    expect(fs.indexOf('#endif', block)).toBeGreaterThan(cut);
+  });
 });
 
 /** Mean baked gloss (pattern.z) of a species' adult mesh, split by a vertex predicate. */
@@ -130,6 +167,17 @@ describe('hippo skin', () => {
     expect(lum(flank)).toBeGreaterThan(0.09);
     expect(flank.r / flank.b).toBeGreaterThan(1.2);
     expect(belly.r / belly.b).toBeGreaterThan(flank.r / flank.b);
+  });
+
+  it('has grey-brown flanks (green above blue, not mauve) and creases on the barrel', () => {
+    const flank = meanColor('hippo', (y, ny, z) => y > 0.8 && y < 1.2 && Math.abs(ny) < 0.3 && Math.abs(z) < 0.9);
+    expect(flank.g).toBeGreaterThan(flank.b * 1.05);
+    const design = SPECIES_MODELS.hippo.design({ def: SPECIES_BY_ID.hippo, sex: 'F', detail: 0 });
+    const pat = assetFromDesign('hippo-fold', design, 0).geometry.getAttribute('pattern');
+    // fold weight is baked as −pattern.w: at least 0.35 everywhere on the skin (a faint broken network on the barrel)
+    let minFold = 1;
+    for (let i = 0; i < pat.count; i++) if (pat.getZ(i) < 0.4) minFold = Math.min(minFold, -pat.getW(i));
+    expect(minFold).toBeGreaterThan(0.349);
   });
 });
 
@@ -192,5 +240,32 @@ describe('lion legs', () => {
       // no cream stockings: the medial lower leg stays about as tawny as the flank
       expect(r.innerLower).toBeLessThan(r.flank * 1.1);
     }
+  });
+});
+
+describe('fur shell', () => {
+  const asset = (species: string, sex: 'M' | 'F') =>
+    assetFromDesign(`${species}-shell`, SPECIES_MODELS[species].design({ def: SPECIES_BY_ID[species], sex, detail: 0 }), 0);
+
+  it('covers long hair only (a lion mane, not a lioness), appended after the base mesh', () => {
+    expect(asset('lion', 'F').geometry.userData.furShell).toBeUndefined();
+    const geo = asset('lion', 'M').geometry;
+    const range = geo.userData.furShell as { vertices: number; indices: number };
+    const pat = geo.getAttribute('pattern');
+    const idx = geo.getIndex()!;
+    expect(idx.count).toBeGreaterThan(range.indices);
+    for (let i = 0; i < pat.count; i++) expect(pat.getZ(i) < -0.5).toBe(i >= range.vertices);
+    for (let i = range.indices; i < idx.count; i++) expect(pat.getW(idx.getX(i))).toBeGreaterThan(1.5);
+    // a close-up detail: well under a quarter of the full mesh
+    expect((idx.count - range.indices) / idx.count).toBeLessThan(0.25);
+  });
+
+  it('never reaches the simplified LODs', () => {
+    const a = asset('lion', 'M');
+    const base = withoutFurShell(a.geometry);
+    expect(base.getAttribute('position').count).toBe(a.geometry.userData.furShell.vertices);
+    const lod = new LodChain(a.geometry, a.sphere, a.triangles).build(1);
+    const pat = lod.getAttribute('pattern');
+    for (let i = 0; i < pat.count; i++) expect(pat.getZ(i)).toBeGreaterThanOrEqual(0);
   });
 });

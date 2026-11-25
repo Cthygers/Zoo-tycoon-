@@ -4,6 +4,7 @@
 //   detectQuality()                                      → QualityLevel
 //   qualitySettings(level)                               → QualitySettings
 //   useEnvMapIntensity(material)  (envIntensity.ts)      → honour envMapIntensity
+//   nightGroundLevel(sunElevDeg)                         → moonlit-ground level (for ground plants)
 //
 // The context owns the WebGL2 renderer, camera, sky / time of day, sun & moon
 // lighting with shadows, PMREM environment, terrain (+ decorative outer
@@ -15,7 +16,7 @@ import type { World } from '../core/world';
 import { RenderContext } from './context';
 
 export { detectQuality, qualitySettings } from './quality';
-export { RenderContext } from './context';
+export { RenderContext, nightGroundLevel } from './context';
 export { useEnvMapIntensity } from './envIntensity';
 /** Re-exported for compatibility; the source of truth is core/constants. */
 export { DECK_Y } from '../core/constants';

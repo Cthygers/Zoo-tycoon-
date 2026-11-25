@@ -6,6 +6,7 @@ import { EventBus } from '../src/core/events';
 import { World } from '../src/core/world';
 import type { QualitySettings } from '../src/core/contracts';
 import { PropsLayer } from '../src/props';
+import { casterDepthMaterial } from '../src/props/lod/fade';
 
 const QUALITY: QualitySettings = { level: 'low', pixelRatio: 1, antialias: false, shadows: true, shadowMapSize: 1024, grassDensity: 0.25, postFX: false, detailDistance: 26, creatureDetail: 0 };
 
@@ -70,6 +71,34 @@ describe('shadow-only caster batch (batched back-end)', () => {
     expect(casters[0].castShadow).toBe(false);
     layer.dispose();
   });
+
+  it('carries still tree bark with its crown data, so a tree removed near the camera takes its trunk shadow (others carry zeros)', () => {
+    /** Shadow-only caster vertices with crown data, with these objects placed. */
+    const crownVerts = (defs: string[]): number => {
+      const events = new EventBus();
+      const world = new World(events, 3);
+      for (const o of [...world.objects.values()]) world.removeObject(o.id);
+      defs.forEach((d, i) => world.addObject(d, 40 + i * 4, 40, 0, 1));
+      const scene = new THREE.Scene();
+      const layer = new PropsLayer(world, events, scene, QUALITY, { backend: 'batched' });
+      const camera = new THREE.PerspectiveCamera();
+      camera.position.set(84, 25, 100);
+      camera.lookAt(84, 0, 80);
+      layer.update(0, 0, camera);
+      let n = 0;
+      scene.getObjectByName('objects')!.traverse((o) => {
+        if (o.name !== 'prop-shadow-casters') return;
+        const m = o as THREE.Mesh;
+        expect(m.customDepthMaterial).toBe(casterDepthMaterial());
+        const r = m.geometry.getAttribute('aCrownR');
+        for (let i = 0; i < r.count; i++) if (r.getY(i) > 0) n++;
+      });
+      layer.dispose();
+      return n;
+    };
+    expect(crownVerts(['shelter_wood'])).toBe(0);
+    expect(crownVerts(['shelter_wood', 'tree_pine'])).toBeGreaterThan(0); // the pine's trunk
+  }, 20000);
 });
 
 describe('fence shadow-only caster batch (batched back-end)', () => {

@@ -153,19 +153,75 @@ function arm(ctx: AnimCtx, pose: Pose, side: Side, forward: number, out: number,
   rotLocal(pose, a.lower, 'x', -elbow);
 }
 
-/** Arms for walking / standing, respecting held items. */
-function arms(ctx: AnimCtx, st: HumanState, pose: Pose, swingScale = 1): void {
+/** Arm pose parameters of `arm`: forward, out, elbow, twist (rad). */
+type ArmPose = readonly [number, number, number, number];
+
+/**
+ * How people hold their free arms while standing (per side; null = hanging):
+ * arms folded across the belly, hands clasped behind the back, a hand on the
+ * hip. A third of them just let their arms hang. Fitted to elbow / wrist
+ * targets on the adult body (folded: wrists crossing ≈ 18 cm in front of the
+ * lower chest; clasped: wrists together ≈ 15 cm behind the waist; akimbo:
+ * wrist at the side of the waist, elbow out 36 cm).
+ */
+const REST_ARMS: readonly (readonly [ArmPose | null, ArmPose | null])[] = [
+  [null, null],
+  [
+    [-0.05, 0.21, 1.29, -1.61],
+    [0.0, 0.26, 1.53, -1.6],
+  ],
+  [
+    [-0.72, 0.5, 0.82, -1.76],
+    [-0.75, 0.45, 0.8, -1.68],
+  ],
+  [null, [-0.55, 0.9, 1.37, -1.53]],
+];
+
+/** This person's standing arm pose (REST_ARMS row; 0 = hanging). */
+function restArms(ctx: AnimCtx): number {
+  const h = hash1(ctx.seed, 41);
+  return h < 0.34 ? 0 : h < 0.6 ? 1 : h < 0.8 ? 2 : 3;
+}
+
+/** `arm` with its (untwisted) walking pose eased toward the resting pose `rest` by k. */
+function armToward(ctx: AnimCtx, pose: Pose, side: Side, forward: number, out: number, elbow: number, rest: ArmPose | null, k: number): void {
+  if (!rest) return arm(ctx, pose, side, forward, out, elbow);
+  arm(ctx, pose, side, forward + (rest[0] - forward) * k, out + (rest[1] - out) * k, elbow + (rest[2] - elbow) * k, rest[3] * k);
+}
+
+/**
+ * Arms for walking / standing, respecting held items. People swing their arms
+ * differently (0.75–1.25 × the mean swing, a straighter or more bent elbow),
+ * the shoulder blades follow each arm forward and back, and standing still
+ * their free arms settle into their own resting pose (REST_ARMS), so a crowd
+ * is not one marching clockwork.
+ */
+function arms(ctx: AnimCtx, st: HumanState, pose: Pose): void {
   const ph = st.phase * TAU;
-  const swing = 0.38 * st.amp * swingScale;
+  const swing = 0.38 * st.amp * (0.75 + 0.5 * hash1(ctx.seed, 31));
+  const bend = 0.14 + 0.16 * hash1(ctx.seed, 32);
   const sway = 0.03 * Math.sin(ctx.time * 0.9 + ctx.seed);
   const hold = ctx.holding;
   const carry = hold === 'food' || hold === 'drink' || hold === 'icecream';
+  const [restL, restR] = REST_ARMS[hold === 'none' ? restArms(ctx) : 0];
+  const still = smooth(0.15, 0, st.amp);
   // each arm is furthest forward as the opposite heel strikes
   const fwd = Math.cos(ph);
-  arm(ctx, pose, 'L', -swing * fwd + sway, -0.07, 0.22 + 0.25 * st.amp * Math.max(0, -fwd));
+  armToward(ctx, pose, 'L', -swing * fwd + sway, -0.07, bend + 0.25 * st.amp * Math.max(0, -fwd), restL, still);
+  shoulder(ctx, pose, 'L', -fwd * st.amp);
   if (carry) arm(ctx, pose, 'R', 0.18 + 0.05 * fwd * st.amp, -0.12, 1.35, 0.25);
   else if (hold === 'balloon') arm(ctx, pose, 'R', 0.35, 0.05, 0.6);
-  else arm(ctx, pose, 'R', swing * fwd * (hold === 'gift' ? 0.4 : 1) - sway, -0.07, 0.22 + 0.25 * st.amp * Math.max(0, fwd));
+  else {
+    armToward(ctx, pose, 'R', swing * fwd * (hold === 'gift' ? 0.4 : 1) - sway, -0.07, bend + 0.25 * st.amp * Math.max(0, fwd), restR, still);
+    shoulder(ctx, pose, 'R', fwd * st.amp);
+  }
+}
+
+/** Shoulder blade carried forward (k = 1) or back (k = −1) with its arm's swing. */
+function shoulder(ctx: AnimCtx, pose: Pose, side: Side, k: number): void {
+  const c = ctx.roles.arms[side]?.clavicle ?? -1;
+  if (c < 0) return;
+  rotLocal(pose, c, 'y', (side === 'L' ? -1 : 1) * 0.07 * k);
 }
 
 // ---------------------------------------------------------------------------
@@ -206,7 +262,8 @@ function actWatch(ctx: AnimCtx, st: HumanState, pose: Pose): void {
   ctx.rig.fk(pose);
   legs(ctx, st, pose);
   const g = gesture(ctx, 8, 3, 50);
-  if (g.k > 0 && ctx.holding === 'none') {
+  // people with folded or clasped arms keep them so (no pop into a gesture)
+  if (g.k > 0 && ctx.holding === 'none' && restArms(ctx) === 0) {
     if (g.kind === 0) {
       // point at an animal
       arm(ctx, pose, 'R', 1.35 * g.k, -0.15 * g.k, 0.1);

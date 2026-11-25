@@ -21,8 +21,10 @@ import {
   HUMAN_BODIES,
   HUMAN_HIGHLIGHT_INDEX,
   HUMAN_LOOK_TEXELS,
+  HUMAN_PRINTS,
   createHumanBatchMaterial,
   createHumanMaterial,
+  humanStyle,
   writeHumanLook,
   type HumanColors,
   type HumanCut,
@@ -165,6 +167,30 @@ function garmentTone(hex: number, r1: number, r2: number): number {
   return _tone.setHex(hex).offsetHSL((r2 - 0.5) * 0.02, 0, 0).multiplyScalar(1 + (r1 - 0.5) * 0.16).getHex();
 }
 
+/**
+ * Tops in a summer crowd: mostly plain, the rest striped, checked, ringer
+ * (contrast rib and cuffs), with a chest print or heathered (cumulative shares).
+ */
+const PRINT_SHARES: [number, number][] = [
+  [HUMAN_PRINTS.plain, 0.4],
+  [HUMAN_PRINTS.stripes, 0.52],
+  [HUMAN_PRINTS.check, 0.6],
+  [HUMAN_PRINTS.ringer, 0.72],
+  [HUMAN_PRINTS.graphic, 0.87],
+  [HUMAN_PRINTS.marl, 1],
+];
+
+/** A guest's print, soles, stubble and neckline (staff: plain uniforms, dark soles). */
+function guestStyle(app: HumanAppearance, role: 'guest' | StaffRole, r: (k: number) => number): number {
+  if (role !== 'guest') return humanStyle({ print: HUMAN_PRINTS.plain, lightSole: false, stubble: false, vNeck: false });
+  const p = r(21);
+  const print = PRINT_SHARES.find(([, share]) => p < share)?.[0] ?? HUMAN_PRINTS.plain;
+  const man = !app.female && !app.child;
+  // most bald men keep a shaved shadow on the scalp (a bare pale dome reads as a mannequin's)
+  const stubbleShare = app.hairStyle === 2 ? 0.75 : 0.4;
+  return humanStyle({ print, lightSole: r(22) < 0.55, stubble: man && r(23) < stubbleShare, vNeck: !app.child && r(24) < 0.2 });
+}
+
 /** Body id used by the batched material: female + 2 × child. */
 function bodyIndex(female: boolean, child: boolean): number {
   return (female ? 1 : 0) + (child ? 2 : 0);
@@ -225,10 +251,12 @@ export class HumanModel extends RiggedModel implements BatchedModel {
     colors.pants = garmentTone(colors.pants, r(13), r(14));
     colors.hat = garmentTone(colors.hat, r(15), r(16));
     let cut: HumanCut = {
-      sleeve: r(2) < 0.55 ? 0.13 : 0.56,
+      // short sleeves end halfway down the upper arm (a tee), not at the shoulder cap
+      sleeve: r(2) < 0.55 ? 0.16 : 0.56,
       pants: r(3) < (app.child ? 0.5 : 0.25) ? 0.34 : 1.1,
       coat: -1,
       inflate: (app.build - 1) * 0.09,
+      style: guestStyle(app, role, r),
     };
     if ((asset.human.prims as { part?: string }[]).some((p) => p.part === 'skirt')) {
       // skirt / dress: legs bare below the hem (thighs that poke through the
@@ -238,7 +266,7 @@ export class HumanModel extends RiggedModel implements BatchedModel {
     }
     if (role !== 'guest') {
       Object.assign(colors, STAFF_COLORS[role]);
-      cut = { sleeve: role === 'vet' ? 0.56 : 0.15, pants: 1.1, coat: role === 'vet' ? 0.42 : -1, inflate: cut.inflate };
+      cut = { sleeve: role === 'vet' ? 0.56 : 0.15, pants: 1.1, coat: role === 'vet' ? 0.42 : -1, inflate: cut.inflate, style: cut.style };
       if (role === 'groundskeeper') cut.sleeve = 0.56;
     }
     this.colors = colors;

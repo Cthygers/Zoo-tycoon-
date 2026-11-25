@@ -22,6 +22,7 @@
 import * as THREE from 'three';
 import type { QualityLevel, QualitySettings } from '../../core/contracts';
 import { useEnvMapIntensity } from '../../render/envIntensity';
+import { nightGroundLight, nightGroundMark } from '../../render/groundMaterial';
 import { clearNoiseCache } from './tex';
 
 // ---------------------------------------------------------------------------
@@ -165,14 +166,41 @@ export function setNatureNight(night: number): void {
   leafNight.value = night;
 }
 
+/** Moonlit ground level (the ground's uNightLift, render/groundMaterial.ts), shared by every foliage material. */
+const nightGround = { value: 0 };
+
+/**
+ * Tell ground plants (grass clumps, ferns, reeds, flowers, bushes) the
+ * moonlit ground's night level, render/context.ts nightGroundLevel: under the
+ * moon they take the ground's look (neutral light, lift and grade mark,
+ * groundMaterial.ts nightGroundLight), so they read as the ground's plants,
+ * not as blue-grey cut-outs on warm-grey sand. Tree crowns keep the sky's light.
+ */
+export function setNatureNightGround(level: number): void {
+  nightGround.value = level;
+}
+
 export interface FoliageParams extends THREE.MeshStandardMaterialParameters {
   /** Strength of light transmitted through the leaves (0..1). */
   translucency?: number;
 }
 
+// Ground-plant share of a card (vLfGround): 1 on the ground sheet; on the
+// tree sheet, bushes (crown centre below ~1.8 m, from the near-camera fade's
+// crown data when the material carries it) are ground plants, tree crowns not
+const GROUND_PLANT_VERT = /* glsl */ `
+#ifdef PROP_FADE_CROWN
+vLfGround = max( uLfGround, 1.0 - smoothstep( 180.0, 320.0, aCrown.y ) );
+#else
+vLfGround = uLfGround;
+#endif
+`;
+
 export class FoliageMaterial extends THREE.MeshStandardMaterial {
   readonly leafTrans = { value: 0.5 };
   readonly leafNight = leafNight;
+  /** 1: a ground plant sheet (grass, ferns, reeds, flowers): moonlit like the ground. */
+  readonly groundPlant = { value: 0 };
   readonly isFoliageMaterial = true;
 
   constructor(params: FoliageParams = {}) {
@@ -194,11 +222,19 @@ export class FoliageMaterial extends THREE.MeshStandardMaterial {
   override onBeforeCompile(shader: THREE.WebGLProgramParametersWithUniforms): void {
     shader.uniforms.uLeafTrans = this.leafTrans;
     shader.uniforms.uLeafNight = this.leafNight;
+    shader.uniforms.uLfGround = this.groundPlant;
+    shader.uniforms.uNightLift = nightGround;
     const nfb = THREE.ShaderChunk.normal_fragment_begin.replace('normal *= faceDirection;', '');
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nuniform float uLfGround;\nvarying float vLfGround;')
+      .replace('#include <project_vertex>', `#include <project_vertex>\n${GROUND_PLANT_VERT}`);
     shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform float uNightLift;\nvarying float vLfGround;')
       .replace('#include <lights_physical_pars_fragment>', `#include <lights_physical_pars_fragment>\n${LEAF_LIGHT}`)
       .replace('#include <normal_fragment_begin>', nfb)
-      .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>\n${LEAF_AMBIENT}`);
+      .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>\n${LEAF_AMBIENT}`)
+      .replace('#include <aomap_fragment>', `float lfNightMark = 0.0;\n${nightGroundLight('vLfGround', 'diffuseColor.rgb', 'lfNightMark')}\n#include <aomap_fragment>`)
+      .replace('#include <opaque_fragment>', `#include <opaque_fragment>${nightGroundMark('lfNightMark')}`);
   }
 
   override customProgramCacheKey(): string {
@@ -208,6 +244,7 @@ export class FoliageMaterial extends THREE.MeshStandardMaterial {
   override copy(source: this): this {
     super.copy(source);
     if (source.leafTrans) this.leafTrans.value = source.leafTrans.value;
+    if (source.groundPlant) this.groundPlant.value = source.groundPlant.value;
     return this;
   }
 }
@@ -216,7 +253,7 @@ export class FoliageMaterial extends THREE.MeshStandardMaterial {
 export function foliageMaterial(
   key: string,
   map: THREE.Texture,
-  opts: { sway: number; translucency?: number; roughness?: number; color?: number; alphaTest?: number; crownFade?: boolean },
+  opts: { sway: number; translucency?: number; roughness?: number; color?: number; alphaTest?: number; crownFade?: boolean; groundPlant?: boolean },
 ): FoliageMaterial {
   return cachedMaterial(`leaf:${key}#${map.uuid.slice(0, 8)}`, () => {
     const m = new FoliageMaterial({
@@ -227,6 +264,7 @@ export function foliageMaterial(
       alphaTest: opts.alphaTest ?? 0.5,
     });
     m.userData.sway = opts.sway;
+    if (opts.groundPlant) m.groundPlant.value = 1;
     // near-camera dissolve (props layer) for occluding leaves / fronds; whole
     // crowns too when every geometry carries its crown (geo.ts addCrownFade)
     m.userData.foliage = true;
@@ -242,7 +280,7 @@ export function foliageMaterial(
  */
 export const LEAF_PARAMS = {
   trees: { sway: 0.011, translucency: 0.45, roughness: 0.78, crownFade: true },
-  ground: { sway: 0.065, translucency: 0.55, roughness: 0.78 },
+  ground: { sway: 0.065, translucency: 0.55, roughness: 0.78, groundPlant: true },
 } as const;
 
 // ---------------------------------------------------------------------------

@@ -1,9 +1,20 @@
 // Human surface look: a bald man keeps a horseshoe of close-cropped hair above the ears and
-// round the back of his head (no blank mannequin dome), and his face stays bare.
+// round the back of his head (no blank mannequin dome), and his face stays bare; guests wear
+// varied prints, dark skin keeps a moonlit toe, hair is tousled.
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import type { QualitySettings } from '../src/core/contracts';
 import { CreatureFactory } from '../src/models';
+import {
+  HUMAN_BODIES,
+  HUMAN_LOOK_TEXELS,
+  HUMAN_PRINTS,
+  createHumanBatchMaterial,
+  createHumanMaterial,
+  humanStyle,
+  writeHumanLook,
+  type HumanMarks,
+} from '../src/models/humans/material';
 
 const QUALITY: QualitySettings = { level: 'low', pixelRatio: 1, antialias: false, shadows: false, shadowMapSize: 1024, grassDensity: 0, postFX: false, detailDistance: 40, creatureDetail: 0 };
 
@@ -29,5 +40,90 @@ describe('bald heads', () => {
     // under the full-hair edge of the shader (4 mm): a stubble the skin shows through
     expect(maxZ).toBeLessThan(0.004);
     h.dispose();
+  });
+});
+
+function compiled(material: THREE.Material): { vs: string; fs: string } {
+  const src = THREE.ShaderLib.standard;
+  const shader = { vertexShader: src.vertexShader, fragmentShader: src.fragmentShader, uniforms: THREE.UniformsUtils.clone(src.uniforms), defines: {} };
+  material.onBeforeCompile(shader as unknown as THREE.WebGLProgramParametersWithUniforms, {} as THREE.WebGLRenderer);
+  return { vs: shader.vertexShader, fs: shader.fragmentShader };
+}
+
+const MARKS: HumanMarks = { collarY: 1.43, waistY: 0.985, shoeTop: 0.1, eyeL: [0.032, 1.655, 0.083], mouth: [0, 1.585, 0.084] };
+
+describe('guest outfits and close-range detail', () => {
+  it('packs the style bits next to the body id in one exact float texel', () => {
+    const style = humanStyle({ print: HUMAN_PRINTS.graphic, lightSole: true, stubble: false, vNeck: true });
+    expect(style).toBe(4 + 8 + 32);
+    const dst = new Float32Array(HUMAN_LOOK_TEXELS * 4);
+    const colors = { skin: 0x5c3a25, hair: 0x16110e, shirt: 0xe6e6e2, pants: 0x2c3e5c, shoes: 0xe8e6e1, hat: 0x2c3e5c };
+    writeHumanLook(dst, 0, colors, { sleeve: 0.13, pants: 1.1, coat: -1, inflate: 0, style }, 3, 0);
+    const packed = Math.floor(dst[4 * 4 + 3] + 0.5);
+    expect(packed % HUMAN_BODIES).toBe(3);
+    expect(Math.floor(packed / HUMAN_BODIES)).toBe(style);
+  });
+
+  it('dresses guests in varied prints while staff keep plain uniforms', () => {
+    const f = new CreatureFactory(QUALITY);
+    const app = { skin: 0xc89070, hair: 0x33241a, shirt: 0x335577, pants: 0x2c3e5c, shoes: 0x222222, height: 1.75, build: 1, child: false, female: false, hairStyle: 0 as const };
+    const styleOf = (m: unknown) => (m as { cut: { style: number } }).cut.style;
+    const prints = new Set<number>();
+    let stubble = 0;
+    for (let seed = 0; seed < 60; seed++) {
+      const g = f.createHuman(app, 'guest', seed);
+      prints.add(styleOf(g) & 7);
+      if (styleOf(g) & 16) stubble++;
+      g.dispose();
+    }
+    expect(prints.size).toBe(6);
+    expect(stubble).toBeGreaterThan(10);
+    expect(stubble).toBeLessThan(40);
+    for (const role of ['keeper', 'groundskeeper', 'vet'] as const) {
+      const s = f.createHuman(app, role, 7);
+      expect(styleOf(s)).toBe(0);
+      s.dispose();
+    }
+    // children and women grow no stubble
+    for (let seed = 0; seed < 30; seed++) {
+      const c = f.createHuman({ ...app, child: true }, 'guest', seed);
+      const w = f.createHuman({ ...app, female: true }, 'guest', seed);
+      expect(styleOf(c) & 16).toBe(0);
+      expect(styleOf(w) & 16).toBe(0);
+      c.dispose();
+      w.dispose();
+    }
+  });
+
+  it('shares one outfit shader between the crowd and standalone people, with the dark-skin moonlit toe and tousled hair', () => {
+    const batched = compiled(createHumanBatchMaterial(1, [MARKS, MARKS, MARKS, MARKS]).material);
+    const person = compiled(
+      createHumanMaterial({ skin: 0x5c3a25, hair: 0x16110e, shirt: 0xe6e6e2, pants: 0x2c3e5c, shoes: 0x222222, hat: 0 }, { sleeve: 0.13, pants: 1.1, coat: -1, inflate: 0, style: 9 }, MARKS, 1),
+    );
+    for (const { vs, fs } of [batched, person]) {
+      expect(fs).toContain('#define LF_SKIN (hmSkin * hmSkinDark)');
+      expect(fs).toContain('float hm_stripe(float x, float w)');
+      expect(fs).toContain('if (hmPrint == 1.0)');
+      // the toe reads the mask after the colour stage sets it
+      expect(fs.indexOf('float hmSkinDark =')).toBeLessThan(fs.indexOf('(LF_SKIN)'));
+      expect(vs).toContain('if (zone.z > 0.0 && zone.w <= 0.0) transformed += normal *');
+      expect(vs.indexOf('float hm_vnoise(')).toBeLessThan(vs.indexOf('if (zone.z > 0.0'));
+      // no fragment-only derivatives in the vertex stage
+      expect(vs).not.toMatch(/dFd[xy]|fwidth/);
+    }
+    expect(batched.fs).toContain('int hmBody = clamp(int(mod(hmPacked, 4.0)), 0, 3);');
+    expect(batched.fs).toContain('float hmStyle = floor(hmPacked / 4.0);');
+    expect(person.fs).toContain('float hmStyle = uStyle;');
+  });
+
+  it('settles box-filtered stripes to their mean as they shrink toward the pixel size', () => {
+    // the shader's hm_stripe in TS
+    const stripe = (x: number, w: number) => {
+      const I = (a: number) => Math.floor(a) * 0.5 + Math.max(a - Math.floor(a) - 0.5, 0);
+      return (I(x + 0.5 * w) - I(x - 0.5 * w)) / w;
+    };
+    expect(stripe(0.75, 0.01)).toBeCloseTo(1, 5);
+    expect(stripe(0.25, 0.01)).toBeCloseTo(0, 5);
+    for (let x = 0; x < 2; x += 0.07) expect(stripe(x, 1)).toBeCloseTo(0.5, 5);
   });
 });

@@ -1,7 +1,8 @@
 // Water surface at WATER_LEVEL over water tiles (plus a one-tile margin so the
 // shoreline intersection with the terrain is covered). MeshPhysicalMaterial
 // (IOR 1.33, PMREM sky reflections, real sun glint and shadows) extended with
-// animated multi-octave normals, sun glitter, depth-based absorption (water
+// animated multi-octave normals, ripples around swimming animals, sun glitter
+// (a path of separate moon glints at night), depth-based absorption (water
 // depth comes from a per-vertex attribute sampled from world.heightAt with the
 // same tessellation as the terrain), soft shoreline foam and premultiplied-alpha
 // compositing so the reflection is not dimmed by transparency. Per-channel
@@ -68,6 +69,8 @@ export interface WaterUniforms {
   uBank: THREE.IUniform<THREE.Color>;
   /** Night factor 0..1, set by the render context (WATER_NIGHT). */
   uNight: THREE.IUniform<number>;
+  /** Swimmers' ripples (WAKES): x, z, velocity x, velocity z (m/s) per slot. */
+  uWakes: THREE.IUniform<THREE.Vector4[]>;
 }
 
 /**
@@ -82,6 +85,40 @@ export interface WaterUniforms {
  */
 export const WATER_NIGHT = { sky: 1.0, body: 0.5, sheen: 0.03 } as const;
 
+/**
+ * The moon's glitter (scaled by uNight). Drawn like the sun's, its wavelet
+ * facets flashed on almost every pixel of a distant pond (they are far finer
+ * than a pixel), which added up to a flickering silver sheet: a white puddle
+ * on a phone. At night a facet flashes only within `facet` (1 − cos) of the
+ * half vector, at `gain` × the moonlight, and where the pixel's spread of
+ * facet normals (fwidth) is wider than that, the flash is spread over the
+ * whole spread at the same average: close up a path of separate glints,
+ * farther off a dim, calm sheen along the moon's path.
+ */
+export const MOON_PATH = { facet: 0.0012, gain: 1.3 } as const;
+
+/** A swimming animal this frame: world position, heading (rad) and speed (m/s). */
+export interface Swimmer {
+  x: number;
+  z: number;
+  heading: number;
+  speed: number;
+}
+
+/**
+ * Ripples around swimming animals: rings spreading from the body, crowded
+ * ahead of a moving swimmer and drawn out behind it (a small wake), fading
+ * within `radius` m and with distance like the fine ripples. Only the `max`
+ * swimmers nearest to the view's focus get them. Slopes, not displacement:
+ * they tilt the surface normal, so the sky sheen and glitter break around
+ * the animal.
+ */
+export const WAKES = { max: 6, radius: 1.6, wavelength: 0.3, ringSpeed: 0.18, slope: 0.035, slopeMoving: 0.07, whitewater: 0.4 } as const;
+/** Ring wavenumber (rad/m) of the swimmers' ripples. */
+const WAKE_K = (2 * Math.PI) / WAKES.wavelength;
+/** Position of an unused wake slot: far outside every pond. */
+const NO_WAKE = -1e5;
+
 export class WaterSurface {
   readonly mesh: THREE.Mesh;
   readonly uniforms: WaterUniforms;
@@ -90,6 +127,8 @@ export class WaterSurface {
   private murk: THREE.Mesh[] = [];
   private murkMsaa: boolean | null = null;
   private vmap = new Int32Array(CX * (MAP_H + 1));
+  /** Scratch list of swimmer indices for setWakes (no per-frame allocation). */
+  private wakeOrder: number[] = [];
 
   constructor(
     private world: World,
@@ -109,6 +148,7 @@ export class WaterSurface {
       uShallow: { value: new THREE.Color(0.05, 0.09, 0.1) },
       uBank: { value: new THREE.Color(0.02, 0.03, 0.015) },
       uNight: { value: 0 },
+      uWakes: { value: Array.from({ length: WAKES.max }, () => new THREE.Vector4(NO_WAKE, NO_WAKE, 0, 0)) },
     };
     const m = new THREE.MeshPhysicalMaterial({
       color: 0xffffff,
@@ -142,6 +182,36 @@ export class WaterSurface {
           varying float vDepth;
           varying vec3 vWPos;
           vec3 wGlintN;
+          uniform vec4 uWakes[${WAKES.max}];
+          // ripples around swimmers (WAKES): rings travelling outward from the
+          // body, squeezed ahead of a moving swimmer and stretched behind it,
+          // stronger behind and while moving. xy: surface slope; z: a little
+          // broken white water on the crests right behind a moving swimmer
+          // (from above, where the water mirrors little, slopes alone hardly show).
+          // jitter (0..1 noise) bends the rings so they are never perfect circles
+          vec3 wWake;
+          vec3 wakeAt(vec2 p, float jitter) {
+            vec3 s = vec3(0.0);
+            for (int i = 0; i < ${WAKES.max}; i++) {
+              vec2 d = p - uWakes[i].xy;
+              float r = length(d);
+              if (r > ${WAKES.radius.toFixed(2)} || r < 0.01) continue;
+              vec2 v = uWakes[i].zw;
+              float sp = length(v);
+              vec2 dir = sp > 0.01 ? v / sp : vec2(0.0, 1.0);
+              float ahead = dot(d, dir);
+              float side = dot(d, vec2(-dir.y, dir.x));
+              float move = min(sp / 0.6, 1.0);
+              float re = length(vec2(ahead * (ahead > 0.0 ? 1.0 + 1.5 * move : 1.0 / (1.0 + move)), side));
+              float env = exp(-re * 1.8) * smoothstep(0.15, 0.4, r) * (1.0 - smoothstep(0.6, 1.0, r / ${WAKES.radius.toFixed(2)}));
+              env *= mix(1.0, 1.0 - 0.6 * smoothstep(-0.6, 0.4, ahead), move);
+              float phase = (re - uTime * ${WAKES.ringSpeed.toFixed(2)}) * ${WAKE_K.toFixed(2)} + (jitter - 0.5) * 3.0;
+              float amp = mix(${WAKES.slope.toFixed(3)}, ${WAKES.slopeMoving.toFixed(3)}, move);
+              s.xy += d / r * amp * env * cos(phase);
+              s.z += ${WAKES.whitewater.toFixed(2)} * move * env * (1.0 - smoothstep(-0.4, 0.2, ahead)) * pow(max(sin(phase), 0.0), 4.0);
+            }
+            return s;
+          }
           ${SHORE_OFFSET_GLSL}`,
         )
         .replace(
@@ -171,6 +241,8 @@ export class WaterSurface {
           float shore = 1.0 - smoothstep(0.0, 0.025 + 0.035 * fn, wEdge);
           float foam = shore * smoothstep(0.5, 0.7, fn2 * 0.6 + fn * 0.4 + 0.1 * sin(uTime * 0.8 + vWPos.x * 0.7)) * 0.45;
           foam = max(foam, (1.0 - smoothstep(0.0, 0.01, wEdge)) * 0.25 * fn2);
+          wWake = wakeAt(vWPos.xz, fn) * wNear;
+          foam = max(foam, min(wWake.z, 1.0) * fn2);
           diffuseColor.rgb = mix(mix(uShallow, uDeep, smoothstep(0.6, 2.4, pathLen)), vec3(0.42, 0.43, 0.41), foam);`,
         )
         .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = mix(mix(roughness, 0.22, wFar), 0.55, foam);')
@@ -185,6 +257,7 @@ export class WaterSurface {
             vec2 sl = (s1 * 0.9 + s2 * 0.6 + s3 * 0.35 + s4 * 0.3 * wNear) * 0.3;
             // calm water near the shore
             sl *= 0.45 + 0.55 * smoothstep(0.0, 0.4, wDepth);
+            sl += wWake.xy;
             vec3 nW = normalize(vec3(-sl.x, 1.0, -sl.y));
             normal = normalize((viewMatrix * vec4(nW, 0.0)).xyz);
             // capillary wavelets, far steeper than the normal map resolves:
@@ -220,7 +293,12 @@ export class WaterSurface {
               // is the sun / moon (shadowed); wavelet facets facing the half
               // vector flash as sparse, twinkling points over a wide cone
               float nh = max(dot(wGlintN, normalize(directLight.direction + geometryViewDir)), 0.0);
-              float glint = pow(nh, 900.0) * 3.0 * wNear * (1.0 - foam);
+              float glint = pow(nh, 900.0) * 3.0;
+              // the moon's glitter: separate glints, averaged over the pixel's facet spread (MOON_PATH)
+              float spread = fwidth(nh);
+              float moonGlint = smoothstep(1.0 - ${MOON_PATH.facet.toFixed(4)} - spread, ${(1 - MOON_PATH.facet * 0.25).toFixed(5)}, nh)
+                * ${MOON_PATH.facet.toFixed(4)} / (${MOON_PATH.facet.toFixed(4)} + spread) * ${MOON_PATH.gain.toFixed(2)};
+              glint = mix(glint, moonGlint, uNight) * wNear * (1.0 - foam);
               wSpec += directLight.color * glint;
             }
             #endif
@@ -384,6 +462,26 @@ export class WaterSurface {
           d = vert(i + 1, j + 1);
         idx.push(a, c, b, b, c, d);
       }
+  }
+
+  /**
+   * Ripples around this frame's swimmers: the WAKES.max nearest to (x, z),
+   * usually the view's focus, get a slot; the other slots are cleared.
+   */
+  setWakes(swimmers: readonly Swimmer[], x: number, z: number): void {
+    const order = this.wakeOrder;
+    order.length = 0;
+    for (let i = 0; i < swimmers.length; i++) order.push(i);
+    if (order.length > WAKES.max) {
+      const d2 = (i: number) => (swimmers[i].x - x) ** 2 + (swimmers[i].z - z) ** 2;
+      order.sort((a, b) => d2(a) - d2(b));
+    }
+    const slots = this.uniforms.uWakes.value;
+    for (let k = 0; k < slots.length; k++) {
+      const s = k < order.length ? swimmers[order[k]] : null;
+      if (s) slots[k].set(s.x, s.z, Math.sin(s.heading) * s.speed, Math.cos(s.heading) * s.speed);
+      else slots[k].set(NO_WAKE, NO_WAKE, 0, 0);
+    }
   }
 
   update(time: number): void {

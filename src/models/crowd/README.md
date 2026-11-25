@@ -50,6 +50,14 @@ world matrix is BatchedMesh's per-instance matrix. In GLSL (after
 
 Look texels:
 
+Look texels are written only when they change (growth, wetness, highlight),
+so every write must reach the GPU even while its batch is culled: three
+uploads a data texture only when it draws a program that samples it, so
+`SkinnedBatch.flush()` keeps the spans of earlier flushes queued (or the
+whole-texture upload pending) until three reports the upload
+(`Texture.onUpdate`), and a batch culled for long sends one whole upload when
+it comes back into view.
+
 * animals (`ANIMAL_LOOK_TEXELS = 1`, crowd/materials.ts): texel 0 = (highlight,
   growth 0..1, wetness 0..1 after a swim (RiggedModel.writeLook; thick skins and fur with look.wets (tiger, bears) show it), free) → fragment `flat varying vec4 vCrLook0`; plus
   `flat varying vec2 vCrYaw` (instance yaw) — `normalMatrix` is redefined in the
@@ -57,7 +65,8 @@ Look texels:
   micro-normals keep working.
 * people (`HUMAN_LOOK_TEXELS = 6`, humans/material.ts writeHumanLook):
   skin / hair / shirt / pants / shoes / hat colours, sleeve / trouser / coat
-  cut, girth, body id, highlight → `vHm0..5`. Batched and standalone people
+  cut, girth, body id + 4 × style bits (print of the top, pale soles,
+  stubble, V-neck: `humanStyle`), highlight → `vHm0..5`. Batched and standalone people
   share one shading function (humanColorGLSL) and every LOD level of a body
   uses the batch's one material, so skin wrap, fabric drape and sheen, hair
   locks and face marks never pop between LODs.
@@ -94,12 +103,16 @@ Look texels:
   light up as bright streaks inside the silhouette.
 * **Lamp light**: animal and human materials call `applyLampField(shader)`
   (props/lights/lampField.ts) last in onBeforeCompile: one R8 field fetch per
-  vertex (`vLampLight`) adds warm lamp irradiance before `<aomap_fragment>` and
+  vertex (`vLampLight`, read a little way out along the normal, further up
+  the figure, so the side facing a lamp catches its light past the pool's
+  ground edge) adds warm lamp irradiance before `<aomap_fragment>` and
   marks lamp-lit pixels for the night grade (`whLampLit`, eased over a wide
   ramp so figures at a pool's fringe are only partly coloured, or HDR alpha on
   the post-FX tier). On every tier it also gives moonlit figures a highlight
   shoulder (a white coat under the moon reads like a pale wall, not a glow) and
-  a toe lift (dark coats such as giraffe patches are not black holes) by
+  a toe lift (dark coats such as giraffe patches are not black holes; a
+  material that defines `LF_SKIN` as a 0…1 mask gets a stronger skin toe, so
+  dark faces keep ≈ 1/6 of a white shirt under the moon) by
   scaling `gl_FragColor.rgb` just before `<tonemapping_fragment>`, against the
   view's exposure (`toneMappingExposure`, or `viewExposure` from
   render/grade.ts on the post-FX tier, where the gradual mark goes into the
@@ -121,6 +134,11 @@ Look texels:
 * **Animal-specific shadow / LOD tuning**: `LOD_RATIOS` and the per-tier
   `POLICY` table in `lod/lod.ts`; `CrowdRenderer.shadowLodBias` (shadow casters
   use the coarsest level).
+* **Fur shell** (`build/furShell.ts`): fur coats append a raised copy of their
+  long-hair triangles to level 0 (shell vertices flagged by `pattern.z = −1`,
+  after the base vertices); the animal material lifts them along the normal
+  and keeps only the lock tips near the camera. Simplified levels are built
+  from the base mesh without it (`withoutFurShell`).
 * **Thin parts that must survive LODs**: the simplifier never merges vertices
   whose normals point to different major axes, so plates (ears) and thin limbs
   flatten instead of vanishing; glossy (eye) vertices (`pattern.z > 0.9`) use a

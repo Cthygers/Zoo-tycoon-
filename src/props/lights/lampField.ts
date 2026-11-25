@@ -5,6 +5,12 @@
 // irradiance where they stand, so a guest under a lamp is lit like the paving
 // around them instead of being a black cut-out. No extra draws.
 //
+// A figure's surface reads the field a little way out along its normal,
+// further the higher it is (LAMP_REACH): the side and the upper body facing a
+// lamp catch its light beyond the pool's ground edge, the far side less, so a
+// guest at a pool's fringe gets a gradual warm side instead of the whole
+// figure flipping between lamp-lit and moonlit.
+//
 // The same pixels are marked lamp-lit for the night grade (render/grade.ts),
 // so they keep their colour instead of turning to rod vision: through
 // `whLampLit` on tiers that tone-map in the material, through the HDR
@@ -82,6 +88,23 @@ const MOON_KNEE = 0.08;
  */
 const MOON_TOE = 0.03;
 const MOON_TOE_LIFT = 1.0;
+/**
+ * Moonlit toe of dark skin (materials that define LF_SKIN as their dark-skin
+ * mask 0…1, humans/material.ts): ACES's toe turns a dark face under the moon
+ * into a black void above a moonlit shirt (1/15 of a white one). Up to
+ * 1 + SKIN_TOE_LIFT times its light, easing off over ≈ SKIN_TOE displayed (an
+ * exponential, so the curve stays monotonic and a face keeps its lit and
+ * shaded side): a dark face keeps ≈ 1/6 of a white shirt. Pale and mid skins
+ * are outside the mask, so they don't glow.
+ */
+const SKIN_TOE = 0.018;
+const SKIN_TOE_LIFT = 6.5;
+/**
+ * How far out along a figure's normal (horizontally) its surface reads the
+ * lamp field: LAMP_REACH[0] m at the feet plus LAMP_REACH[1] m per metre of
+ * height (model space), ≈ 1 m at a guest's head.
+ */
+const LAMP_REACH = [0.2, 0.5] as const;
 
 const smooth = (a: number, b: number, x: number) => {
   const t = Math.min(Math.max((x - a) / (b - a), 0), 1);
@@ -102,6 +125,16 @@ export function moonShoulder(display: number): number {
 /** Factor the moonlit toe applies to a figure displayed at `display` (luminance × exposure). */
 export function moonToe(display: number): number {
   return 1 + MOON_TOE_LIFT * (1 - smooth(0, MOON_TOE, display));
+}
+
+/** Moonlit toe factor of skin with dark-skin mask `dark` (0…1) displayed at `display` (≥ moonToe). */
+export function skinMoonToe(display: number, dark: number): number {
+  return Math.max(moonToe(display), 1 + SKIN_TOE_LIFT * dark * Math.exp(-display / SKIN_TOE));
+}
+
+/** Horizontal distance (m) out along the normal at which a figure's surface `height` m up reads the lamp field. */
+export function lampReach(height: number): number {
+  return LAMP_REACH[0] + LAMP_REACH[1] * Math.max(height, 0);
 }
 
 /** Lamp light level read back from the field at a world point (tests / debugging). */
@@ -129,7 +162,9 @@ const VERTEX_PARS = /* glsl */ `
 uniform sampler2D uLampField;
 varying float vLampLight;`;
 
-// after <project_vertex>: `transformed` is the final local position
+// after <project_vertex>: `transformed` is the final local position (its y
+// the height above the figure's feet), `transformedNormal` the view-space
+// normal; the field is read LAMP_REACH out along the world normal
 const VERTEX = /* glsl */ `
 {
   vec4 lfPos = vec4(transformed, 1.0);
@@ -140,7 +175,9 @@ const VERTEX = /* glsl */ `
   lfPos = instanceMatrix * lfPos;
   #endif
   lfPos = modelMatrix * lfPos;
-  vLampLight = textureLod(uLampField, (lfPos.xz + 0.5) / vec2(${FIELD_W.toFixed(1)}, ${FIELD_H.toFixed(1)}), 0.0).r;
+  vec3 lfN = normalize((vec4(transformedNormal, 0.0) * viewMatrix).xyz);
+  vec2 lfAt = lfPos.xz + lfN.xz * (${LAMP_REACH[0].toFixed(2)} + ${LAMP_REACH[1].toFixed(2)} * max(transformed.y, 0.0));
+  vLampLight = textureLod(uLampField, (lfAt + 0.5) / vec2(${FIELD_W.toFixed(1)}, ${FIELD_H.toFixed(1)}), 0.0).r;
 }`;
 
 const FRAGMENT_PARS = /* glsl */ `
@@ -172,7 +209,8 @@ if (vLampLight > 0.0) {
 // the material tone-maps itself, and to the HDR target's alpha on the
 // post-FX tier (the OutputPass reads alpha − 1 as whLampLit). The moonlit
 // rest of the figure gets the highlight shoulder (MOON_KNEE) and the toe
-// (MOON_TOE) on every tier, against the view's exposure.
+// (MOON_TOE) on every tier, against the view's exposure; dark skin its own
+// toe (SKIN_TOE, where the material defines LF_SKIN).
 const FRAGMENT_MARK = /* glsl */ `
 {
   float lfShare = pow(smoothstep(${MARK_RAMP[0].toFixed(2)}, ${MARK_RAMP[1].toFixed(2)}, vLampLight) * uLampMark, ${MARK_GAMMA.toFixed(2)});
@@ -189,7 +227,12 @@ const FRAGMENT_MARK = /* glsl */ `
   float lfD = dot(gl_FragColor.rgb, vec3(0.2126, 0.7152, 0.0722)) * lfExposure;
   float lfX = min(lfD / ${MOON_KNEE.toFixed(3)}, 12.0);
   float lfX2 = lfX * lfX;
-  float lfTone = pow(1.0 + lfX2 * lfX2, -0.125) * (1.0 + ${MOON_TOE_LIFT.toFixed(2)} * (1.0 - smoothstep(0.0, ${MOON_TOE.toFixed(3)}, lfD)));
+  float lfToe = 1.0 + ${MOON_TOE_LIFT.toFixed(2)} * (1.0 - smoothstep(0.0, ${MOON_TOE.toFixed(3)}, lfD));
+  #ifdef LF_SKIN
+  // the larger of two monotonic curves is monotonic too
+  lfToe = max(lfToe, 1.0 + ${SKIN_TOE_LIFT.toFixed(2)} * (LF_SKIN) * exp(-lfD / ${SKIN_TOE.toFixed(3)}));
+  #endif
+  float lfTone = pow(1.0 + lfX2 * lfX2, -0.125) * lfToe;
   gl_FragColor.rgb *= mix(1.0, lfTone, uLampMark - lfShare * uLampMark);
 }`;
 
@@ -203,7 +246,8 @@ const LIGHTS_NO_POINT = THREE.ShaderChunk.lights_fragment_begin.includes(POINT_L
 /**
  * Patch a standard / physical material shader (in onBeforeCompile) so it
  * receives lamp light from the field instead of the point lights. Keeps every
- * hook it uses in place, so further patches can chain.
+ * hook it uses in place, so further patches can chain. The vertex stage reads
+ * `transformedNormal` (<defaultnormal_vertex>, before <project_vertex>).
  */
 export function applyLampField(shader: THREE.WebGLProgramParametersWithUniforms): void {
   Object.assign(shader.uniforms, lampFieldUniforms);

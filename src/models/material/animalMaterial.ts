@@ -7,6 +7,9 @@
 //     before it could shimmer,
 //   * albedo mottling (streaked along the hair flow on fur) and a clumpy
 //     roughness spread,
+//   * long hair (manes, shaggy bears) with darker partings between the locks
+//     and a raised fur shell of lock tips (build/furShell.ts) that breaks up
+//     the silhouette, up close only,
 //   * a matte coat: fur, feathers and dry skin get a weak, coat-tinted Fresnel
 //     instead of the white grazing reflection that makes them read as plastic,
 //     plus a soft coat-tinted sheen along the silhouette (tight on short coats,
@@ -29,6 +32,7 @@ import * as THREE from 'three';
 import type { LookSpec } from '../types';
 import { applyLampField } from '../../props/lights/lampField';
 import { HIGHLIGHT_FN_GLSL, NOISE_GLSL } from './shaderChunks';
+import { FUR_SHELL_FROM, FUR_SHELL_LEN } from '../build/furShell';
 
 const SKIN_IDS: Record<LookSpec['skin'], number> = { fur: 0, hide: 1, smooth: 2, feather: 3, wrinkled: 4 };
 /**
@@ -96,6 +100,10 @@ varying float vCrWet;
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
+#if ${skin} == 0
+// fur shell (build/furShell.ts): raised along the normal by the fur length
+if (pattern.z < -0.5) transformed += normal * (${FUR_SHELL_LEN} * (pattern.w - ${FUR_SHELL_FROM.toFixed(1)}));
+#endif
 vRestPos = position;
 vRestNormal = normal;
 vColor2 = color2;
@@ -163,9 +171,12 @@ float cr_clump(vec3 q, vec3 flow, float squash) {
   return cr_vnoise(q - flow * dot(q, flow) * squash);
 }
 // Fur relief (strand units): strands and clumps (lock length from squash, see
-// cr_clump), weighted by their footprint fades.
-float cr_fur(vec3 q, vec3 flow, float wS, float wC, float squash) {
-  float h = wC * 3.0 * cr_clump(q * (1.0 / CR_CLUMP), flow, squash);
+// cr_clump), weighted by their footprint fades. jit: the clumps wander by up
+// to jit.w (clump units) along jit.xyz, varying over ~2 clumps.
+float cr_fur(vec3 q, vec3 flow, float wS, float wC, float squash, vec4 jit) {
+  vec3 qc = q * (1.0 / CR_CLUMP);
+  if (jit.w > 0.001) qc += jit.xyz * ((cr_vnoise(qc * 0.5 + 3.7) - 0.5) * jit.w);
+  float h = wC * 3.0 * cr_clump(qc, flow, squash);
   if (wS > 0.001) h += wS * cr_vnoise(q - flow * dot(q, flow) * 0.85);
   return h;
 }
@@ -220,7 +231,7 @@ float crFade = 1.0 - smoothstep(crGrain * 0.35, crGrain * 1.6, crPix);
 // after a swim, drying from the top down along a ragged line: thick skin goes
 // dark and shiny, wet fur darker (water fills the gaps between the hairs) and
 // slick but still a little matte
-float crGloss = vPattern.z;
+float crGloss = max(vPattern.z, 0.0); // (fur shell vertices carry a negative flag)
 #if CR_WETS == 1
 if (vCrWet > 0.0) {
   float wet = smoothstep(0.0, 0.08, vCrWet * vCrWet * 3.6 - 0.3 - vRestPos.y + (cr_vnoise(vRestPos * 7.0) - 0.5) * 0.16);
@@ -241,6 +252,27 @@ vec3 crFl = mix(vec3(0.0, -0.45, -1.0), vec3(0.0, -1.0, -0.3), clamp((crFur - 1.
 vec3 crFlow = normalize(crFl - crN0 * dot(crN0, crFl) + vec3(0.0, -0.001, 0.0));
 // clumps fade out before their cells shrink under ~2 px (no shimmer)
 float crWC = 1.0 - smoothstep(0.25, 0.7, crPix / (crGrain * CR_CLUMP));
+{
+  // long hair (manes, shaggy bears, ruffs, wool): darker partings between the
+  // locks (value noise stretched along the hair flow, anchored in rest space),
+  // and its fur shell (build/furShell.ts) keeps only the lock tips, so the
+  // locks stand out past the silhouette instead of ending in a smooth helmet
+  // edge. Both fade out before a lock is narrower than ~3 px (no crawling
+  // edge at mid range); the shell thins out and is gone before the coarser
+  // LODs, which have none. Paler coats get weaker partings (long bands turn
+  // into contour lines on them).
+  float lockW = crGrain * 1.8;
+  float crNear = 1.0 - smoothstep(0.22, 0.4, crPix / lockW);
+  float crLong = smoothstep(0.3, 1.3, vPattern.w) * crNear;
+  bool crShell = vPattern.z < -0.5;
+  if (crLong > 0.001 || crShell) {
+    float lock = cr_clump(vRestPos / lockW, crFlow, 0.9);
+    // shell: about half the lock tips stay; fewer toward its border on shorter hair
+    if (crShell && lock < 1.02 - 0.55 * crNear * smoothstep(1.6, 2.1, vPattern.w)) discard;
+    float pale = smoothstep(0.55, 0.85, sqrt(dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722))));
+    diffuseColor.rgb *= 1.0 + crLong * mix(0.9, 0.35, pale) * (lock - 0.5);
+  }
+}
 #endif
 #if CR_PATTERN == 1
 {
@@ -364,10 +396,16 @@ material.specularColorBlended = mix(material.specularColor, diffuseColor.rgb, me
     vec3 p = vRestPos / crGrain;
     float e = 0.35;
     // long locks (hair streaks) on darker coats; short ones on pale coats,
-    // whose long relief bands would shade into contour lines
+    // whose long relief bands would shade into contour lines. Pale coats also
+    // get half the clump relief, and their locks wander ~2 cm across the flow
+    // so the relief never lines up into concentric bands where the flow
+    // curves (polar bear neck and shoulder).
     float sq = mix(0.55, 0.8, (crPale - 0.25) / 0.75);
-    float h0 = cr_fur(p, crFlow, wS, crWC, sq);
-    vec3 g = vec3(cr_fur(p + vec3(e, 0.0, 0.0), crFlow, wS, crWC, sq) - h0, cr_fur(p + vec3(0.0, e, 0.0), crFlow, wS, crWC, sq) - h0, cr_fur(p + vec3(0.0, 0.0, e), crFlow, wS, crWC, sq) - h0) / e;
+    float pale = 1.0 - smoothstep(0.3, 0.5, crPale);
+    float wC = crWC * (1.0 - 0.5 * pale);
+    vec4 jit = vec4(normalize(cross(crN0, crFlow)), pale * 0.06 / (crGrain * CR_CLUMP));
+    float h0 = cr_fur(p, crFlow, wS, wC, sq, jit);
+    vec3 g = vec3(cr_fur(p + vec3(e, 0.0, 0.0), crFlow, wS, wC, sq, jit) - h0, cr_fur(p + vec3(0.0, e, 0.0), crFlow, wS, wC, sq, jit) - h0, cr_fur(p + vec3(0.0, 0.0, e), crFlow, wS, wC, sq, jit) - h0) / e;
     vec3 gv = normalMatrix * g;
     gv -= normal * dot(gv, normal);
     normal = normalize(normal - gv * uBump * 0.35 * sqrt(crFur));

@@ -15,6 +15,7 @@
 import * as THREE from 'three';
 import type { QualityLevel, QualitySettings } from '../../core/contracts';
 import { SimplifyJob } from './simplify';
+import { withoutFurShell } from '../build/furShell';
 
 /** Triangle ratio of each LOD level relative to level 0. */
 export const LOD_RATIOS: readonly number[] = [1, 0.5, 0.28, 0.12];
@@ -50,7 +51,8 @@ export class LodChain {
   step(level: number): boolean {
     if (this.levels[level] || this.disposed) return true;
     let job = this.jobs[level];
-    if (!job) job = this.jobs[level] = new SimplifyJob(this.levels[0]!, LOD_RATIOS[level]);
+    // simplified levels come from the base mesh: the fur shell is a close-up detail of level 0
+    if (!job) job = this.jobs[level] = new SimplifyJob(withoutFurShell(this.levels[0]!), LOD_RATIOS[level]);
     if (!job.step()) return false;
     const g = job.result!;
     g.boundingSphere = this.sphere.clone();
@@ -96,7 +98,9 @@ export interface LodPolicy {
 }
 
 const POLICY: Record<QualityLevel, Omit<LodPolicy, 'shadows'>> = {
-  low: { d: [10, 22, 42], hysteresis: 0.12, shadow: 45 },
+  // low's first step: a small animal followed at the closest zoom (5.25 m, ≈ 10.2
+  // normalised) stays on the full mesh, inside the hysteresis band (12 / 1.12)
+  low: { d: [12, 22, 42], hysteresis: 0.12, shadow: 45 },
   medium: { d: [13, 28, 55], hysteresis: 0.12, shadow: 60 },
   high: { d: [20, 42, 80], hysteresis: 0.12, shadow: 80 },
 };

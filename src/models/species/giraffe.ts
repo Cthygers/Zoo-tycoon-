@@ -416,8 +416,10 @@ function makeDriver(height: number, walkSpeed: number, runSpeed: number) {
     hindToeCurl: 0.8,
     push: 0.45,
     scapSwing: 0.22,
-    // legs folded under the body: carpus under the shoulder, hock beside the belly
-    lie: { hipsY: 0.85, chestY: 1.2, front: 'tuck', hindSplay: 0.25, headRest: 1.0, carpusZ: -0.05, hockZ: -0.06 },
+    // legs folded under the body: carpus under the shoulder, hock close beside the
+    // belly, and the body resting low on them (the pale cannons must not show as a
+    // white frame under a raised belly)
+    lie: { hipsY: 0.72, chestY: 1.06, front: 'tuck', hindSplay: 0.08, headRest: 1.0, carpusZ: -0.1, hockZ: -0.06 },
     grazeReach: 0.4,
     headCarry: -0.12,
     look: 0.42,

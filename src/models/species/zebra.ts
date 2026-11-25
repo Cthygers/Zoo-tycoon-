@@ -293,10 +293,12 @@ function zebraCoat(c: CoatSample): void {
     blendHex(c.color, HOOF, k);
     blendHex(c.color2, HOOF, k);
   }
-  // mane: tips black
+  // mane: tips black; stiff bristles toward the tips (long-hair locks break up
+  // its silhouette up close instead of a smooth crest)
   if (c.part === 'mane') {
     const tip = smooth(0.035, 0.07, c.pd('neck'));
     blendHex(c.color, BLACK, tip * 0.9);
+    c.fur = 1 + 2 * smooth(0.01, 0.05, c.pd('neck'));
   }
   // tail: tuft black
   const tf = c.pw('tuft');

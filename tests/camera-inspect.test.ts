@@ -4,7 +4,8 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import type { World } from '../src/core/world';
-import { CameraController, DEFAULT_LIMITS } from '../src/ui/camera';
+import { CameraController, DEFAULT_LIMITS, followFraming } from '../src/ui/camera';
+import { SPECIES_BY_ID } from '../src/data/species';
 
 const ground = 2;
 const world = { heightAt: () => ground } as unknown as World;
@@ -103,5 +104,59 @@ describe('CameraController inspect zoom', () => {
     c.update(1 / 30);
     expect(c.distance).toBe(DEFAULT_LIMITS.minDistance);
     expect(Math.abs(new THREE.Vector3(40, ground, 40).project(cam).y)).toBeLessThan(0.01);
+  });
+
+  it('frames tall subjects from farther, and small ones at followMinDistance', () => {
+    const framing = (id: string) => followFraming(SPECIES_BY_ID[id].height, SPECIES_BY_ID[id].length);
+    expect(framing('giraffe').minDistance).toBeCloseTo(8.5, 1);
+    expect(framing('elephant').minDistance).toBeGreaterThan(6.2);
+    expect(framing('elephant').minDistance).toBeLessThan(7);
+    for (const id of ['zebra', 'lion', 'penguin', 'gazelle', 'gorilla', 'hippo', 'rhino', 'camel', 'flamingo'])
+      expect(framing(id).minDistance).toBeLessThanOrEqual(DEFAULT_LIMITS.followMinDistance);
+    // a giraffe is looked at higher up its body than a zebra
+    expect(framing('giraffe').lookHeight / SPECIES_BY_ID.giraffe.height).toBeGreaterThan(0.65);
+    expect(framing('zebra').lookHeight / SPECIES_BY_ID.zebra.height).toBeCloseTo(0.55, 2);
+  });
+
+  it('stops a pinch at a tall subject’s closest zoom, with its head and hooves in frame', () => {
+    const { cam, c } = rig();
+    const g = SPECIES_BY_ID.giraffe;
+    const f = followFraming(g.height, g.length);
+    c.follow(() => ({ x: 70, z: 70, ...f }));
+    for (let i = 0; i < 30; i++) {
+      c.zoomRotateAround(0.8, 0, 0, 0, 0, 0);
+      c.update(1 / 30);
+    }
+    for (let i = 0; i < 120; i++) c.update(1 / 30);
+    expect(c.distance).toBeCloseTo(f.minDistance, 5);
+    const head = new THREE.Vector3(70, ground + g.height, 70).project(cam).y;
+    const feet = new THREE.Vector3(70, ground, 70).project(cam).y;
+    expect(head).toBeLessThan(0.75);
+    expect(feet).toBeGreaterThan(-1);
+    expect(head).toBeGreaterThan(0.3); // the head is not left far below the top of the frame
+  });
+
+  it('eases out to a taller subject’s closest zoom when switching from a person, without a jump', () => {
+    const { c } = rig();
+    c.follow(() => ({ x: 70, z: 70, lookHeight: 1 }));
+    c.setView(70, 70, DEFAULT_LIMITS.followMinDistance);
+    c.update(1 / 30);
+    expect(c.distance).toBe(DEFAULT_LIMITS.followMinDistance);
+    c.stopFollow();
+    const f = followFraming(SPECIES_BY_ID.giraffe.height, SPECIES_BY_ID.giraffe.length);
+    c.follow(() => ({ x: 72, z: 70, ...f }));
+    let prev = c.distance;
+    for (let i = 0; i < 90; i++) {
+      c.update(1 / 30);
+      expect(c.distance).toBeGreaterThanOrEqual(prev - 1e-9);
+      expect(c.distance - prev).toBeLessThan(0.6);
+      prev = c.distance;
+    }
+    expect(c.distance).toBeCloseTo(f.minDistance, 3);
+    // and back to a person: the closer zoom is allowed again at once
+    c.stopFollow();
+    c.follow(() => ({ x: 70, z: 70, lookHeight: 1 }));
+    c.zoomRotateAround(0.2, 0, 0, 0, 0, 0);
+    expect(c.distance).toBe(DEFAULT_LIMITS.followMinDistance);
   });
 });

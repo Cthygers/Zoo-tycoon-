@@ -11,7 +11,8 @@ import './structures';
 import { PropsLayer } from './layer';
 
 export { PropsLayer, supportsMultiDraw, type PropsBackend } from './layer';
-export { paintAtlasesOffThread } from './nature';
+export { setFollowCut } from './lod/fade';
+export { paintAtlasesOffThread, setNatureNightGround } from './nature';
 export { PROP_SPECS, registerProp, type PropSpec } from './registry';
 
 /** Create the props layer; its root group is added to `scene`. */
