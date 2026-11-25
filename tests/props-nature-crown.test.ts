@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import type { QualitySettings } from '../src/core/contracts';
 import { PROP_SPECS } from '../src/props/registry';
 import '../src/props/nature';
-import { applyFade, applyOccluderCut, casterDepthMaterial, fadeModeOf, updateFade, fadeUniforms, FOLLOW_CUT_D, OCCLUDER_D, OCCLUDER_R, OCCLUDER_SHARE, OCCLUDER_SIDE, setFollowCut, TREE_GONE, TREE_KEEP_R, TREE_SHADOW_R } from '../src/props/lod/fade';
+import { applyFade, applyOccluderCut, casterDepthMaterial, fadeModeOf, updateFade, fadeUniforms, FOLLOW_CARD_R, FOLLOW_CARD_R_MAX, FOLLOW_CUT_D, OCCLUDER_D, OCCLUDER_R, OCCLUDER_SHARE, OCCLUDER_SIDE, setFollowCut, TREE_GONE, TREE_KEEP_R, TREE_SHADOW_R } from '../src/props/lod/fade';
 import { windDepthMaterial } from '../src/props/wind';
 import { addCrownFade, barkRanks, connectedPieces } from '../src/props/nature/geo';
 
@@ -58,7 +58,23 @@ describe('tree crown dissolve data', () => {
     for (let i = 5; i < 8; i++) expect(c.getW(i)).toBe(c.getW(4));
     expect(c.getW(0)).not.toBe(c.getW(4));
     expect(plain.geometry.getAttribute('aCrown')).toBeUndefined();
+    // every vertex of a leaf card carries the card's centre (cm): the follow cut drops whole cards
+    const card = g.getAttribute('aCard') as THREE.BufferAttribute;
+    expect(card.array).toBeInstanceOf(Int16Array);
+    for (let i = 0; i < 4; i++) expect([card.getX(i), card.getY(i), card.getZ(i)]).toEqual([50, 50, 0]);
+    for (let i = 4; i < 8; i++) expect([card.getX(i), card.getY(i), card.getZ(i)]).toEqual([550, 50, 0]);
   });
+
+  it('gives leaves card centres but not bark', () => {
+    const spec = PROP_SPECS.tree_acacia;
+    for (const obj of [spec.build(0, QUALITY), spec.buildLod!(0, QUALITY)]) {
+      for (const m of meshes(obj)) {
+        const mode = fadeModeOf(m.material as THREE.Material);
+        if (mode === 'crown') expect(m.geometry.getAttribute('aCard')?.count).toBe(m.geometry.getAttribute('position').count);
+        if (mode === 'crownSolid') expect(m.geometry.getAttribute('aCard')).toBeUndefined();
+      }
+    }
+  }, 30000);
 
   it('is on every geometry of the shared tree foliage material (full and distant builds)', () => {
     for (const id of ['tree_acacia', 'tree_baobab', 'tree_oak', 'tree_pine', 'tree_birch', 'tree_palm', 'bamboo', 'bush_savanna']) {
@@ -187,8 +203,8 @@ describe('near-camera fade shader', () => {
     leaf.userData.crownFade = true;
     applyFade(leaf, 'crown');
     const sh = compile(leaf).vertexShader;
-    // trunk within TREE_KEEP_R (3 m, 1 m band) of the focus: the subject's own tree, kept
-    expect(sh).toContain(`smoothstep( ${TREE_KEEP_R.toFixed(1)}, ${(TREE_KEEP_R + 1).toFixed(1)}, length( o.xz - uFadeFocus.xz ) )`);
+    // trunk within TREE_KEEP_R (3 m; 1 m band, 2 m while following) of the focus: the subject's own tree, kept
+    expect(sh).toContain(`smoothstep( ${TREE_KEEP_R.toFixed(1)}, ${(TREE_KEEP_R + 1).toFixed(1)} + uFadeFollow, length( o.xz - uFadeFocus.xz ) )`);
     // crown centre within TREE_KEEP_R of the line's end (at or beyond the subject): kept
     expect(sh).toContain(`( 1.0 - smoothstep( -0.04, 0.04, tc - 1.0 + ${TREE_KEEP_R.toFixed(1)} / len ) )`);
     expect(TREE_KEEP_R).toBeGreaterThanOrEqual(2);
@@ -232,7 +248,7 @@ describe('near-camera fade shader', () => {
     // trees run the fade while following even where the free-camera hole is gone (beyond ~42 m)
     expect(sh).toContain('#define PROP_FADE_ON ( uFadeParams.w > 0.0 || uFadeFollow > 0.0 )');
     // the follow term: the same per-tree hit (keep rules included), past the first 40 % of the line
-    expect(sh).toContain('return max( fade, propTreeFade( hit * uFadeFollow * smoothstep( 0.35, 0.45, tc ) ) );');
+    expect(sh).toContain('fade = max( fade, propTreeFade( hit * uFadeFollow * smoothstep( 0.35, 0.45, tc ) ) );');
     // other foliage and solid parts keep the free-camera gate
     const fern = new THREE.MeshStandardMaterial();
     fern.userData.foliage = true;
@@ -242,7 +258,7 @@ describe('near-camera fade shader', () => {
     // a followed tree's shadow goes with it at any distance (after the near-camera shadow limit)
     const depth = windDepthMaterial(Object.assign(new THREE.MeshStandardMaterial({ alphaTest: 0.5 }), { userData: { foliage: true, crownFade: true, sway: 0.011 } }))!;
     const dv = compileDepth(depth).vertexShader;
-    expect(dv.indexOf('fade *= 1.0 - smoothstep( 12.0')).toBeLessThan(dv.indexOf('return max( fade, propTreeFade( hit * uFadeFollow'));
+    expect(dv.indexOf('fade *= 1.0 - smoothstep( 12.0')).toBeLessThan(dv.indexOf('fade = max( fade, propTreeFade( hit * uFadeFollow'));
 
     const subject = new THREE.Vector3(0, 0, 0);
     const camAt = (d: number) => new THREE.Vector3(0, d * 0.5, d * 0.866);
@@ -310,6 +326,74 @@ describe('near-camera fade shader', () => {
     }
   });
 
+  it("while following, drops the leaf cards on the camera → subject line, whole, even from the subject's own tree", () => {
+    const leaf = new THREE.MeshStandardMaterial();
+    leaf.userData.foliage = true;
+    leaf.userData.crownFade = true;
+    applyFade(leaf, 'crown');
+    const sh = compile(leaf).vertexShader;
+    expect(sh).toContain('#define PROP_FADE_CARDS');
+    expect(sh).toContain('attribute vec3 aCard;');
+    // the card's centre against the segment, beyond its first stretch, in front of the subject
+    expect(sh).toContain('vec3 c = ( M * vec4( aCard * 0.01, 1.0 ) ).xyz - uFadeCam;');
+    expect(sh).toContain('float r = length( c - dir * clamp( t, 0.0, len ) );');
+    expect(sh).toContain('smoothstep( 0.35, 0.45, t / len )');
+    // after the keep rule: the kept tree loses its cards on the line too
+    expect(sh.indexOf('fade = max( fade, propCardCut( M, dir, len ) );')).toBeGreaterThan(sh.indexOf('float between ='));
+    // bark and the tree's shadow do not (the trunk and its shade stay)
+    const bark = new THREE.MeshStandardMaterial();
+    bark.userData.fadeNear = true;
+    bark.userData.crownFade = true;
+    applyFade(bark, 'crownSolid');
+    expect(compile(bark).vertexShader).not.toContain('#define PROP_FADE_CARDS');
+    const depth = windDepthMaterial(Object.assign(new THREE.MeshStandardMaterial({ alphaTest: 0.5 }), { userData: { foliage: true, crownFade: true, sway: 0.011 } }))!;
+    const dv = compileDepth(depth).vertexShader;
+    expect(dv).not.toContain('#define PROP_FADE_CARDS');
+    // a trunk on the line in front of the subject at the closest zooms takes its tree (visible pass only)
+    const trunkCut = 'fade = max( fade, propTreeFade( propOccluderAt( o, 0.5, true ) ) );';
+    expect(sh).toContain(trunkCut);
+    expect(sh.lastIndexOf('#ifndef PROP_FADE_SHADOW', sh.indexOf(trunkCut))).toBeGreaterThan(sh.indexOf('fade = max( fade, propTreeFade( hit * uFadeFollow'));
+
+    // the card radius grows with the distance
+    const subject = new THREE.Vector3(0, 0, 0);
+    try {
+      setFollowCut(subject);
+      updateFade(new THREE.Vector3(0, 8, 14), subject, true);
+      expect(fadeUniforms.uFadeCard.value).toBe(FOLLOW_CARD_R);
+      updateFade(new THREE.Vector3(0, 25, 43), subject, true);
+      expect(fadeUniforms.uFadeCard.value).toBe(FOLLOW_CARD_R_MAX);
+    } finally {
+      setFollowCut(null);
+    }
+  });
+
+  it('reaches a 44 m follow zoom (the subject framed low: ≈ 1.2 × the zoom to its feet)', () => {
+    const subject = new THREE.Vector3(0, 0, 0);
+    try {
+      setFollowCut(subject);
+      updateFade(new THREE.Vector3(0, 44 * 1.2 * 0.42, 44 * 1.2 * 0.906), subject, true);
+      expect(fadeUniforms.uFadeFollow.value).toBe(1);
+    } finally {
+      setFollowCut(null);
+    }
+  });
+
+  it('dissolves a ground-plant clump on the follow line through its own threshold', () => {
+    const fern = new THREE.MeshStandardMaterial();
+    fern.userData.foliage = true;
+    applyFade(fern, 'foliage');
+    const sh = compile(fern);
+    expect(sh.vertexShader).toContain('vPropOccl = propOccluderAt( o, 0.5, true );');
+    expect(sh.fragmentShader).toContain('if ( vPropFade > vPropRank || vPropOccl > 0.3 + 0.4 * fract(');
+    // the fragment declares what it reads (the defines only reach the vertex shader)
+    expect(sh.fragmentShader).toContain('varying float vPropOccl;');
+    // solid plants keep the plain discard
+    const cactus = new THREE.MeshStandardMaterial();
+    cactus.userData.fadeNear = true;
+    applyFade(cactus, 'solid');
+    expect(compile(cactus).fragmentShader).toContain('if ( vPropFade > vPropRank ) discard;');
+  });
+
   it('removes whole crowns only in close views', () => {
     const cam = new THREE.Vector3(0, 4, 10);
     updateFade(cam, new THREE.Vector3(0, 0, 0), true);
@@ -332,16 +416,33 @@ describe('follow-mode occluder cut (fences, small structures)', () => {
     // runs only while the occluder cut is on (never in free-camera play)
     expect(sh.vertexShader).toContain('#define PROP_FADE_ON uFadeOccl > 0.0');
     // one value per instance, from its origin: within OCCLUDER_R of the camera, OCCLUDER_SIDE of the line, in front of the subject
-    expect(sh.vertexShader).toContain(`float nearR = max( ${OCCLUDER_R.toFixed(2)}, ${OCCLUDER_SHARE.toFixed(2)} * len );`);
-    expect(sh.vertexShader).toContain('float near = 1.0 - smoothstep( nearR - 0.25, nearR, length( co ) );');
-    expect(sh.vertexShader).toContain(`( 1.0 - smoothstep( ${(OCCLUDER_SIDE - 0.15).toFixed(2)}, ${OCCLUDER_SIDE.toFixed(2)}, side ) )`);
+    expect(sh.vertexShader).toContain(`float nearR = max( ${OCCLUDER_R.toFixed(2)}, ${OCCLUDER_SHARE.toFixed(2)} * len ) + PROP_OCCL_REACH;`);
+    expect(sh.vertexShader).toContain('float near = anywhere ? 1.0 : 1.0 - smoothstep( nearR - 0.25, nearR, length( co ) );');
+    expect(sh.vertexShader).toContain('#define PROP_OCCL_REACH 0.00');
+    expect(sh.vertexShader).toContain(`float sideR = ${OCCLUDER_SIDE.toFixed(2)} + PROP_OCCL_REACH;`);
+    expect(sh.vertexShader).toContain('( 1.0 - smoothstep( sideR - 0.15, sideR, side ) )');
     // at least a metre in front of the subject
-    expect(sh.vertexShader).toContain('( 1.0 - smoothstep( len - 1.3, len - 1.0, t ) )');
-    expect(sh.vertexShader).toContain('return propOccluderAt( o );');
+    expect(sh.vertexShader).toContain('( 1.0 - smoothstep( len - front - 0.3, len - front, t ) )');
+    expect(sh.vertexShader).toContain('return propOccluderAt( o, 1.0, false );');
     // a screen-space threshold, not the rank: the whole piece dissolves evenly
     expect(sh.fragmentShader).toContain('if ( vPropFade > 0.3 + 0.4 * fract( 52.9829189');
     expect(sh.fragmentShader).not.toContain('vPropFade > vPropRank');
-    expect(m.customProgramCacheKey()).toBe(`${key}|propoccl`);
+    expect(m.customProgramCacheKey()).toBe(`${key}|propoccl0`);
+
+    // bulky pieces (boulders) reach farther from the line
+    const rock = new THREE.MeshStandardMaterial();
+    rock.userData.occluderReach = 0.6;
+    applyOccluderCut(rock);
+    expect(compile(rock).vertexShader).toContain('#define PROP_OCCL_REACH 0.60');
+    // fence posts go only with every panel they join (the fence patch supplies propPostMask)
+    const post = new THREE.MeshStandardMaterial();
+    post.userData.occluderPosts = true;
+    applyOccluderCut(post);
+    const pv = compile(post).vertexShader;
+    expect(pv).toContain('#define PROP_OCCL_POSTS');
+    expect(pv).toContain('float propPostMask();');
+    expect(pv).toContain('cut = min( cut, propOccluderAt( o + vec3( e.x, 0.0, e.y ) * 1.00, 1.0, false ) );');
+    expect(post.customProgramCacheKey()).not.toBe(m.customProgramCacheKey());
 
     // vegetation keeps its own fade
     const leaf = new THREE.MeshStandardMaterial();

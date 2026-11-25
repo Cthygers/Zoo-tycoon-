@@ -18,6 +18,7 @@ export function assetFromDesign(key: string, design: CreatureDesign, detail: 0 |
   );
   // long hair on fur coats gets a raised shell of lock tips (LOD 0 only, see furShell.ts)
   const geometry = design.look.skin === 'fur' ? addFurShell(built.geometry) : built.geometry;
+  const furShell = geometry !== built.geometry;
   const roles = resolveRoles(built.rig, design.roles);
   const size = built.bounds.getSize(new THREE.Vector3());
   const center = built.bounds.getCenter(new THREE.Vector3());
@@ -31,8 +32,9 @@ export function assetFromDesign(key: string, design: CreatureDesign, detail: 0 |
     roles,
     design,
     driver: unwrapDriver(design.anim),
-    material: createAnimalMaterial({ look: design.look, detail }),
-    highlightMaterial: createAnimalMaterial({ look: design.look, detail, highlight: true }),
+    material: createAnimalMaterial({ look: design.look, detail, furShell }),
+    highlightMaterial: createAnimalMaterial({ look: design.look, detail, highlight: true, furShell }),
+    furShell,
     sphere,
     height: design.height ?? built.bounds.max.y,
     radius: design.radius ?? 0.5 * Math.max(size.x, size.z),

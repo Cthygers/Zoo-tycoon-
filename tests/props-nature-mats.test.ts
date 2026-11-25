@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { barkTextures } from '../src/props/nature/barks';
-import { FoliageMaterial, LEAF_PARAMS, RockMaterial, setNatureNight, setNatureNightGround, withQuality } from '../src/props/nature/mats';
+import { BarkMaterial, barkMaterial, FoliageMaterial, LEAF_PARAMS, RockMaterial, setNatureNight, setNatureNightGround, withQuality } from '../src/props/nature/mats';
 import { buildIceRocks } from '../src/props/nature/rocks';
 
 /** Run a material's onBeforeCompile on a copy of the physical shader source. */
@@ -71,6 +71,35 @@ describe('ground plants under the moon', () => {
     setNatureNightGround(0);
     expect(LEAF_PARAMS.ground.groundPlant).toBe(true);
     expect('groundPlant' in LEAF_PARAMS.trees).toBe(false);
+  });
+
+  it("keep a moonlit floor in their own shade (no black bushes), after the ground's look", () => {
+    const sh = compile(new FoliageMaterial()).fragmentShader;
+    const floor = 'reflectedLight.indirectDiffuse += max( lfFloor - lfHave, 0.0 ) * lfK;';
+    expect(sh).toContain(floor);
+    expect(sh).toContain('float lfK = uNightLift * vLfGround;');
+    // a share of the moon's light on open ground, in the plant's own colour
+    expect(sh).toContain('vec3 lfFloor = 0.156 * lfMoonH * RECIPROCAL_PI * lfHue;');
+    expect(sh.indexOf(floor)).toBeGreaterThan(sh.indexOf('float ngK = uNightLift * (vLfGround);'));
+    expect(sh.indexOf(floor)).toBeLessThan(sh.indexOf('#include <aomap_fragment>'));
+  });
+});
+
+describe('bark under the moon', () => {
+  it("takes part of the moonlit ground's neutral light (no blue trunks), in one program", () => {
+    const t = barkTextures('oak');
+    const m = barkMaterial('test-oak', t.map, t.normal);
+    expect(m).toBeInstanceOf(BarkMaterial);
+    const sh = compile(m);
+    expect(sh.fragmentShader).toContain('float ngK = uNightLift * (1.00);');
+    expect(sh.fragmentShader).toContain('reflectedLight.indirectSpecular *= 1.0 - 0.70 * uNightLift;');
+    expect(sh.fragmentShader).toContain('whLampLit = bkNightMark;');
+    setNatureNightGround(0.7);
+    expect((sh.uniforms.uNightLift as THREE.IUniform<number>).value).toBe(0.7);
+    setNatureNightGround(0);
+    // clones (ghost previews) keep the patch and share the program
+    expect(compile(m.clone()).fragmentShader).toContain('bkNightMark');
+    expect(m.clone().customProgramCacheKey()).toBe(m.customProgramCacheKey());
   });
 });
 

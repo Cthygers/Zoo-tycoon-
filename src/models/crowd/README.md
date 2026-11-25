@@ -59,14 +59,15 @@ whole-texture upload pending) until three reports the upload
 it comes back into view.
 
 * animals (`ANIMAL_LOOK_TEXELS = 1`, crowd/materials.ts): texel 0 = (highlight,
-  growth 0..1, wetness 0..1 after a swim (RiggedModel.writeLook; thick skins and fur with look.wets (tiger, bears) show it), free) → fragment `flat varying vec4 vCrLook0`; plus
+  growth 0..1, wetness 0..1 after a swim (RiggedModel.writeLook; thick skins and fur with look.wets (tiger, bears) show it),
+  lying 0..1 from how low hips and chest sit (species with look.lieShade: giraffe's folded legs shade down)) → fragment `flat varying vec4 vCrLook0`; plus
   `flat varying vec2 vCrYaw` (instance yaw) — `normalMatrix` is redefined in the
   fragment shader as normalMatrix × instance rotation, so object-space
   micro-normals keep working.
 * people (`HUMAN_LOOK_TEXELS = 6`, humans/material.ts writeHumanLook):
   skin / hair / shirt / pants / shoes / hat colours, sleeve / trouser / coat
   cut, girth, body id + 4 × style bits (print of the top, pale soles,
-  stubble, V-neck: `humanStyle`), highlight → `vHm0..5`. Batched and standalone people
+  stubble, V-neck, deep V: `humanStyle`), highlight → `vHm0..5`. Batched and standalone people
   share one shading function (humanColorGLSL) and every LOD level of a body
   uses the batch's one material, so skin wrap, fabric drape and sheen, hair
   locks and face marks never pop between LODs.
@@ -102,13 +103,14 @@ it comes back into view.
   (manes), whose deep folds face away from the camera and would otherwise
   light up as bright streaks inside the silhouette.
 * **Lamp light**: animal and human materials call `applyLampField(shader)`
-  (props/lights/lampField.ts) last in onBeforeCompile: one R8 field fetch per
+  (props/lights/lampField.ts) last in onBeforeCompile: an R8 field fetch per
   vertex (`vLampLight`, read a little way out along the normal, further up
   the figure, so the side facing a lamp catches its light past the pool's
-  ground edge) adds warm lamp irradiance before `<aomap_fragment>` and
-  marks lamp-lit pixels for the night grade (`whLampLit`, eased over a wide
-  ramp so figures at a pool's fringe are only partly coloured, or HDR alpha on
-  the post-FX tier). On every tier it also gives moonlit figures a highlight
+  ground edge) adds warm lamp irradiance before `<aomap_fragment>`, and a
+  second one further out (`vLampMark`, the larger of the two) marks lamp-lit
+  pixels for the night grade (`whLampLit`, eased over a wide ramp so figures
+  at a pool's fringe are only partly coloured, their pool side the most, or
+  HDR alpha on the post-FX tier). On every tier it also gives moonlit figures a highlight
   shoulder (a white coat under the moon reads like a pale wall, not a glow) and
   a toe lift (dark coats such as giraffe patches are not black holes; a
   material that defines `LF_SKIN` as a 0…1 mask gets a stronger skin toe, so
@@ -134,11 +136,21 @@ it comes back into view.
 * **Animal-specific shadow / LOD tuning**: `LOD_RATIOS` and the per-tier
   `POLICY` table in `lod/lod.ts`; `CrowdRenderer.shadowLodBias` (shadow casters
   use the coarsest level).
+* **Follow cut** (`setCreatureFollowCut`, crowd/batch.ts): while the camera
+  follows a subject within `FOLLOW_CUT_MAX_D`, animal batches (`followCut`,
+  set by AnimalModel) leave out of the main pass every other animal whose body
+  (its batch bounding sphere × 0.5) reaches the line from the camera to the
+  subject's body in front of the subject — whole animals, hysteresis to come
+  back, shadows kept, no shader or draw-call cost. main.ts calls it every frame
+  with the followed subject's position (null when not following).
 * **Fur shell** (`build/furShell.ts`): fur coats append a raised copy of their
   long-hair triangles to level 0 (shell vertices flagged by `pattern.z = −1`,
   after the base vertices); the animal material lifts them along the normal
   and keeps only the lock tips near the camera. Simplified levels are built
-  from the base mesh without it (`withoutFurShell`).
+  from the base mesh without it (`withoutFurShell`). Only materials of a mesh
+  that has a shell compile its lift and `discard` (`RigAsset.furShell` →
+  `createAnimalMaterial({ furShell })` / `batchedAnimalMaterials(look, detail,
+  furShell)`): a discard can cost early depth testing on tile-based GPUs.
 * **Thin parts that must survive LODs**: the simplifier never merges vertices
   whose normals point to different major axes, so plates (ears) and thin limbs
   flatten instead of vanishing; glossy (eye) vertices (`pattern.z > 0.9`) use a

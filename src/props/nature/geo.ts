@@ -412,7 +412,9 @@ export function groupOf(parts: [MeshData, THREE.Material, string?][]): THREE.Gro
  * camera's view line drops out piece by piece, never as a half-transparent
  * sheet. Leaf cards get scattered ranks; bark pieces are ranked by how far
  * out they start (barkRanks), so limbs always go before the limb or trunk
- * they grow from. `crown` null gives neutral data (no crown: never cut as a
+ * they grow from. Leaves also carry their card's centre (aCard, cm), so the
+ * follow cut can take out just the cards on the camera → subject line, each
+ * one whole. `crown` null gives neutral data (no crown: never cut as a
  * tree) for wood that shares a tree's bark material without being part of a
  * tree, such as a fallen log, so it still batches with that bark. Every
  * geometry drawn with such a material needs it (BatchedMesh wants one
@@ -451,6 +453,27 @@ function setCrownAttributes(g: THREE.BufferGeometry, crown: Ellipsoid | null, ba
   }
   g.setAttribute('aCrown', new THREE.BufferAttribute(c, 4));
   g.setAttribute('aCrownR', new THREE.BufferAttribute(r, 2));
+  if (!bark) g.setAttribute('aCard', new THREE.BufferAttribute(pieceCentres(g, piece), 3));
+}
+
+/** Centre (model space, cm) of each vertex's connected piece: one value per leaf card. */
+export function pieceCentres(g: THREE.BufferGeometry, piece: Int32Array): Int16Array {
+  const pos = g.getAttribute('position');
+  const sum = new Map<number, [number, number, number, number]>();
+  for (let i = 0; i < pos.count; i++) {
+    let s = sum.get(piece[i]);
+    if (!s) sum.set(piece[i], (s = [0, 0, 0, 0]));
+    s[0] += pos.getX(i);
+    s[1] += pos.getY(i);
+    s[2] += pos.getZ(i);
+    s[3]++;
+  }
+  const out = new Int16Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i++) {
+    const s = sum.get(piece[i])!;
+    for (let k = 0; k < 3; k++) out[i * 3 + k] = Math.round((s[k] / s[3]) * 100);
+  }
+  return out;
 }
 
 /**

@@ -15,7 +15,8 @@
 // (props/lights/lampField.ts, applied last in onBeforeCompile), and the same
 // surface model: skin with a warm subsurface wrap, matte fabric (drape folds,
 // a sheen in its own colour, no white grazing reflection), hair with volume
-// (a lit crown, shaded under-layers, locks, a wavering hairline), and a face
+// (a lit crown, shaded under-layers, locks, a wavering hairline), the body's
+// creases baked per vertex (between the fingers, the armpits), and a face
 // painted where the coarse mesh cannot model it (eye sockets, the shade beside
 // and under the nose, the mouth line, the chin's and the hair's shadows): marks
 // that keep their darkness at a distance instead of sparkling.
@@ -57,13 +58,15 @@ export interface HumanStyle {
   lightSole: boolean;
   /** Close-cropped stubble on a bald scalp and the jaw (adult men). */
   stubble: boolean;
-  /** V-neck instead of a crew neck. */
-  vNeck: boolean;
+  neckline: Neckline;
 }
 
-/** Pack a HumanStyle into one small integer (exact in a float texel): print in bits 0–2, then sole, stubble, V-neck. */
+/** Neckline of a top: a crew neck, or a V-neck, cut shallow (men's) or deeper (women's). */
+export type Neckline = 'crew' | 'v' | 'deepV';
+
+/** Pack a HumanStyle into one small integer (exact in a float texel): print in bits 0–2, then sole, stubble, V-neck, deep V. */
 export function humanStyle(s: HumanStyle): number {
-  return (s.print & 7) | (s.lightSole ? 8 : 0) | (s.stubble ? 16 : 0) | (s.vNeck ? 32 : 0);
+  return (s.print & 7) | (s.lightSole ? 8 : 0) | (s.stubble ? 16 : 0) | (s.neckline !== 'crew' ? 32 : 0) | (s.neckline === 'deepV' ? 64 : 0);
 }
 
 export interface HumanMarks {
@@ -158,15 +161,28 @@ float hmHair = 0.0;
   float onArm = hm_step(0.0, armT);
   float onLeg = hm_step(0.0, legT);
   float trunk = (1.0 - onArm) * (1.0 - onLeg);
-  // the neckline dips at the front (a crew neck ≈ 2.5 cm, a V-neck to a point),
-  // not a painted ring round the neck
+  // the neckline dips at the front (a crew neck ≈ 2.5 cm, a V-neck to a point:
+  // 4.5 cm on a man's tee, 6.5 cm on a woman's), not a painted ring round the
+  // neck; beside the V it sits like a crew neck
   float front = smoothstep(-0.01, 0.06, vRestPos.z / hmBs);
   float vNeck = mod(floor(hmStyle / 32.0), 2.0);
-  float neckY = hmMarks.x - hmBs * front * mix(0.026 * (1.0 - smoothstep(0.0, 0.065, abs(vRestPos.x) / hmBs)), 0.075 - 1.3 * abs(vRestPos.x) / hmBs, vNeck);
-  float neckCut = 1.0 - hm_step(neckY, y);
+  float vDepth = hmStyle >= 64.0 ? 0.065 : 0.045;
+  float crewDip = 0.026 * (1.0 - smoothstep(0.0, 0.065, abs(vRestPos.x) / hmBs));
+  float neckY = hmMarks.x - hmBs * front * mix(crewDip, max(crewDip, vDepth - 1.3 * abs(vRestPos.x) / hmBs), vNeck);
+  // the collar rings the base of the neck (reaching forward over the dip):
+  // beyond the ring the edge climbs the slope of the shoulders, so they stay
+  // covered where they rise above the neckline (no bare boat neck from
+  // shoulder to shoulder) and the collar curves round the neck; the neck and
+  // head above the shoulders are bare all round
+  float collarR = length(vec2(vRestPos.x, vRestPos.z + 0.012 * hmBs)) / hmBs - 0.06 * front;
+  float collarY = neckY + hmBs * min(1.5 * max(collarR - 0.072, 0.0), 0.04);
+  float neckCut = 1.0 - hm_step(collarY, y);
   float upper = trunk * hm_step(hmMarks.y, y) * neckCut;
   float lower = trunk * (1.0 - hm_step(hmMarks.y, y));
-  float sleeve = onArm * (1.0 - hm_step(hmCut.x, armT));
+  // sleeve lengths are authored on the adult body: a child's tee ends as high
+  // up its shorter arm (no puffed sleeve down to the elbow)
+  float sleeveT = hmCut.x * hmBs;
+  float sleeve = onArm * (1.0 - hm_step(sleeveT, armT));
   float pantsLeg = onLeg * (1.0 - hm_step(hmCut.y, legT));
   float coatLeg = onLeg * (1.0 - hm_step(hmCut.z, legT));
   float shirtM = clamp(upper + sleeve + coatLeg, 0.0, 1.0);
@@ -217,8 +233,8 @@ float hmHair = 0.0;
   // hems: the rib round the neck, the doubled hem of each sleeve and of the
   // top (a ringer tee has them in its contrast colour), each a little darker
   // where the fabric folds over
-  float rib = trunk * hm_step(neckY - 0.014 * hmBs, y);
-  float cuff = onArm * hm_step(hmCut.x - 0.018 * hmBs, armT);
+  float rib = trunk * hm_step(neckY - 0.014 * hmBs + hmBs * min(1.5 * max(collarR - 0.086, 0.0), 0.04), y);
+  float cuff = onArm * hm_step(sleeveT - 0.018 * hmBs, armT);
   float hem = trunk * (1.0 - hm_step(hmMarks.y + 0.025 * hmBs, y));
   float hems = max(max(rib, cuff), hem * step(hmCut.z, 0.0));
   hmShirtCol = hmPrint == 3.0 ? mix(hmShirtCol, hmContrast, max(rib, cuff)) : hmShirtCol * (1.0 - 0.12 * hems);
@@ -230,7 +246,7 @@ float hmHair = 0.0;
   float pantsHem = max(1.0 - hm_step(hmMarks.z + 0.03 * hmBs, y), onLeg * hm_step(hmCut.y - 0.02 * hmBs, legT));
   hmCol *= 1.0 - 0.16 * pantsHem * pantsM;
   // skin just past a sleeve or a short trouser leg sits in its opening's shade
-  float openingShade = onArm * (1.0 - hm_step(hmCut.x + 0.022 * hmBs, armT)) + onLeg * (1.0 - hm_step(hmCut.y + 0.022 * hmBs, legT));
+  float openingShade = onArm * (1.0 - hm_step(sleeveT + 0.022 * hmBs, armT)) + onLeg * (1.0 - hm_step(hmCut.y + 0.022 * hmBs, legT));
   hmCol *= 1.0 - 0.18 * openingShade * (1.0 - max(shirtM, pantsM));
   float clothM = max(shirtM, pantsM);
   hmRough = mix(hmRough, 0.93 - drape * 0.1, clothM);
@@ -327,28 +343,27 @@ float hmHair = 0.0;
 }
 // dark skin, for the moonlit skin toe (props/lights/lampField.ts LF_SKIN)
 float hmSkinDark = 1.0 - smoothstep(0.04, 0.2, dot(${e.skin}, vec3(0.2126, 0.7152, 0.0722)));
-diffuseColor.rgb *= hmCol;`;
+diffuseColor.rgb *= hmCol * (1.0 - 0.25 * vOccl);`;
 }
 
 /**
  * Tousled hair (after <begin_vertex>, rest space): the hair surface lifts and
  * dips by up to ≈ 1 cm in lumps a few cm wide, so its outline is uneven
- * instead of a helmet's; the hairline (first 2 mm) and hats stay put. Its own
- * value noise: the shared NOISE_GLSL holds fragment-only functions.
+ * instead of a helmet's; the hairline (first 2 mm) and hats stay put. The
+ * shared noise chunk has no derivatives, so it is safe in the vertex stage
+ * (tests/creature-shaders.test.ts guards both stages).
  */
-const HAIR_TOUSLE_PARS = `float hm_vhash(vec3 p) {
-  p = fract(p * 0.1031);
-  p += dot(p, p.zyx + 31.32);
-  return fract((p.x + p.y) * p.z);
-}
-float hm_vnoise(vec3 x) {
-  vec3 i = floor(x);
-  vec3 f = fract(x);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(mix(hm_vhash(i), hm_vhash(i + vec3(1.0, 0.0, 0.0)), f.x), mix(hm_vhash(i + vec3(0.0, 1.0, 0.0)), hm_vhash(i + vec3(1.0, 1.0, 0.0)), f.x), f.y),
-             mix(mix(hm_vhash(i + vec3(0.0, 0.0, 1.0)), hm_vhash(i + vec3(1.0, 0.0, 1.0)), f.x), mix(hm_vhash(i + vec3(0.0, 1.0, 1.0)), hm_vhash(i + 1.0), f.x), f.y), f.z);
-}`;
-const HAIR_TOUSLE_GLSL = `if (zone.z > 0.0 && zone.w <= 0.0) transformed += normal * (smoothstep(0.002, 0.012, zone.z) * (hm_vnoise(position * vec3(38.0, 16.0, 38.0)) - 0.4) * 0.016);`;
+const HAIR_TOUSLE_GLSL = `if (zone.z > 0.0 && zone.w <= 0.0) transformed += normal * (smoothstep(0.002, 0.012, zone.z) * (cr_vnoise(position * vec3(38.0, 16.0, 38.0)) - 0.4) * 0.016);`;
+
+/**
+ * Baked crease occlusion (the `occl` attribute: between the fingers, the
+ * armpits, under the chin and the seat) dims the sky's and the lamps' light
+ * there, and a little of the colour so it holds in sunlight: a hand reads as
+ * fingers, the body as more than one smooth tube. Per vertex, so it never
+ * shimmers. After <aomap_fragment> (applyLampField adds the lamp light before it).
+ */
+const OCCLUSION_GLSL = `#include <aomap_fragment>
+reflectedLight.indirectDiffuse *= 1.0 - 0.7 * vOccl;`;
 
 /** Dark bare skin gets the moonlit skin toe of applyLampField (hmSkin, hmSkinDark: set by humanColorGLSL). */
 const SKIN_TOE_DEFINE = '#define LF_SKIN (hmSkin * hmSkinDark)';
@@ -409,16 +424,19 @@ export function createHumanMaterial(colors: HumanColors, cut: HumanCut, marks: H
         `#include <common>
 attribute vec4 zone;
 attribute float girth;
+attribute float occl;
 uniform vec4 uCut;
 varying vec4 vZone;
 varying vec3 vRestPos;
-${HAIR_TOUSLE_PARS}`,
+varying float vOccl;
+${NOISE_GLSL}`,
       )
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
 vZone = zone;
 vRestPos = position;
+vOccl = occl;
 transformed += normal * (uCut.w * girth);
 ${HAIR_TOUSLE_GLSL}`,
       );
@@ -436,6 +454,7 @@ uniform float uStyle;
 uniform float uHighlight;
 varying vec4 vZone;
 varying vec3 vRestPos;
+varying float vOccl;
 ${SKIN_TOE_DEFINE}
 ${FRAG_HELPERS}
 ${HIGHLIGHT_FN_GLSL}`,
@@ -457,11 +476,12 @@ ${HIGHLIGHT_FN_GLSL}`,
         }),
       )
       .replace('#include <roughnessmap_fragment>', ROUGHNESS_GLSL)
+      .replace('#include <aomap_fragment>', OCCLUSION_GLSL)
       .replace('#include <lights_physical_fragment>', SPECULAR_GLSL)
       .replace('#include <opaque_fragment>', `${SKIN_CLOTH_LIGHT_GLSL}\noutgoingLight = crHighlightOf(outgoingLight, uHighlight);\n#include <opaque_fragment>`);
     applyLampField(shader);
   };
-  mat.customProgramCacheKey = () => 'creature-human-v5';
+  mat.customProgramCacheKey = () => 'creature-human-v6';
   return mat;
 }
 
@@ -532,15 +552,17 @@ export function createHumanBatchMaterial(detail: 0 | 1 | 2, bodies: HumanMarks[]
       shader.vertexShader,
       `attribute vec4 zone;
 attribute float girth;
+attribute float occl;
 varying vec4 vZone;
 varying vec3 vRestPos;
+varying float vOccl;
 flat varying vec4 vHm0;
 flat varying vec4 vHm1;
 flat varying vec4 vHm2;
 flat varying vec4 vHm3;
 flat varying vec4 vHm4;
 flat varying vec4 vHm5;
-${HAIR_TOUSLE_PARS}`,
+${NOISE_GLSL}`,
       `vHm0 = crTexel(crBase);
 vHm1 = crTexel(crBase + 1);
 vHm2 = crTexel(crBase + 2);
@@ -552,6 +574,7 @@ vHm5 = crTexel(crBase + 5);`,
       `#include <begin_vertex>
 vZone = zone;
 vRestPos = position;
+vOccl = occl;
 transformed += normal * (vHm3.w * girth);
 ${HAIR_TOUSLE_GLSL}`,
     );
@@ -565,6 +588,7 @@ uniform vec3 uHmMouth[${n}];
 uniform float uMicro;
 varying vec4 vZone;
 varying vec3 vRestPos;
+varying float vOccl;
 ${SKIN_TOE_DEFINE}
 flat varying vec4 vHm0;
 flat varying vec4 vHm1;
@@ -594,10 +618,11 @@ ${humanColorGLSL({
 })}`,
       )
       .replace('#include <roughnessmap_fragment>', ROUGHNESS_GLSL)
+      .replace('#include <aomap_fragment>', OCCLUSION_GLSL)
       .replace('#include <lights_physical_fragment>', SPECULAR_GLSL)
       .replace('#include <opaque_fragment>', `${SKIN_CLOTH_LIGHT_GLSL}\noutgoingLight = crHighlightOf(outgoingLight, vHm5.w);\n#include <opaque_fragment>`);
     applyLampField(shader);
   };
-  mat.customProgramCacheKey = () => `creature-human-batch-v5-${n}`;
+  mat.customProgramCacheKey = () => `creature-human-batch-v6-${n}`;
   return { material: mat, depth: crowdDepthMaterial(u), uniforms: [u] };
 }

@@ -57,7 +57,11 @@ describe('animal surface shading', () => {
       expect(fs).toContain('diffuseColor.rgb *= 1.0 + uMottle * (crMo - 0.5) * 2.0 * amp;');
       // clump albedo: locks about 2x longer than wide; the relief keeps long locks (hair streaks) on darker coats only
       expect(fs).toContain('cr_clump(vRestPos / (crGrain * CR_CLUMP), crFlow, 0.55) - 0.5) * amp');
-      if (detail > 0) expect(fs).toContain('float sq = mix(0.55, 0.8, (crPale - 0.25) / 0.75);');
+      if (detail > 0) {
+        // pale coats: short locks, and shorter, fainter strands (no brushed-wood grain on a polar bear)
+        expect(fs).toContain('vec2 sq = vec2(mix(0.55, 0.8, (crPale - 0.25) / 0.75), mix(0.85, 0.62, pale));');
+        expect(fs).toContain('wS *= 1.0 - 0.35 * pale;');
+      }
     }
   });
 
@@ -96,11 +100,12 @@ describe('animal surface shading', () => {
     const vertex = (look: LookSpec, detail: 0 | 1) => {
       const src = THREE.ShaderLib.standard;
       const shader = { vertexShader: src.vertexShader, fragmentShader: src.fragmentShader, uniforms: THREE.UniformsUtils.clone(src.uniforms), defines: {} };
-      createAnimalMaterial({ look, detail }).onBeforeCompile(shader as unknown as THREE.WebGLProgramParametersWithUniforms, {} as THREE.WebGLRenderer);
+      createAnimalMaterial({ look, detail, furShell: true }).onBeforeCompile(shader as unknown as THREE.WebGLProgramParametersWithUniforms, {} as THREE.WebGLRenderer);
       return shader.vertexShader;
     };
     for (const detail of [0, 1] as const) {
-      const fs = fragment(batchedAnimalMaterials({ skin: 'fur' }, detail).material);
+      const fs = fragment(batchedAnimalMaterials({ skin: 'fur' }, detail, true).material);
+      expect(fs).toContain('#define CR_SHELL 1');
       const cut = fs.indexOf('if (crShell && lock < 1.02 - 0.55 * crNear * smoothstep(1.6, 2.1, vPattern.w)) discard;');
       expect(cut).toBeGreaterThan(fs.indexOf('vec3 crFlow ='));
       expect(fs).toContain('float crNear = 1.0 - smoothstep(0.22, 0.4, crPix / lockW);');
@@ -113,11 +118,28 @@ describe('animal surface shading', () => {
       expect(lift).toBeLessThan(vs.indexOf('#include <skinning_vertex>'));
     }
     // fur only: skins compile the shell out
-    const fs = fragment(createAnimalMaterial({ look: { skin: 'wrinkled' }, detail: 1 }));
+    const fs = fragment(createAnimalMaterial({ look: { skin: 'wrinkled' }, detail: 1, furShell: true }));
+    expect(fs).toContain('#define CR_SHELL 0');
     const cut = fs.indexOf('if (crShell && lock');
-    const block = fs.lastIndexOf('#if ', cut);
+    const block = fs.lastIndexOf('#if CR_SKIN', cut);
     expect(fs.slice(block, block + 16)).toBe('#if CR_SKIN == 0');
-    expect(fs.indexOf('#endif', block)).toBeGreaterThan(cut);
+    expect(fs.indexOf('#endif', fs.indexOf('#endif', cut) + 1)).toBeGreaterThan(cut);
+  });
+
+  it('compiles the shell (and its discard) only for meshes that carry one', () => {
+    // a discard can cost early depth testing on tile-based phone GPUs
+    const plain = fragment(batchedAnimalMaterials({ skin: 'fur' }, 1).material);
+    expect(plain).toContain('#define CR_SHELL 0');
+    const cut = plain.indexOf('if (crShell && lock');
+    expect(plain.slice(plain.lastIndexOf('#if ', cut), cut)).toMatch(/^#if CR_SHELL == 1/);
+    expect(plain).toContain('const bool crShell = false;');
+    // the factory passes the flag from the built mesh to both the standalone and the batched materials
+    const mane = assetFromDesign('lion-shell-flag', SPECIES_MODELS.lion.design({ def: SPECIES_BY_ID.lion, sex: 'M', detail: 0 }), 0);
+    const lioness = assetFromDesign('lioness-shell-flag', SPECIES_MODELS.lion.design({ def: SPECIES_BY_ID.lion, sex: 'F', detail: 0 }), 0);
+    expect(mane.furShell).toBe(true);
+    expect(lioness.furShell).toBe(false);
+    expect(fragment(mane.material)).toContain('#define CR_SHELL 1');
+    expect(fragment(lioness.highlightMaterial)).toContain('#define CR_SHELL 0');
   });
 });
 

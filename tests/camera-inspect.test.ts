@@ -108,13 +108,13 @@ describe('CameraController inspect zoom', () => {
 
   it('frames tall subjects from farther, and small ones at followMinDistance', () => {
     const framing = (id: string) => followFraming(SPECIES_BY_ID[id].height, SPECIES_BY_ID[id].length);
-    expect(framing('giraffe').minDistance).toBeCloseTo(8.5, 1);
+    expect(framing('giraffe').minDistance).toBeCloseTo(11, 1);
     expect(framing('elephant').minDistance).toBeGreaterThan(6.2);
-    expect(framing('elephant').minDistance).toBeLessThan(7);
+    expect(framing('elephant').minDistance).toBeLessThan(7.2);
     for (const id of ['zebra', 'lion', 'penguin', 'gazelle', 'gorilla', 'hippo', 'rhino', 'camel', 'flamingo'])
       expect(framing(id).minDistance).toBeLessThanOrEqual(DEFAULT_LIMITS.followMinDistance);
-    // a giraffe is looked at higher up its body than a zebra
-    expect(framing('giraffe').lookHeight / SPECIES_BY_ID.giraffe.height).toBeGreaterThan(0.65);
+    // a giraffe is looked at just under its middle (it stands clear of the dock), a zebra at its chest
+    expect(framing('giraffe').lookHeight / SPECIES_BY_ID.giraffe.height).toBeCloseTo(0.47, 2);
     expect(framing('zebra').lookHeight / SPECIES_BY_ID.zebra.height).toBeCloseTo(0.55, 2);
   });
 
@@ -131,9 +131,11 @@ describe('CameraController inspect zoom', () => {
     expect(c.distance).toBeCloseTo(f.minDistance, 5);
     const head = new THREE.Vector3(70, ground + g.height, 70).project(cam).y;
     const feet = new THREE.Vector3(70, ground, 70).project(cam).y;
-    expect(head).toBeLessThan(0.75);
-    expect(feet).toBeGreaterThan(-1);
-    expect(head).toBeGreaterThan(0.3); // the head is not left far below the top of the frame
+    // on a 20:9 phone the top bar covers the top ~13 % of the height and the dock the bottom ~18 %:
+    // the head stays below the one, the hooves above the other
+    expect(head).toBeLessThan(0.7);
+    expect(feet).toBeGreaterThan(-0.6);
+    expect(head).toBeGreaterThan(0.55); // the head is not left far below the top of the frame
   });
 
   it('eases out to a taller subject’s closest zoom when switching from a person, without a jump', () => {
@@ -149,7 +151,7 @@ describe('CameraController inspect zoom', () => {
     for (let i = 0; i < 90; i++) {
       c.update(1 / 30);
       expect(c.distance).toBeGreaterThanOrEqual(prev - 1e-9);
-      expect(c.distance - prev).toBeLessThan(0.6);
+      expect(c.distance / prev).toBeLessThan(1.15); // no snap: under 15 % a frame, easing out
       prev = c.distance;
     }
     expect(c.distance).toBeCloseTo(f.minDistance, 3);

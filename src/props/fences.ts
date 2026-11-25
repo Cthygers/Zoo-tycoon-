@@ -8,6 +8,11 @@
 // from one shadow-only batch per shadow side (position-only copies on
 // SHADOW_ONLY_LAYER), like the props: one shadow draw instead of one per material.
 // Three's depth pass never ran the ground extension, so the shadows are unchanged.
+// While the camera follows a subject at its closest zooms, the pieces on the
+// camera → subject line dissolve (lod/fade.ts applyOccluderCut): every part of
+// a panel shares the edge's centre as its origin, so a panel goes whole with
+// its rails, and a post goes only once every panel it joins has gone. The
+// shadow-only batches take the same decision, so a removed piece's shadow goes too.
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -496,10 +501,25 @@ export function createFenceSegment(fenceId: number, detail: FenceDetail = 2): TH
 // Instanced batches with a per-instance ground extension
 
 /** Extension (m) of a vertex at local y = 0, interpolated along the 2 m segment. */
+// a post's fenced edges (bits: −x, +x, −z, +z; 0 for a panel), for the
+// follow-mode occluder cut (lod/fade.ts: a post goes only with every panel it joins)
+const POST_MASK = /* glsl */ `
+float propPostMask() {
+#if defined( USE_BATCHING ) && defined( USE_BATCHING_COLOR )
+  return getBatchingColor( getIndirectIndex( gl_DrawID ) ).z;
+#elif defined( USE_INSTANCING )
+  return aGround.z;
+#else
+  return 0.0;
+#endif
+}
+`;
+
 const GROUND_EXT = /* glsl */ `
+${POST_MASK}
 float fenceGroundExt() {
 #if defined( USE_BATCHING ) && defined( USE_BATCHING_COLOR )
-  // batched back-end: (extA, extB) ride in the per-instance colour texture
+  // batched back-end: (extA, extB, post mask) ride in the per-instance colour texture
   vec4 fgC = getBatchingColor( getIndirectIndex( gl_DrawID ) );
   return position.y < 0.002 ? mix( fgC.x, fgC.y, clamp( position.x * ${(1 / TILE).toFixed(6)} + 0.5, 0.0, 1.0 ) ) : 0.0;
 #elif defined( USE_INSTANCING )
@@ -513,6 +533,23 @@ float fenceGroundExt() {
 /** color_vertex without the per-instance colour multiply (fences use that slot for the ground extension). */
 const FENCE_COLOR_VERTEX = THREE.ShaderChunk.color_vertex.replace('vColor *= getBatchingColor( getIndirectIndex( gl_DrawID ) );', '');
 
+let casterDepth: THREE.MeshDepthMaterial | null = null;
+
+/** Depth material of the fence shadow-only batches: the follow-mode occluder cut, posts included. */
+function fenceCasterDepth(): THREE.MeshDepthMaterial {
+  if (!casterDepth) {
+    const d = new THREE.MeshDepthMaterial();
+    d.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader.replace('#include <batching_pars_vertex>', `#include <batching_pars_vertex>\n${POST_MASK}`);
+    };
+    d.customProgramCacheKey = () => 'fence-caster-depth';
+    d.userData.occluderPosts = true;
+    applyOccluderCut(d);
+    casterDepth = d;
+  }
+  return casterDepth;
+}
+
 function groundPatched(src: THREE.Material, uv: FencePart['groundUv']): THREE.Material {
   const m = src.clone();
   const srcHook = src.onBeforeCompile;
@@ -520,7 +557,7 @@ function groundPatched(src: THREE.Material, uv: FencePart['groundUv']): THREE.Ma
   const scale = uv ? (1 / uv.tile).toFixed(6) : '0.0';
   m.onBeforeCompile = (shader, renderer) => {
     let vs = shader.vertexShader
-      .replace('#include <batching_pars_vertex>', `#include <batching_pars_vertex>\n#ifdef USE_INSTANCING\nattribute vec2 aGround;\n#endif\n${GROUND_EXT}`)
+      .replace('#include <batching_pars_vertex>', `#include <batching_pars_vertex>\n#ifdef USE_INSTANCING\nattribute vec3 aGround;\n#endif\n${GROUND_EXT}`)
       .replace('#include <color_vertex>', FENCE_COLOR_VERTEX)
       .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed.y -= fenceGroundExt();');
     if (axis) {
@@ -551,13 +588,13 @@ class FenceBatch {
     private readonly shadows: boolean,
   ) {
     this.geometry = base;
-    this.ground = new THREE.InstancedBufferAttribute(new Float32Array(2), 2);
+    this.ground = new THREE.InstancedBufferAttribute(new Float32Array(3), 3);
     this.mesh = this.create(16);
   }
 
   private create(cap: number): THREE.InstancedMesh {
     const geo = this.base.clone();
-    const ground = new THREE.InstancedBufferAttribute(new Float32Array(cap * 2), 2);
+    const ground = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
     ground.setUsage(THREE.DynamicDrawUsage);
     geo.setAttribute('aGround', ground);
     const mesh = new THREE.InstancedMesh(geo, this.material, cap);
@@ -588,10 +625,10 @@ class FenceBatch {
     this.count = 0;
   }
 
-  push(m: THREE.Matrix4, extA: number, extB: number): void {
+  push(m: THREE.Matrix4, extA: number, extB: number, postMask = 0): void {
     const i = this.count++;
     this.mesh.setMatrixAt(i, m);
-    this.ground.setXY(i, extA, extB);
+    this.ground.setXYZ(i, extA, extB, postMask);
   }
 
   end(): void {
@@ -624,6 +661,21 @@ interface StyleBatches {
   panel: FenceBatch[];
 }
 
+/**
+ * Fenced edges meeting at corner (cx, cz), as bits: 1 = the edge toward −x,
+ * 2 = +x, 4 = −z, 8 = +z. The follow-mode occluder cut removes a post only
+ * once every panel it joins has gone (lod/fade.ts), so no rail ever ends in
+ * mid-air.
+ */
+export function postMask(w: World, cx: number, cz: number): number {
+  let m = 0;
+  if (cx > 0 && w.hFence[w.hIdx(cx - 1, cz)]) m |= 1;
+  if (cx < MAP_W && w.hFence[w.hIdx(cx, cz)]) m |= 2;
+  if (cz > 0 && w.vFence[w.vIdx(cx, cz - 1)]) m |= 4;
+  if (cz < MAP_H && w.vFence[w.vIdx(cx, cz)]) m |= 8;
+  return m;
+}
+
 /** Renders all fences of a World; rebuilds lazily after fence / terrain changes. */
 export class FenceRenderer {
   readonly group = new THREE.Group();
@@ -635,6 +687,7 @@ export class FenceRenderer {
   private shadowMulti = new Map<THREE.Side, MultiBatch>();
   /** Position-only copies of style geometries for the shadow-only batches. */
   private shadowGeos = new WeakMap<THREE.BufferGeometry, THREE.BufferGeometry>();
+  /** Shadow-only instances carry the same per-instance colour (ground extension, post mask) for their depth material. */
   private readonly shadowInst: InstParams = { cull: Infinity, shadow: 0, lodOn: false, shadowOn: true, tint: null };
   private readonly ref: SlotRef = { id: -1, slot: { index: -1 } };
   private readonly ext = new THREE.Color();
@@ -753,6 +806,8 @@ export class FenceRenderer {
       b = new MultiBatch(casters, this.quality.shadows, this.group, true);
       b.mesh.name = 'fence-shadow-casters';
       b.mesh.layers.set(SHADOW_ONLY_LAYER);
+      // a piece the follow-mode occluder cut removes takes its shadow along
+      b.mesh.customDepthMaterial = fenceCasterDepth();
       this.shadowMulti.set(side, b);
       this.multiList.push(b);
     }
@@ -773,11 +828,11 @@ export class FenceRenderer {
     return s;
   }
 
-  private pushMulti(st: FenceStyle, parts: FencePart[], m: THREE.Matrix4, extA: number, extB: number, cull = Infinity, minDist = 0): void {
+  private pushMulti(st: FenceStyle, parts: FencePart[], m: THREE.Matrix4, extA: number, extB: number, cull = Infinity, minDist = 0, postMask = 0): void {
     const p = this.inst;
     const sp = this.shadowInst;
-    this.ext.setRGB(extA, extB, 0);
-    p.tint = this.ext;
+    this.ext.setRGB(extA, extB, postMask);
+    p.tint = sp.tint = this.ext;
     p.cull = sp.cull = cull;
     p.minDist = sp.minDist = minDist;
     p.band = sp.band = cull !== Infinity || minDist > 0;
@@ -807,6 +862,7 @@ export class FenceRenderer {
       // in rails / mesh reads as noise; only whole pieces go, right in front
       // of the camera while it follows a subject (lod/fade.ts)
       m = groundPatched(p.material, p.groundUv);
+      m.userData.occluderPosts = true;
       applyOccluderCut(m);
       this.patched.set(key, m);
     }
@@ -1010,13 +1066,14 @@ export class FenceRenderer {
       rot.makeRotationY((((cx * 7 + cz * 13) & 3) * Math.PI) / 2);
       rot.setPosition(cx * TILE, P.b, cz * TILE);
       const e = P.b - P.g + SINK;
+      const mask = postMask(w, cx, cz);
       if (st) {
         const far = this.farStyle(id);
         if (far) {
-          this.pushMulti(st, st.posts, rot, e, e, this.lodDist);
-          this.pushMulti(far, far.posts, rot, e, e, Infinity, this.lodDist);
-        } else this.pushMulti(st, st.posts, rot, e, e);
-      } else for (const x of sb!.posts) x.push(rot, e, e);
+          this.pushMulti(st, st.posts, rot, e, e, this.lodDist, 0, mask);
+          this.pushMulti(far, far.posts, rot, e, e, Infinity, this.lodDist, mask);
+        } else this.pushMulti(st, st.posts, rot, e, e, Infinity, 0, mask);
+      } else for (const x of sb!.posts) x.push(rot, e, e, mask);
     }
 
     if (!multi)
@@ -1062,4 +1119,6 @@ export function disposeFenceStyles(): void {
   styleCache.clear();
   coping?.dispose();
   coping = null;
+  casterDepth?.dispose();
+  casterDepth = null;
 }

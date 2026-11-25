@@ -45,6 +45,8 @@ export interface RigAsset {
   lod?: LodChain;
   /** Quality detail the asset was built for. */
   detail?: 0 | 1 | 2;
+  /** Level 0 carries a fur shell (its materials compile the shell's lift and discard). */
+  furShell?: boolean;
 }
 
 /**
@@ -212,6 +214,9 @@ export function nextWetness(wet: number, swimming: boolean, dt: number): number 
 
 const BABY_BONES_FROM = 0.15;
 const BABY_BONES_TO = 0.95;
+/** Hips + chest height (fraction of standing) at which an animal counts as fully lying / not lying at all. */
+const LIE_FULL = 0.45;
+const LIE_NONE = 0.75;
 
 type MutableCtx = { -readonly [K in keyof AnimCtx]: AnimCtx[K] };
 
@@ -238,6 +243,8 @@ export class RiggedModel implements CreatureModel {
   protected growth = 1;
   /** 1 right after a swim, drying to 0 (look texel z of animals). */
   private wetness = 0;
+  /** 0 standing … 1 lying, from how low hips and chest sit (look texel w; species with look.lieShade). */
+  private lying = 0;
   private lastYaw = NaN;
   protected highlighted = false;
   protected readonly host: CrowdHost | null;
@@ -507,8 +514,10 @@ export class RiggedModel implements CreatureModel {
     if (this.slots.length === 1) this.out.copy(this.slots[0].pose);
     else blendPoses(this.out, _poses, _weights, this.slots.length);
     d.post?.(ctx, this.state, this.out);
-    if (this.batch) this.writeSkin();
-    else {
+    if (this.batch) {
+      this.writeSkin();
+      if (this.asset.design.look.lieShade) this.updateLying();
+    } else {
       this.applyStandalone();
       if (this.needsJoints) skinMatrices(this.asset.rig, this.out, this.boneScale, _scratch(this.asset.rig.count), 0);
     }
@@ -532,7 +541,24 @@ export class RiggedModel implements CreatureModel {
   /** Hook after skinMatrices into the batch (FK.* holds the joints). */
   protected afterSkin(): void {}
 
-  /** Write the per-instance look block (animals: highlight, growth, wetness). */
+  /**
+   * Lying amount from the pose just skinned (FK holds it): 1 once hips and
+   * chest sit below LIE_FULL of their standing height, 0 above LIE_NONE, so it
+   * follows the lie-down / get-up sequence rather than the action crossfade.
+   */
+  private updateLying(): void {
+    const roles = this.asset.roles;
+    const rest = this.asset.rig.rest;
+    const hips = roles.root;
+    const chest = roles.chest >= 0 ? roles.chest : hips;
+    const ratio = (FK.wp[hips * 3 + 1] + FK.wp[chest * 3 + 1]) / Math.max(1e-3, rest[hips * 3 + 1] + rest[chest * 3 + 1]);
+    const lying = 1 - smooth(LIE_FULL, LIE_NONE, ratio);
+    if (Math.abs(lying - this.lying) < 0.02 && (lying === 0) === (this.lying === 0)) return;
+    this.lying = lying;
+    this.writeLook();
+  }
+
+  /** Write the per-instance look block (animals: highlight, growth, wetness, lying). */
   writeLook(): void {
     const b = this.batch;
     if (!b) return;
@@ -540,6 +566,7 @@ export class RiggedModel implements CreatureModel {
     b.data[o] = this.highlighted ? 0.25 : 0;
     b.data[o + 1] = this.growth;
     b.data[o + 2] = this.wetness;
+    b.data[o + 3] = this.lying;
   }
 
   /** Per-frame batched work after the crowd placed the instance (highlight pulse …). */

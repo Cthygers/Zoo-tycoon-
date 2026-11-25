@@ -518,8 +518,10 @@ function design(ctx: DesignContext): CreatureDesign {
     },
     coat: hippoCoat(eye),
     // dry and matte; wet (darker, glossy) only after a swim, drying from the top down
-    // bump 0.3: the neck and leg folds and the fine creases shade in enough to read at mid range
-    look: { skin: 'wrinkled', pattern: 'stripes', roughness: 0.9, sheen: 0.12, grain: 0.012, bump: 0.3, mottle: 0.1 },
+    // bump 0.3: the neck and leg folds and the fine creases shade in enough to read at mid range.
+    // The low tier has no relief normals, only the creases' and folds' albedo
+    // shade: deeper there, with blotchier skin, so its hippo is not smooth clay.
+    look: { skin: 'wrinkled', pattern: 'stripes', roughness: 0.9, sheen: 0.12, grain: 0.012, bump: ctx.detail === 0 ? 0.55 : 0.3, mottle: ctx.detail === 0 ? 0.16 : 0.1 },
     eyes: [{ bone: 'head', pos: eye, radius: 0.026, color: 0x2a1609 }],
     anim: driver(makeDriver(ctx.def.height, ctx.def.walkSpeed, ctx.def.runSpeed)),
     babyScale: 0.25,

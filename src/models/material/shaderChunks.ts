@@ -1,5 +1,11 @@
 // GLSL snippets shared by the creature materials (WebGL2 / GLSL ES 3.0 via three).
 
+/**
+ * Hash, value noise and cellular noise. Valid in BOTH shader stages, so keep
+ * derivative functions (dFdx / dFdy / fwidth) out of it: a vertex shader that
+ * includes it would fail to compile (tests/creature-shaders.test.ts checks
+ * every creature program's vertex stage).
+ */
 export const NOISE_GLSL = /* glsl */ `
 float cr_hash13(vec3 p3) {
   p3 = fract(p3 * 0.1031);
@@ -31,18 +37,6 @@ float cr_cells(vec3 p) {
     if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) { d2 = d; }
   }
   return sqrt(d2) - sqrt(d1);
-}
-// Bump-mapped normal from a scalar height using screen-space derivatives.
-vec3 cr_bump(vec3 surfPos, vec3 n, float h) {
-  vec3 sx = dFdx(surfPos);
-  vec3 sy = dFdy(surfPos);
-  vec3 r1 = cross(sy, n);
-  vec3 r2 = cross(n, sx);
-  float det = dot(sx, r1);
-  float dhx = dFdx(h);
-  float dhy = dFdy(h);
-  vec3 grad = sign(det) * (dhx * r1 + dhy * r2);
-  return normalize(abs(det) * n - grad);
 }
 `;
 

@@ -4,7 +4,7 @@ import { PathType, Terrain } from '../src/core/types';
 import { World } from '../src/core/world';
 import * as THREE from 'three';
 import { buildPoolGrid, poolLight, surfaceBrightness, type WorldEmitter } from '../src/props/lights/nightlights';
-import { applyLampField, figureColourShare, lampFieldAt, lampFieldUniforms, lampReach, moonShoulder, moonToe, resetLampField, skinMoonToe, writeLampField } from '../src/props/lights/lampField';
+import { applyLampField, figureColourShare, lampFieldAt, lampFieldUniforms, lampMarkReach, lampReach, moonShoulder, moonToe, resetLampField, skinMoonToe, writeLampField } from '../src/props/lights/lampField';
 import { viewExposure } from '../src/render/grade';
 
 function lamp(x: number, z: number, y = 3.2): WorldEmitter {
@@ -105,7 +105,7 @@ describe('lamp light on creatures', () => {
     expect(lampFieldUniforms.uLampMark.value).toBe(0);
   });
 
-  it('patches a standard material shader with one field fetch per vertex and keeps every hook for later patches', () => {
+  it('patches a standard material shader with two field fetches per vertex (light, colour mark) and keeps every hook for later patches', () => {
     const shader = {
       uniforms: {},
       vertexShader: THREE.ShaderLib.physical.vertexShader,
@@ -114,7 +114,7 @@ describe('lamp light on creatures', () => {
     applyLampField(shader);
     expect(shader.uniforms.uLampField).toBe(lampFieldUniforms.uLampField);
     expect(shader.uniforms.uLampLight).toBe(lampFieldUniforms.uLampLight);
-    expect(shader.vertexShader.match(/textureLod\( uLampField|textureLod\(uLampField/g)?.length).toBe(1);
+    expect(shader.vertexShader.match(/textureLod\( uLampField|textureLod\(uLampField/g)?.length).toBe(2);
     expect(shader.fragmentShader).toContain('reflectedLight.indirectDiffuse += uLampLight');
     for (const hook of ['#include <common>', '#include <project_vertex>']) expect(shader.vertexShader).toContain(hook);
     for (const hook of ['#include <common>', '#include <aomap_fragment>', '#include <tonemapping_fragment>', '#include <opaque_fragment>'])
@@ -144,7 +144,7 @@ describe('lamp light on creatures', () => {
     } as unknown as THREE.WebGLProgramParametersWithUniforms;
     applyLampField(shader);
     const fs = shader.fragmentShader;
-    expect(fs).toContain('pow(smoothstep(0.05, 0.80, vLampLight) * uLampMark, 0.70)');
+    expect(fs).toContain('pow(smoothstep(0.05, 0.80, vLampMark) * uLampMark, 0.70)');
     expect(fs).toContain('float lfMark = 0.40 * (0.5 - sin(asin(');
     expect(fs).toContain('whLampLit = lfMark;');
     // HDR target (post-FX tier): the same gradual mark through the alpha, and
@@ -222,6 +222,25 @@ describe('lamp light on creatures', () => {
     expect(figureColourShare(field(at), 1)).toBeLessThan(0.15);
     expect(figureColourShare(toward, 1)).toBeGreaterThan(0.3);
     expect(field(at + lampReach(1.3))).toBeLessThanOrEqual(field(at));
+  });
+
+  it('colours the side of a fringe figure facing a pool from further out than it lights it', () => {
+    const shader = {
+      uniforms: {},
+      vertexShader: THREE.ShaderLib.physical.vertexShader,
+      fragmentShader: THREE.ShaderLib.physical.fragmentShader,
+    } as unknown as THREE.WebGLProgramParametersWithUniforms;
+    applyLampField(shader);
+    // the mark takes the larger of its own wider reading and the light's
+    expect(shader.vertexShader).toContain('vec2 lfMarkAt = lfPos.xz + lfN.xz * (0.50 + 1.10 * max(transformed.y, 0.0));');
+    expect(shader.vertexShader).toContain('vLampMark = max(vLampLight,');
+    expect(shader.fragmentShader).toContain('vLampMark) * uLampMark');
+    expect(lampMarkReach(1.3)).toBeGreaterThan(lampReach(1.3) + 0.8);
+    // a guest 1.3 m outside the pool's faint edge: lit by little, but its pool side keeps colour
+    const field = (x: number) => Math.max(0, Math.min(1, 0.9 - 0.3 * x));
+    const at = 3.6;
+    expect(field(at - lampReach(1.3))).toBeLessThan(0.1);
+    expect(figureColourShare(field(at - lampMarkReach(1.3)), 1)).toBeGreaterThan(0.25);
   });
 
   it('keeps a dark face under the moon about a sixth of a white shirt, with pale skin untouched and every curve monotonic', () => {

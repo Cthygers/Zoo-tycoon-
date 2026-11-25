@@ -141,6 +141,8 @@ type Side = 'L' | 'R';
 
 /** The mesh is modelled in an A-pose with the arms this far out (rad). */
 export const ARM_REST_OUT = 0.4;
+/** Abduction (rad) of free arms hanging or swinging at the sides: the hands just clear the hips, beside the thighs rather than in them. */
+const ARM_HANG_OUT = 0.03;
 
 /** Arm pose in "anatomical" terms: raise forward (rad), abduct (rad, 0 = hanging), elbow flex (rad). */
 function arm(ctx: AnimCtx, pose: Pose, side: Side, forward: number, out: number, elbow: number, twist = 0): void {
@@ -161,14 +163,15 @@ type ArmPose = readonly [number, number, number, number];
  * arms folded across the belly, hands clasped behind the back, a hand on the
  * hip. A third of them just let their arms hang. Fitted to elbow / wrist
  * targets on the adult body (folded: wrists crossing ≈ 18 cm in front of the
- * lower chest; clasped: wrists together ≈ 15 cm behind the waist; akimbo:
- * wrist at the side of the waist, elbow out 36 cm).
+ * lower chest, the forearms resting on a heavy build's belly rather than in
+ * it; clasped: wrists together ≈ 15 cm behind the waist; akimbo: wrist at the
+ * side of the waist, elbow out 36 cm).
  */
 const REST_ARMS: readonly (readonly [ArmPose | null, ArmPose | null])[] = [
   [null, null],
   [
-    [-0.05, 0.21, 1.29, -1.61],
-    [0.0, 0.26, 1.53, -1.6],
+    [0.02, 0.21, 1.29, -1.61],
+    [0.07, 0.26, 1.53, -1.6],
   ],
   [
     [-0.72, 0.5, 0.82, -1.76],
@@ -207,12 +210,12 @@ function arms(ctx: AnimCtx, st: HumanState, pose: Pose): void {
   const still = smooth(0.15, 0, st.amp);
   // each arm is furthest forward as the opposite heel strikes
   const fwd = Math.cos(ph);
-  armToward(ctx, pose, 'L', -swing * fwd + sway, -0.07, bend + 0.25 * st.amp * Math.max(0, -fwd), restL, still);
+  armToward(ctx, pose, 'L', -swing * fwd + sway, ARM_HANG_OUT, bend + 0.25 * st.amp * Math.max(0, -fwd), restL, still);
   shoulder(ctx, pose, 'L', -fwd * st.amp);
   if (carry) arm(ctx, pose, 'R', 0.18 + 0.05 * fwd * st.amp, -0.12, 1.35, 0.25);
   else if (hold === 'balloon') arm(ctx, pose, 'R', 0.35, 0.05, 0.6);
   else {
-    armToward(ctx, pose, 'R', swing * fwd * (hold === 'gift' ? 0.4 : 1) - sway, -0.07, bend + 0.25 * st.amp * Math.max(0, fwd), restR, still);
+    armToward(ctx, pose, 'R', swing * fwd * (hold === 'gift' ? 0.4 : 1) - sway, ARM_HANG_OUT, bend + 0.25 * st.amp * Math.max(0, fwd), restR, still);
     shoulder(ctx, pose, 'R', fwd * st.amp);
   }
 }

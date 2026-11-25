@@ -1378,6 +1378,12 @@ export class MockViews implements IEntityViews {
     return v ? v.model.object.position.clone() : null;
   }
 
+  positionInto(sel: SelectionRef, out: THREE.Vector3): boolean {
+    const v = this.models.get(`${sel.kind}:${sel.id}`);
+    if (v) out.copy(v.model.object.position);
+    return !!v;
+  }
+
   dispose(): void {
     this.ctx.scene.remove(this.root, this.ring);
   }

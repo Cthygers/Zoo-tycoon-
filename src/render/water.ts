@@ -106,15 +106,18 @@ export interface Swimmer {
 }
 
 /**
- * Ripples around swimming animals: rings spreading from the body, crowded
- * ahead of a moving swimmer and drawn out behind it (a small wake), fading
- * within `radius` m and with distance like the fine ripples. Only the `max`
- * swimmers nearest to the view's focus get them. Slopes, not displacement:
- * they tilt the surface normal, so the sky sheen and glitter break around
- * the animal.
+ * Ripples around swimming animals, fading within `radius` m and with distance
+ * like the fine ripples; only the `max` swimmers nearest to the view's focus
+ * get them. A moving swimmer draws a narrow V behind it, its arms at the
+ * Kelvin angle (`armTan` = tan 19.5°) with short oblique wavelets along them,
+ * and a little broken white water at its body (`foam`); an idle one, faint
+ * rings spreading from it (`ringSlope`, a tenth of the V's `slope`). Slopes,
+ * not displacement or paint: they tilt the surface normal, so only the sky
+ * sheen and glitter break around the animal, and they raise the reflectance
+ * where the water is rippled (`rough`) and where facets face the eye (`sheen`).
  */
-export const WAKES = { max: 6, radius: 1.6, wavelength: 0.3, ringSpeed: 0.18, slope: 0.035, slopeMoving: 0.07, whitewater: 0.4 } as const;
-/** Ring wavenumber (rad/m) of the swimmers' ripples. */
+export const WAKES = { max: 6, radius: 2.0, wavelength: 0.3, ringSpeed: 0.18, ringSlope: 0.015, slope: 0.18, armTan: 0.354, sheen: 0.5, rough: 0.05, foam: 0.3 } as const;
+/** Ripple wavenumber (rad/m) of the swimmers' rings and wake wavelets. */
 const WAKE_K = (2 * Math.PI) / WAKES.wavelength;
 /** Position of an unused wake slot: far outside every pond. */
 const NO_WAKE = -1e5;
@@ -183,15 +186,13 @@ export class WaterSurface {
           varying vec3 vWPos;
           vec3 wGlintN;
           uniform vec4 uWakes[${WAKES.max}];
-          // ripples around swimmers (WAKES): rings travelling outward from the
-          // body, squeezed ahead of a moving swimmer and stretched behind it,
-          // stronger behind and while moving. xy: surface slope; z: a little
-          // broken white water on the crests right behind a moving swimmer
-          // (from above, where the water mirrors little, slopes alone hardly show).
-          // jitter (0..1 noise) bends the rings so they are never perfect circles
-          vec3 wWake;
-          vec3 wakeAt(vec2 p, float jitter) {
-            vec3 s = vec3(0.0);
+          // ripples around swimmers (WAKES). xy: surface slope; z: broken white
+          // water at a moving swimmer's body; w: how disturbed the water is
+          // (the ripples' envelope). jitter (0..1 noise) bends the crests so
+          // they are never clean circles or straight lines
+          vec4 wWake;
+          vec4 wakeAt(vec2 p, float jitter) {
+            vec4 s = vec4(0.0);
             for (int i = 0; i < ${WAKES.max}; i++) {
               vec2 d = p - uWakes[i].xy;
               float r = length(d);
@@ -199,16 +200,31 @@ export class WaterSurface {
               vec2 v = uWakes[i].zw;
               float sp = length(v);
               vec2 dir = sp > 0.01 ? v / sp : vec2(0.0, 1.0);
-              float ahead = dot(d, dir);
-              float side = dot(d, vec2(-dir.y, dir.x));
-              float move = min(sp / 0.6, 1.0);
-              float re = length(vec2(ahead * (ahead > 0.0 ? 1.0 + 1.5 * move : 1.0 / (1.0 + move)), side));
-              float env = exp(-re * 1.8) * smoothstep(0.15, 0.4, r) * (1.0 - smoothstep(0.6, 1.0, r / ${WAKES.radius.toFixed(2)}));
-              env *= mix(1.0, 1.0 - 0.6 * smoothstep(-0.6, 0.4, ahead), move);
-              float phase = (re - uTime * ${WAKES.ringSpeed.toFixed(2)}) * ${WAKE_K.toFixed(2)} + (jitter - 0.5) * 3.0;
-              float amp = mix(${WAKES.slope.toFixed(3)}, ${WAKES.slopeMoving.toFixed(3)}, move);
-              s.xy += d / r * amp * env * cos(phase);
-              s.z += ${WAKES.whitewater.toFixed(2)} * move * env * (1.0 - smoothstep(-0.4, 0.2, ahead)) * pow(max(sin(phase), 0.0), 4.0);
+              vec2 across = vec2(-dir.y, dir.x);
+              float behind = -dot(d, dir);
+              float side = dot(d, across);
+              float move = smoothstep(0.05, 0.45, sp);
+              float fade = 1.0 - smoothstep(0.6, 1.0, r / ${WAKES.radius.toFixed(2)});
+              // idle: faint rings travelling outward from the body
+              float ring = exp(-r * 1.8) * smoothstep(0.15, 0.4, r) * fade * (1.0 - move);
+              float ringPhase = (r - uTime * ${WAKES.ringSpeed.toFixed(2)}) * ${WAKE_K.toFixed(2)} + (jitter - 0.5) * 3.0;
+              s.xy += d / r * ${WAKES.ringSlope.toFixed(3)} * ring * cos(ringPhase);
+              s.w += ${(WAKES.ringSlope / WAKES.slope).toFixed(3)} * ring;
+              if (move > 0.0 && behind > 0.0) {
+                // moving: the two arms of a V behind it, widening and dying out behind,
+                // their wavelets crossing them obliquely (diverging waves)
+                float off = abs(side) - ${WAKES.armTan.toFixed(3)} * behind;
+                float w = 0.06 + 0.1 * behind;
+                float arm = exp(-off * off / (w * w)) * smoothstep(0.0, 0.3, behind) * exp(-behind * 1.1) * fade * move;
+                vec2 grad = normalize(sign(side) * across + ${WAKES.armTan.toFixed(3)} * dir);
+                float armPhase = (off + 0.5 * behind) * ${WAKE_K.toFixed(2)} + (jitter - 0.5) * 2.0;
+                s.xy += grad * ${WAKES.slope.toFixed(3)} * arm * cos(armPhase);
+                s.w += arm;
+              }
+              // white water churned up behind a moving body, in broken streaks
+              float churn = smoothstep(0.15, 0.25, r) * (1.0 - smoothstep(0.3, 0.45, r)) * smoothstep(0.0, 0.2, behind);
+              float streaks = smoothstep(0.2, 0.8, 0.5 + 0.5 * sin(side * 31.0 + jitter * 9.0) * sin(behind * 17.0 - uTime * 2.0));
+              s.z += ${WAKES.foam.toFixed(2)} * move * churn * streaks;
             }
             return s;
           }
@@ -242,7 +258,7 @@ export class WaterSurface {
           float foam = shore * smoothstep(0.5, 0.7, fn2 * 0.6 + fn * 0.4 + 0.1 * sin(uTime * 0.8 + vWPos.x * 0.7)) * 0.45;
           foam = max(foam, (1.0 - smoothstep(0.0, 0.01, wEdge)) * 0.25 * fn2);
           wWake = wakeAt(vWPos.xz, fn) * wNear;
-          foam = max(foam, min(wWake.z, 1.0) * fn2);
+          foam = max(foam, min(wWake.z, 1.0) * smoothstep(0.3, 0.7, fn2));
           diffuseColor.rgb = mix(mix(uShallow, uDeep, smoothstep(0.6, 2.4, pathLen)), vec3(0.42, 0.43, 0.41), foam);`,
         )
         .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = mix(mix(roughness, 0.22, wFar), 0.55, foam);')
@@ -286,6 +302,11 @@ export class WaterSurface {
             // over the first ~15 cm instead of ending in a bright hard line
             float wSheen = smoothstep(0.0, 0.15, wEdge);
             float F = max(Fs, mix(0.065, 0.1, wFar) + ${WATER_NIGHT.sheen.toFixed(3)} * uNight) * wSheen;
+            // seen from above, where the reflectance floor hides small tilts, a
+            // swimmer's ripples show through the reflectance: rippled water
+            // mirrors more of the bright low sky (rough), and facets tilted
+            // toward the eye more, those tilted away less (sheen)
+            F = clamp(F + (${WAKES.rough.toFixed(3)} * wWake.w - ${WAKES.sheen.toFixed(2)} * dot(wWake.xy, normalize(wV.xz + vec2(1e-4, 0.0)))) * wSheen, 0.0, 1.0);
             vec3 wSpec = (reflectedLight.directSpecular + reflectedLight.indirectSpecular * (F / Fs)) * wSheen;
             #if NUM_DIR_LIGHTS > 0
             {

@@ -9,8 +9,9 @@ import { CLOSE_HOUR, OPEN_HOUR, QUALITY_KEY, SAVE_KEY, SOUND_KEY } from './core/
 import type { QualityLevel } from './core/contracts';
 import type { AnimalState } from './core/types';
 import { EventBus } from './core/events';
-import { createCreatureFactory } from './models';
-import { createPropsLayer, paintAtlasesOffThread, setFollowCut, setNatureNightGround } from './props';
+import { Vector3 } from 'three';
+import { createCreatureFactory, setCreatureFollowCut } from './models';
+import { createPropsLayer, followBlockers, paintAtlasesOffThread, setFollowCut, setNatureNightGround } from './props';
 import { createRenderContext, detectQuality, nightGroundLevel } from './render';
 import { NEW_ZOO_START_MINUTE, createSimulation } from './sim';
 import { createGameUI, showLoadingScreen, showMainMenu } from './ui';
@@ -180,6 +181,8 @@ async function boot() {
   window.addEventListener('pointerdown', unlockAudio, { passive: true });
 
   const ui = createGameUI(uiRoot, { sim, ctx, props, creatures, views, audio, save, newGame });
+  // the follow camera swings around outcrops (kept, unlike smaller rocks) that hide its subject
+  ui.camera.blockerQuery = followBlockers;
 
   // Keep every layer on the same quality tier when the player changes it in Settings.
   let appliedQuality = ctx.quality.level;
@@ -266,6 +269,8 @@ async function boot() {
   // this frame's swimming animals, for their ripples on the water (one list, refilled per frame)
   const swimmers: AnimalState[] = [];
 
+  // the followed subject as drawn, refreshed each frame without allocating
+  const followPos = new Vector3();
   const frame = (now: number) => {
     rafId = 0;
     if (!running) return;
@@ -285,7 +290,10 @@ async function boot() {
       views.update(dt);
       // the follow cuts of crowns and near occluders (props/lod/fade.ts) aim at the followed subject as drawn
       const followed = ui.followed;
-      setFollowCut(followed ? views.positionOf(followed) : null, dt);
+      const followedAt = followed && views.positionInto(followed, followPos) ? followPos : null;
+      setFollowCut(followedAt, dt);
+      // other animals between the camera and a followed animal or person are left out of the view (models/crowd/batch.ts)
+      setCreatureFollowCut(followed && followed.kind !== 'object' && followed.kind !== 'habitat' ? followedAt : null);
       creatures.update(ctx.camera);
       syncQuality();
       if (litterDirty) {

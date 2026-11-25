@@ -6,10 +6,11 @@
 // varying the animal material declares automatically reaches batched and LOD
 // meshes. Per-instance parameters arrive through the batch data texture:
 //
-//   look texel 0 = (highlight, growth 0..1, wetness 0..1, user1)
+//   look texel 0 = (highlight, growth 0..1, wetness 0..1, lying 0..1)
 //     → fragment: `flat varying vec4 vCrLook0` (x = highlight amount,
 //        y = growth — e.g. for a juvenile tint, z = wetness after a swim
-//        (RiggedModel.writeLook; thick skins read it as vCrWet), w free for extensions)
+//        (RiggedModel.writeLook; thick skins read it as vCrWet), w = lying
+//        amount (look.lieShade reads it as vCrLie))
 //     → fragment: `flat varying vec2 vCrYaw` (cos, sin of the instance yaw);
 //        `normalMatrix` is redefined as normalMatrix × instance rotation so
 //        object-space micro-normals stay correct for every instance.
@@ -114,9 +115,10 @@ export function crowdDepthMaterial(u: CrowdUniforms): THREE.MeshDepthMaterial {
   return depth;
 }
 
-export function batchedAnimalMaterials(look: LookSpec, detail: 0 | 1 | 2): BatchMaterials {
+/** `furShell`: the batch's level-0 mesh carries a fur shell (see createAnimalMaterial). */
+export function batchedAnimalMaterials(look: LookSpec, detail: 0 | 1 | 2, furShell = false): BatchMaterials {
   const u = crowdUniforms();
-  const mat = createAnimalMaterial({ look, detail });
+  const mat = createAnimalMaterial({ look, detail, furShell });
   const base = mat.onBeforeCompile.bind(mat);
   const baseKey = mat.customProgramCacheKey.bind(mat);
   mat.onBeforeCompile = (shader, renderer) => {

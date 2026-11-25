@@ -11,6 +11,9 @@
 //     near creatures cast shadows: far ones are hidden during the shadow pass),
 //     automatic capacity growth (instances and vertex / index buffers), and a
 //     per-frame bounding sphere so a batch with nothing on screen is skipped.
+//   * the follow cut (setCreatureFollowCut): while the camera follows a
+//     subject up close, other animals between the camera and the subject are
+//     left out of the main pass (whole animals; they keep their shadows).
 //   * SkinnedBatch — per-instance bone matrices + look parameters in one float
 //     DataTexture (see skinning.ts); each frame only the blocks written since
 //     the last upload are sent (creatures animated at a reduced rate, see
@@ -25,6 +28,59 @@ import * as THREE from 'three';
 import type { CrowdUniforms } from './skinning';
 
 const _v = new THREE.Vector3();
+const _m = new THREE.Matrix4();
+const _sphere = new THREE.Sphere();
+const _cam = new THREE.Vector3();
+const _line = new THREE.Vector3();
+
+/**
+ * Follow cut of other animals. Following a subject at the closest zooms, an
+ * animal standing between the camera and the subject filled the frame (a
+ * camel in front of the followed camel, an elephant in front of a hippo).
+ * While a subject is set and the camera is within FOLLOW_CUT_MAX_D of it,
+ * batches with `followCut` leave out of the main pass every instance whose
+ * body (its bounding sphere scaled by BODY_OF_SPHERE) reaches within
+ * CUT_LINE_R of the line from the camera to the subject's body and lies at
+ * least CUT_FRONT in front of the subject: whole animals, never the subject
+ * itself, with a wider band to come back so one standing at the edge does
+ * not flicker. Shadows stay (the animal is still there). No draw calls,
+ * no shader cost.
+ */
+const cutAim = { on: false, subject: new THREE.Vector3() };
+/** Camera-to-subject distance (m) up to which other animals are cut. */
+export const FOLLOW_CUT_MAX_D = 16;
+/** The view line aims this high above the subject's feet (m). */
+const CUT_AIM_Y = 0.9;
+/** Batch bounding spheres cover every pose (lying, rearing, swimming): the body is about this fraction of the radius. */
+const BODY_OF_SPHERE = 0.5;
+/** Clearance (m) between an animal's body and the view line below which it is cut; CUT_LINE_R_OUT to come back. */
+const CUT_LINE_R = 0.5;
+const CUT_LINE_R_OUT = 0.9;
+/** An animal is only cut when its body starts this far (m) in front of the subject's aim point. */
+const CUT_FRONT = 0.8;
+
+/**
+ * Aim the follow cut at the followed subject (its feet, world space; null
+ * when the camera does not follow an animal or a person). Call every frame
+ * before rendering.
+ */
+export function setCreatureFollowCut(subject: { x: number; y: number; z: number } | null): void {
+  cutAim.on = subject !== null;
+  if (subject) cutAim.subject.set(subject.x, subject.y + CUT_AIM_Y, subject.z);
+}
+
+/** Is a body (centre `c`, radius `r`) in the follow cut seen from `cam`? `was`: it was cut last frame (hysteresis). */
+export function inFollowCut(cam: THREE.Vector3, c: THREE.Vector3, r: number, was: boolean): boolean {
+  const s = cutAim.subject;
+  _line.subVectors(cam, s);
+  const len = _line.length();
+  if (len < 1e-3) return false;
+  _line.divideScalar(len);
+  const along = _v.subVectors(c, s).dot(_line);
+  if (along - r < CUT_FRONT || along > len + r) return false;
+  const perp = _v.addScaledVector(_line, -along).length() - r;
+  return perp < (was ? CUT_LINE_R_OUT : CUT_LINE_R);
+}
 
 // three.js internals of BatchedMesh used here (r187)
 interface BatchedInternals {
@@ -88,6 +144,11 @@ export class FilteredBatch extends THREE.BatchedMesh {
   private readonly bounds = new THREE.Box3();
   /** Live instances (not counting freed ids). */
   live = 0;
+  /** Take part in the follow cut (animal batches; see setCreatureFollowCut). */
+  followCut = false;
+  /** Instances cut last frame (hysteresis) and ids hidden for the current main pass. */
+  private cut = new Uint8Array(16);
+  private readonly cutHidden: number[] = [];
 
   constructor(name: string, material: THREE.Material, instances: number, vertices: number, indices: number) {
     super(Math.max(4, instances), Math.max(64, vertices), Math.max(192, indices), material);
@@ -177,6 +238,7 @@ export class FilteredBatch extends THREE.BatchedMesh {
   removeSlot(id: number): void {
     this.deleteInstance(id);
     this.want[id] = 0;
+    this.cut[id] = 0;
     this.shadow[id] = 0;
     this.shadowGeo[id] = -1;
     this.live--;
@@ -204,6 +266,9 @@ export class FilteredBatch extends THREE.BatchedMesh {
     s.set(this.shadow);
     const g = new Int32Array(cap).fill(-1);
     g.set(this.shadowGeo);
+    const c = new Uint8Array(cap);
+    c.set(this.cut);
+    this.cut = c;
     this.want = w;
     this.shadow = s;
     this.shadowGeo = g;
@@ -284,7 +349,40 @@ export class FilteredBatch extends THREE.BatchedMesh {
     group: THREE.Group,
   ): void {
     (this as unknown as BatchedInternals)._indirectTexture = this.mainIds;
+    if (this.followCut) this.applyFollowCut(camera);
     super.onBeforeRender(renderer, scene, camera, geometry, material, group);
+  }
+
+  onAfterRender(): void {
+    const h = this.cutHidden;
+    for (let i = 0; i < h.length; i++) this.setVisibleAt(h[i], true);
+    h.length = 0;
+  }
+
+  /** Hide (for this pass) the instances in the follow cut; onAfterRender shows them again. */
+  private applyFollowCut(camera: THREE.Camera): void {
+    const cut = this.cut;
+    const n = Math.min(this.want.length, this.maxInstanceCount);
+    _cam.setFromMatrixPosition(camera.matrixWorld);
+    if (!cutAim.on || _cam.distanceTo(cutAim.subject) > FOLLOW_CUT_MAX_D) {
+      cut.fill(0);
+      return;
+    }
+    for (let i = 0; i < n; i++) {
+      if (!this.want[i]) {
+        cut[i] = 0;
+        continue;
+      }
+      const sphere = this.getBoundingSphereAt(this.getGeometryIdAt(i), _sphere);
+      if (!sphere) continue;
+      sphere.applyMatrix4(this.getMatrixAt(i, _m).premultiply(this.matrixWorld));
+      const on = inFollowCut(_cam, sphere.center, sphere.radius * BODY_OF_SPHERE, cut[i] === 1);
+      cut[i] = on ? 1 : 0;
+      if (on) {
+        this.setVisibleAt(i, false);
+        this.cutHidden.push(i);
+      }
+    }
   }
 
   // ---- shadow pass: hide instances that do not cast shadows

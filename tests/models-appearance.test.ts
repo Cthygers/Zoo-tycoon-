@@ -40,6 +40,31 @@ describe('guest outfits', () => {
     }
   });
 
+  it('keeps every top well apart from the skin in a seeded crowd (no bare-torso look with a contrast collar)', () => {
+    const rng = new SimRng(23);
+    const tops = new Set<number>();
+    let n = 0;
+    for (let i = 0; i < 800; i++) {
+      const a = randomGuestAppearance(rng, i % 5 === 0);
+      const [L1, a1, b1] = hexToLab(a.shirt);
+      const [L2, a2, b2] = hexToLab(a.skin);
+      expect(dE(a.shirt, a.skin)).toBeGreaterThanOrEqual(25);
+      // a woman's top (maybe half of a dress) also keeps out of the skin's hue family at a similar lightness
+      const hue = Math.abs(Math.atan2(b1, a1) - Math.atan2(b2, a2)) * (180 / Math.PI);
+      if (a.female && Math.hypot(a1, b1) >= 15 && Math.min(hue, 360 - hue) < 30) expect(Math.abs(L1 - L2)).toBeGreaterThanOrEqual(30);
+      tops.add(a.shirt);
+      n++;
+    }
+    expect(n).toBe(800);
+    // the rule narrows the choice on some skins, not the crowd's palette
+    expect(tops.size).toBeGreaterThanOrEqual(16);
+    // the reported look: a brown tee on brown skin is re-dyed
+    const man = { skin: 0x5c3a25, hair: 0x16110e, shirt: 0x9b6b43, pants: 0x2a2a2c, shoes: 0x222222, hairStyle: 0 as const, height: 1.77, build: 1, child: false, female: false };
+    fitOutfit(man);
+    expect(man.shirt).not.toBe(0x9b6b43);
+    expect(dE(man.shirt, man.skin)).toBeGreaterThanOrEqual(25);
+  });
+
   it('re-dyes hair that melts into the skin to the nearest darker shade that reads, and keeps black hair on the darkest skin', () => {
     expect(hairReads(0x8b4a2a, 0x8a5a3c)).toBe(false); // dark red on brown
     expect(hairReads(0xb8b2a8, 0xf3d5c0)).toBe(false); // pale grey on pale

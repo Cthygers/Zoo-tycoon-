@@ -14,7 +14,7 @@ import { buildGeometry, type SampleImpl, type VertexBaker } from '../build/geome
 import { resolveRoles } from '../rig/roles';
 import { RiggedModel, highlightPulse, jointMatrix, type AssetPicker, type CrowdHost, type RigAsset } from '../model';
 import { disposeAsset } from '../assets';
-import { driver, hash1, unwrapDriver } from '../anim/util';
+import { driver, hash1, smooth, unwrapDriver } from '../anim/util';
 import { humanDriver } from '../anim/human';
 import { fringeDistance, humanDesign, type HairKind, type HumanBodyKey, type HumanDesign } from './design';
 import {
@@ -34,7 +34,8 @@ import {
 import { isItemKind, itemGeometry, itemMaterial, itemVariants, stringGeometry, type ItemKind } from './items';
 import type { CreatureDesign } from '../types';
 import type { BatchSpec, BatchedModel, CrowdRenderer } from '../crowd/crowd';
-import { LodChain } from '../lod/lod';
+import { LOD_RATIOS, LodChain } from '../lod/lod';
+import { SimplifyJob } from '../lod/simplify';
 
 /** Human mesh resolution: cells along the height for detail 0/1/2. */
 const HUMAN_CELLS: readonly number[] = [22, 27, 36];
@@ -48,8 +49,21 @@ const GIRTH: Record<string, number> = { torso: 1, pelvis: 0.85, skirt: 0.7, arm:
 /** Zone value of a bald man's fringe: under the full-hair edge (4 mm), so it shows as thin, close-cropped hair over the scalp. */
 const FRINGE_COVER = 0.003;
 
-/** Hand region cell (m) per detail level: low keeps the coarse arm grid. */
-const HAND_CELL: readonly number[] = [0, 0.02, 0.014];
+/**
+ * Cells (m) per detail level of the small parts that need their own grid on
+ * the full mesh (the simplified LOD levels merge them away): hands fine enough
+ * to part the thumb and the fingers, shoes for the heel and the toe spring,
+ * and ears that stand off the head as plates.
+ */
+const HAND_CELL: readonly number[] = [0.016, 0.0118, 0.0102];
+const FOOT_CELL: readonly number[] = [0.021, 0.0175, 0.015];
+const EAR_CELL: readonly number[] = [0.011, 0.0095, 0.0085];
+
+/** Reach (m, adult) of the baked crease occlusion: about the spacing of the fingers. */
+const OCCL_RADIUS = 0.03;
+
+/** Height of the belly's fullest point (× body scale). */
+const BELLY_Y = 1.02;
 
 function humanBaker(d: HumanDesign): VertexBaker {
   const sh = d.marks.shoulderL;
@@ -60,6 +74,7 @@ function humanBaker(d: HumanDesign): VertexBaker {
     attributes: [
       { name: 'zone', size: 4 },
       { name: 'girth', size: 1 },
+      { name: 'occl', size: 1 },
     ],
     bake(s: SampleImpl, out, v) {
       const side = s.x >= 0 ? 1 : -1;
@@ -74,10 +89,16 @@ function humanBaker(d: HumanDesign): VertexBaker {
       out[0][v * 4 + 1] = legT;
       out[0][v * 4 + 2] = Math.max(-1, Math.min(1, hairD));
       out[0][v * 4 + 3] = Math.max(-1, Math.min(1, hatD));
-      // girth: smooth over part weights
+      // girth: smooth over part weights; a heavier build carries it on the
+      // belly (and a slimmer one loses it there first), not as an even coat
       let g = 0;
       for (const k in GIRTH) g += GIRTH[k] * s.pw(k);
-      out[1][v] = g;
+      const bs = d.marks.bodyScale;
+      const belly = smooth(0, 0.08, s.z / bs) * (1 - smooth(0, 0.17, Math.abs(s.y / bs - BELLY_Y)));
+      out[1][v] = g * (1 + 0.8 * belly * (s.pw('torso') + s.pw('pelvis')));
+      // the body's own creases (between the fingers, the armpits, under the
+      // chin and the seat, behind the knees) in its indirect light (material.ts)
+      out[2][v] = s.ao(OCCL_RADIUS * d.marks.bodyScale);
     },
   };
 }
@@ -95,10 +116,16 @@ function buildHumanAsset(key: HumanBodyKey, detail: 0 | 1 | 2): HumanAsset {
         brim: { scale: 0.3, aniso: [2, 1, 2] },
         armL: { scale: 0.45, aniso: [1, 2, 1] },
         armR: { scale: 0.45, aniso: [1, 2, 1] },
-        handL: detail > 0 ? { scale: 0.45, cell: HAND_CELL[detail] } : { scale: 0.45, aniso: [1, 2, 1] },
-        handR: detail > 0 ? { scale: 0.45, cell: HAND_CELL[detail] } : { scale: 0.45, aniso: [1, 2, 1] },
-        legL: { aniso: [1, 2.4, 1] },
-        legR: { aniso: [1, 2.4, 1] },
+        // the fingers hang down the grid's y: finer across them than along
+        handL: { scale: 0.45, cell: HAND_CELL[detail], aniso: [1, 1.5, 1] },
+        handR: { scale: 0.45, cell: HAND_CELL[detail], aniso: [1, 1.5, 1] },
+        legL: { scale: 0.5, aniso: [1, 2.4, 1] },
+        legR: { scale: 0.5, aniso: [1, 2.4, 1] },
+        // the shoe's profile (sole, heel, toe spring) needs the vertical cells
+        footL: { scale: 0.3, cell: FOOT_CELL[detail], aniso: [1.7, 0.9, 2.4] },
+        footR: { scale: 0.3, cell: FOOT_CELL[detail], aniso: [1.7, 0.9, 2.4] },
+        'ear.L': { cell: EAR_CELL[detail] },
+        'ear.R': { cell: EAR_CELL[detail] },
       },
     },
     detail,
@@ -137,8 +164,62 @@ function buildHumanAsset(key: HumanBodyKey, detail: 0 | 1 | 2): HumanAsset {
     human: hd,
     detail,
   };
-  asset.lod = new LodChain(built.geometry, sphere, built.triangles);
+  asset.lod = new HumanLodChain(built.geometry, sphere, built.triangles, fineTriangles(built.geometry, hd));
   return asset;
+}
+
+/** Triangles of the hands and shoes (rest pose: the hands hang beyond the wrists, the shoes sit below the ankles). */
+function fineTriangles(geo: THREE.BufferGeometry, d: HumanDesign): number {
+  const pos = geo.getAttribute('position');
+  const index = geo.getIndex();
+  if (!index) return 0;
+  const [wx, wy] = d.marks.wristL;
+  const handX = wx - 0.04 * d.marks.bodyScale;
+  const ankleY = d.marks.ankleL[1];
+  let n = 0;
+  for (let i = 0; i < index.count; i += 3) {
+    const v = index.getX(i);
+    const x = Math.abs(pos.getX(v)), y = pos.getY(v);
+    if ((x > handX && y < wy) || y < ankleY) n++;
+  }
+  return n;
+}
+
+/**
+ * Share of the hands' and shoes' triangles that the simplified levels budget
+ * for (about what the coarse grid gave them before they had their own fine
+ * grids), so levels ≥ 1 keep the body's triangle counts: the fingers, the
+ * heel and the toe spring are a close-up detail of the full mesh only.
+ */
+const FINE_PARTS_LOD_SHARE = 0.2;
+
+/** A body's LOD chain: like LodChain, with the simplified levels' targets taken without most of the fine parts. */
+class HumanLodChain extends LodChain {
+  private readonly ratioScale: number;
+  private readonly humanJobs: (SimplifyJob | null)[] = LOD_RATIOS.map(() => null);
+
+  constructor(base: THREE.BufferGeometry, sphere: THREE.Sphere, triangles: number, fine: number) {
+    super(base, sphere, triangles);
+    this.ratioScale = triangles > 0 ? (triangles - fine * (1 - FINE_PARTS_LOD_SHARE)) / triangles : 1;
+  }
+
+  step(level: number): boolean {
+    if (this.levels[level] || this.disposed) return true;
+    const job = (this.humanJobs[level] ??= new SimplifyJob(this.levels[0]!, LOD_RATIOS[level] * this.ratioScale));
+    if (!job.step()) return false;
+    const g = job.result!;
+    g.boundingSphere = this.sphere.clone();
+    this.levels[level] = g;
+    this.triangles[level] = job.stats.triangles;
+    this.ms[level] = job.stats.ms;
+    this.humanJobs[level] = null;
+    return true;
+  }
+
+  dispose(): void {
+    super.dispose();
+    this.humanJobs.fill(null);
+  }
 }
 
 const STAFF_COLORS: Record<StaffRole, Partial<HumanColors>> = {
@@ -182,13 +263,14 @@ const PRINT_SHARES: [number, number][] = [
 
 /** A guest's print, soles, stubble and neckline (staff: plain uniforms, dark soles). */
 function guestStyle(app: HumanAppearance, role: 'guest' | StaffRole, r: (k: number) => number): number {
-  if (role !== 'guest') return humanStyle({ print: HUMAN_PRINTS.plain, lightSole: false, stubble: false, vNeck: false });
+  if (role !== 'guest') return humanStyle({ print: HUMAN_PRINTS.plain, lightSole: false, stubble: false, neckline: 'crew' });
   const p = r(21);
   const print = PRINT_SHARES.find(([, share]) => p < share)?.[0] ?? HUMAN_PRINTS.plain;
   const man = !app.female && !app.child;
   // most bald men keep a shaved shadow on the scalp (a bare pale dome reads as a mannequin's)
   const stubbleShare = app.hairStyle === 2 ? 0.75 : 0.4;
-  return humanStyle({ print, lightSole: r(22) < 0.55, stubble: man && r(23) < stubbleShare, vNeck: !app.child && r(24) < 0.2 });
+  const vNeck = !app.child && r(24) < 0.2;
+  return humanStyle({ print, lightSole: r(22) < 0.55, stubble: man && r(23) < stubbleShare, neckline: !vNeck ? 'crew' : app.female ? 'deepV' : 'v' });
 }
 
 /** Body id used by the batched material: female + 2 × child. */

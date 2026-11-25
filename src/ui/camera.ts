@@ -48,16 +48,21 @@ const LIFT_FROM = 12;
 
 /**
  * Closest follow distance per metre of a subject's height and of its body
- * length: on a 20:9 phone a 5 m giraffe shows from its head down to its hooves
- * at 8.5 m, and a 6 m elephant shows whole beside the info sheet from about
- * 6.5 m. Smaller subjects stay at followMinDistance.
+ * length: on a 20:9 phone (915×412 down to 800×360) a 5 m giraffe stands
+ * whole between the top bar and the dock, head to hooves, at 11 m, and a
+ * 3.2 m high, 6 m long elephant shows whole beside the info sheet from 7 m.
+ * Smaller subjects stay at followMinDistance.
  */
-const FIT_PER_HEIGHT = 1.7;
+const FIT_PER_HEIGHT = 2.2;
 const FIT_PER_LENGTH = 1.1;
 /** Look-point height as a share of the subject's height: the chest or middle of most subjects… */
 const LOOK_SHARE = 0.55;
-/** …rising for subjects from TALL_FROM to TALL_FULL metres high, so a giraffe's head stays in frame. */
-const LOOK_SHARE_TALL = 0.7;
+/**
+ * …moving for subjects from TALL_FROM to TALL_FULL metres high to just under
+ * the middle, so a giraffe is centred in the band the top bar and the (taller)
+ * dock leave clear, its hooves above the dock.
+ */
+const LOOK_SHARE_TALL = 0.47;
 const TALL_FROM = 3;
 const TALL_FULL = 5;
 
@@ -70,11 +75,47 @@ export function followFraming(height: number, length: number): { lookHeight: num
   return { lookHeight: share * height, minDistance: Math.max(FIT_PER_HEIGHT * height, FIT_PER_LENGTH * length) };
 }
 
+/**
+ * Follow yaw swing around a large rock that hides the followed subject (an
+ * outcrop: the props layer keeps those, as animals stand on them, and cuts
+ * only smaller rocks). The camera orbits away from the rock's side by up to
+ * DODGE_MAX from the yaw the player last chose, at up to DODGE_RATE, easing
+ * in and out at DODGE_EASE (1/s) and over the last DODGE_SLOW of the budget.
+ * Only within DODGE_RANGE of zoom: farther out the subject is a speck and a
+ * swing would only disturb the view.
+ */
+const DODGE_MAX = 40 * DEG;
+const DODGE_RATE = DODGE_MAX / 0.5;
+const DODGE_EASE = 10;
+const DODGE_SLOW = 10 * DEG;
+const DODGE_RANGE = 20;
+/** The segment to a followed subject ends at least this high (m) above its feet: its body, not the ground. */
+const DODGE_AIM_MIN = 0.5;
+/** A gesture that turns the view by more than this (rad) chose the yaw: a rock it turned behind stays. */
+const TURN_INTENT = 2 * DEG;
+
+/** A rock the camera → followed subject segment passes through (props followBlockers). */
+export interface FollowBlockerHit {
+  x: number;
+  y: number;
+  z: number;
+  r: number;
+  ry: number;
+  /** Share of the segment (0 = camera, 1 = subject) at its deepest point inside the rock. */
+  t: number;
+  /** Side of the segment, seen from the camera, the rock's centre lies on: 1 = right, -1 = left. */
+  side: number;
+}
+
+/** Fills `out` with the rocks between the camera and the subject, nearest the camera first; returns their number. */
+export type FollowBlockerQuery = (cam: THREE.Vector3, subject: THREE.Vector3, out: FollowBlockerHit[]) => number;
+
 const _ray = new THREE.Ray();
 const _v = new THREE.Vector3();
 const _anchor = new THREE.Vector3();
 const _hit = new THREE.Vector3();
 const _look = new THREE.Vector3();
+const _subject = new THREE.Vector3();
 
 function easeInOut(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
@@ -90,6 +131,8 @@ export class CameraController {
 
   /** Called when follow mode ends (user panned or the entity disappeared). */
   onFollowEnd: (() => void) | null = null;
+  /** Large rocks between the camera and a followed subject (wired by main.ts to the props layer's followBlockers). */
+  blockerQuery: FollowBlockerQuery | null = null;
   /**
    * Closest zoom right now: the followed subject's closest zoom while
    * following, minDistance otherwise. A floor that rises (following ends close
@@ -123,6 +166,16 @@ export class CameraController {
   private anim: { x0: number; z0: number; x1: number; z1: number; d0: number; d1: number; t: number; dur: number } | null = null;
   private followFn: FollowFn | null = null;
   private keys = new Set<string>();
+  private readonly blockerHits: FollowBlockerHit[] = [];
+  /** Net yaw (rad) swung around rocks since following began or the player last turned the view. */
+  private dodged = 0;
+  /** Current swing rate (rad/s) and the direction (±1, 0 = none) of the swing around the rock in the way. */
+  private dodgeVel = 0;
+  private dodgeDir = 0;
+  /** The player turned the view to where a rock hides the subject: leave it until the line clears. */
+  private blockKept = false;
+  /** Yaw (rad) the player's current gesture or keys have turned the view by. */
+  private gestureTurn = 0;
 
   constructor(
     readonly camera: THREE.PerspectiveCamera,
@@ -149,7 +202,10 @@ export class CameraController {
     this.clampTarget();
     this.target.y = this.groundHeight(this.target.x, this.target.z);
     if (distance !== undefined) this.distance = distance;
-    if (yaw !== undefined) this.yaw = yaw;
+    if (yaw !== undefined) {
+      this.yaw = yaw;
+      this.dodged = 0; // a chosen yaw: any swing around a rock starts from it
+    }
     if (pitch !== undefined) this.pitch = pitch;
     if (!this.followFn) {
       // a jump, not a glide: drop what is left of an ended follow's close-up framing
@@ -159,7 +215,7 @@ export class CameraController {
     }
     this.clampOrbit();
     this.anim = null;
-    this.velX = this.velZ = this.velYaw = this.velZoom = 0;
+    this.velX = this.velZ = this.velYaw = this.velZoom = this.dodgeVel = 0;
     this.applyPose();
   }
 
@@ -227,6 +283,8 @@ export class CameraController {
     this.interacting++;
     this.anim = null;
     this.velX = this.velZ = this.velYaw = this.velZoom = 0;
+    this.dodgeVel = 0;
+    this.gestureTurn = 0;
     this.accX = this.accZ = this.accYaw = this.accZoom = 0;
     if (kind === 'pan') this.stopFollow();
   }
@@ -265,6 +323,7 @@ export class CameraController {
     const d0 = this.distance;
     this.distance *= factor;
     this.yaw += dyaw;
+    this.gestureTurn += Math.abs(dyaw);
     this.clampOrbit();
     if (this.distance !== d0) this.accZoom += Math.log(this.distance / d0);
     this.accYaw += dyaw;
@@ -277,6 +336,7 @@ export class CameraController {
 
   rotateBy(dyaw: number, dpitch: number): void {
     this.yaw += dyaw;
+    this.gestureTurn += Math.abs(dyaw);
     this.pitch += dpitch;
     this.accYaw += dyaw;
     this.clampOrbit();
@@ -325,6 +385,8 @@ export class CameraController {
     this.screenX = this.followScreenX;
     this.anim = null;
     this.velX = this.velZ = 0;
+    this.dodged = this.dodgeVel = this.dodgeDir = 0;
+    this.blockKept = false;
     if (distance !== undefined) this.distance = Math.min(this.distance, distance);
   }
 
@@ -351,6 +413,50 @@ export class CameraController {
     this.floor += (want - this.floor) * (1 - Math.exp(-dt * 4));
     if (want - this.floor < 0.01) this.floor = want;
     if (this.distance < this.floor) this.distance = this.floor;
+  }
+
+  /**
+   * Swing the follow yaw away from a large rock that hides the subject (see
+   * DODGE_MAX). Never against the player: not while they touch or turn the
+   * view (or its turn is still coasting), and not around a rock they turned
+   * the view behind themselves.
+   */
+  private dodgeRocks(p: NonNullable<ReturnType<FollowFn>>, dt: number): void {
+    let want = 0;
+    if (this.blockerQuery && this.distance <= DODGE_RANGE) {
+      _subject.set(p.x, this.groundHeight(p.x, p.z) + Math.max(DODGE_AIM_MIN, p.lookHeight ?? 0), p.z);
+      const blocked = this.blockerQuery(this.camera.position, _subject, this.blockerHits) > 0;
+      const touching = this.interacting > 0 || this.velYaw !== 0 || this.keys.size > 0;
+      if (touching && this.gestureTurn > TURN_INTENT) {
+        // the player chose this yaw: the budget starts over from it
+        this.dodged = 0;
+        if (blocked) this.blockKept = true;
+      }
+      if (!touching) this.gestureTurn = 0;
+      if (!blocked) {
+        this.blockKept = false;
+        this.dodgeDir = 0;
+      } else if (!touching && !this.blockKept) {
+        // orbit away from the rock's side (a larger yaw moves the camera screen-right), and
+        // keep that direction while this rock is in the way
+        if (this.dodgeDir === 0) this.dodgeDir = -this.blockerHits[0].side;
+        const left = DODGE_MAX - this.dodgeDir * this.dodged;
+        want = this.dodgeDir * DODGE_RATE * THREE.MathUtils.clamp(left / DODGE_SLOW, 0, 1);
+      }
+    }
+    this.dodgeVel += (want - this.dodgeVel) * (1 - Math.exp(-dt * DODGE_EASE));
+    if (want === 0 && Math.abs(this.dodgeVel) < 1e-3) this.dodgeVel = 0;
+    if (this.dodgeVel === 0) return;
+    // the swing ends at the budget, whichever way it goes
+    let step = this.dodgeVel * dt;
+    const room = Math.max(0, DODGE_MAX - Math.sign(step) * this.dodged);
+    if (Math.abs(step) >= room) {
+      step = Math.sign(step) * room;
+      this.dodgeVel = 0;
+    }
+    this.yaw += step;
+    this.dodged += step;
+    this.clampOrbit();
   }
 
   // ------------------------------------------------------------ keyboard (desktop)
@@ -390,6 +496,7 @@ export class CameraController {
       }
       if (k.has('KeyQ')) this.yaw += 1.4 * dt;
       if (k.has('KeyE')) this.yaw -= 1.4 * dt;
+      if (k.has('KeyQ') !== k.has('KeyE')) this.gestureTurn += 1.4 * dt;
       if (k.has('Equal') || k.has('NumpadAdd')) this.distance *= Math.exp(-1.6 * dt);
       if (k.has('Minus') || k.has('NumpadSubtract')) this.distance *= Math.exp(1.6 * dt);
       if (k.has('PageUp')) this.pitch += 0.9 * dt;
@@ -454,6 +561,7 @@ export class CameraController {
         this.target.z += (p.z + Math.sin(this.yaw) * w - this.target.z) * f;
         this.clampTarget();
         this.followFloor = this.subjectFloor(p);
+        this.dodgeRocks(p, dt);
         const liftFrom = (LIFT_FROM * this.followFloor) / this.limits.followMinDistance;
         lookHeight = (p.lookHeight ?? 0) * THREE.MathUtils.smoothstep(liftFrom - this.distance, 0, liftFrom - this.followFloor);
         offX = p.x - this.target.x;

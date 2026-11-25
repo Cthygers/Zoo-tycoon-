@@ -402,6 +402,8 @@ export interface IEntityViews {
   setSelected(sel: SelectionRef | null): void;
   /** Current world position of a selectable thing (for camera follow / labels). */
   positionOf(sel: SelectionRef): THREE.Vector3 | null;
+  /** positionOf without allocating, for per-frame use: copies the position into out; false (out untouched) when there is none. */
+  positionInto(sel: SelectionRef, out: THREE.Vector3): boolean;
   dispose(): void;
 }
 

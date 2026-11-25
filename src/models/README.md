@@ -29,7 +29,7 @@ kit/generic.ts      genericQuadruped(), genericUpright(), paletteCoat() (placeho
 material/*.ts       animal material (vertex colours + per-pixel pattern, fur strands / clumps and hide
                     micro-normals faded by pixel footprint, long hair with darker partings and a fur shell of lock
                     tips up close, matte grazing reflection, coat-tinted sheen)
-humans/*.ts         human body design (bald fringe baked in the zone attribute), skin / fabric / hair / face material, held items, HumanFactory
+humans/*.ts         human body design (bald fringe baked in the zone attribute; fine hands, shoes and ears), skin / fabric / hair / face material, held items, HumanFactory
 species/*.ts        ONE FILE PER SPECIES (default export SpeciesModel); index.ts = registry
 ```
 
@@ -77,7 +77,7 @@ export default okapi;
 | `regions` | detail regions keyed by `Prim.region` (`{ scale?, aniso? }`). |
 | `resolution` | base grid multiplier (bulky animals ≈ 0.7). |
 | `coat` | `(c: CoatSample) => void` — baked per vertex. |
-| `look` | `{ skin: 'fur'|'hide'|'wrinkled'|'smooth'|'feather', pattern: 'none'|'stripes'|'field', roughness, sheen, grain, bump, mottle, wets?, juvenile? }` — `'wrinkled'` = crease network plus deep folds across limbs and trunk (readable at mid range) for thick skins (elephant, rhino, hippo; `'hide'` = cell plates) — grooves thinner than a pixel are filtered to their average tone (no pinhole speckle), and its folds and stripe rings get an irregular spacing; `bump` sets how dark creases and folds shade in; creases are deep on the folds (`fold`: legs, trunk, throat) and faint and broken on the back and flanks; pale coats (polar bear, white bellies) get about a quarter of the albedo clumps and mottle, so their texture comes from relief and sheen; `wets` makes a coat darker and slicker after a swim, drying from the top down (default: `'wrinkled'`; set on tigers and bears); `juvenile: { color, amount?, until?, keep? }` tints young animals (penguin chicks' grey down) per instance from their growth |
+| `look` | `{ skin: 'fur'|'hide'|'wrinkled'|'smooth'|'feather', pattern: 'none'|'stripes'|'field', roughness, sheen, grain, bump, mottle, wets?, juvenile?, shine?, lieShade? }` — `'wrinkled'` = crease network plus deep folds across limbs and trunk (readable at mid range) for thick skins (elephant, rhino, hippo; `'hide'` = cell plates) — grooves thinner than a pixel are filtered to their average tone (no pinhole speckle), and its folds and stripe rings get an irregular spacing; `bump` sets how dark creases and folds shade in; creases are deep on the folds (`fold`: legs, trunk, throat) and faint and broken on the back and flanks; pale coats (polar bear, white bellies) get about a quarter of the albedo clumps and mottle, so their texture comes from relief and sheen; `wets` makes a coat darker and slicker after a swim, drying from the top down (default: `'wrinkled'`; set on tigers and bears); `juvenile: { color, amount?, until?, keep? }` tints young animals (penguin chicks' grey down) per instance from their growth; `shine` (≈ 0.03–0.06, dark long-haired fur: gorilla) adds soft Kajiya–Kay bands of the key light and the sky across the hair flow, broken into locks up close, so a near-black coat shows its form; `lieShade: { amount, below }` darkens the coat below rest height `below` while the animal lies (the instance's lying amount from how low hips and chest sit) — the giraffe's folded pale cannons under the body; on the low tier there is no relief, only the albedo shade of creases and folds, so a species can deepen `bump` there (hippo) |
 | `eyes` | `[{ bone, pos (left eye), radius, color? }]` — glossy spheres rigidly bound to the bone (mirrored). Use `surfacePoint()` + `seat()` to sit them on the head. |
 | `anim` | `driver(myDriver)` — see Animation. |
 | `babyScale`, `babyHead` | growth 0 → root scale / extra head scale. |
@@ -236,18 +236,23 @@ skeleton). The factory gives every model a picker:
 
 `createHuman(appearance, role, seed)`: geometry cached per (female, child,
 hair/hat variant: short, long, bald, cap, bushhat, + an A-line skirt variant
-worn by about a third of female guests — a dress when top and skirt share
-the shirt colour, bare legs or leggings below); hands have a palm, cupped
-fingers and a thumb on their own grid (medium / high); height = root scale; build
-= shader inflation along normals; clothing colours / sleeve & trouser length /
-lab coat are per-instance uniforms of a per-instance material (shared
-program); a darker waistband separates top and bottom. Guest outfits come
-from `fitOutfit` in sim/names.ts: never skin-coloured, top and bottom apart
-in lightness, no pale top (or dress) under grey / blonde hair. The walk caps
-the step at ≈ 0.42 × height (faster = quicker cadence), rolls the planted
-foot heel → ball and folds the swing knee ≈ 55°. Staff: keeper (khaki + bush hat), groundskeeper (dark green + cap,
-broom while working), vet (white coat). Held items (`anim.holding`) attach to
-the right hand; balloons float on a string. ≈ 2.6–3.1k triangles at medium.
+worn by about a third of female guests — a dress when top and skirt share the
+shirt colour, bare legs or leggings below); hands (four fingers with grooves
+between them and a thumb set apart), shoes (sole, heel, toe spring) and ears
+have their own fine grids on the full mesh, the legs a finer grid of their own
+(the simplified LOD levels keep the old budget: HumanLodChain in
+humans/human.ts), and the body's creases are baked per vertex (`occl`); height =
+root scale; build = shader inflation along normals, carried on the belly;
+clothing colours / sleeve & trouser length / lab coat are per-instance uniforms
+of a per-instance material (shared program); a darker waistband separates top
+and bottom. Guest outfits come from `fitOutfit` in sim/names.ts: never
+skin-coloured (every top ΔE ≥ 25 from the skin), top and bottom apart in
+lightness, no pale top (or dress) under grey / blonde hair. The walk caps the
+step at ≈ 0.42 × height (faster = quicker cadence), rolls the planted foot heel
+→ ball and folds the swing knee ≈ 55°. Staff: keeper (khaki + bush hat),
+groundskeeper (dark green + cap, broom while working), vet (white coat). Held
+items (`anim.holding`) attach to the right hand; balloons float on a string. ≈
+3.9–4.5k triangles at medium on the full mesh (≈ 1.5–1.6k at LOD 1).
 
 ## Preview
 

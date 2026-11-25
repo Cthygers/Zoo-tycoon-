@@ -107,8 +107,18 @@ function genIce(): Img {
   return img;
 }
 
+/**
+ * Boulders and ice blocks are about a metre across their middle: one standing
+ * this far (m) beside the camera → subject line still hides a followed animal,
+ * so the follow-mode occluder cut (props layer, lod/fade.ts) reaches that much
+ * farther for them than for a fence piece.
+ */
+const ROCK_OCCLUDER_REACH = 0.6;
+
 function graniteMat(): RockMaterial {
-  return rockMaterial('granite', { triTex: cachedTexture('rock-granite', () => albedoHeightTexture(genGranite())), tile: 1.1, bump: 0.012, roughness: 0.82, surfRoughness: 0.95, surfTint: 0x8fa060 });
+  const m = rockMaterial('granite', { triTex: cachedTexture('rock-granite', () => albedoHeightTexture(genGranite())), tile: 1.1, bump: 0.012, roughness: 0.82, surfRoughness: 0.95, surfTint: 0x8fa060 });
+  m.userData.occluderReach = ROCK_OCCLUDER_REACH;
+  return m;
 }
 
 function sandstoneMat(): RockMaterial {
@@ -116,7 +126,7 @@ function sandstoneMat(): RockMaterial {
 }
 
 function iceMat(): RockMaterial {
-  return rockMaterial('ice', {
+  const m = rockMaterial('ice', {
     triTex: cachedTexture('rock-ice', () => albedoHeightTexture(genIce())),
     tile: 1.2,
     bump: 0.008,
@@ -128,6 +138,8 @@ function iceMat(): RockMaterial {
     emissive: 0x0b1a24,
     emissiveIntensity: 0.1,
   });
+  m.userData.occluderReach = ROCK_OCCLUDER_REACH;
+  return m;
 }
 
 /** Shared granite material (used by other nature props, e.g. bed kerbs). */

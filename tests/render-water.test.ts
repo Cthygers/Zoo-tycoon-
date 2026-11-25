@@ -66,4 +66,24 @@ describe('water at night', () => {
     expect(slots.every((v) => v.x < -1e4 && v.z === 0 && v.w === 0)).toBe(true);
     water.dispose();
   });
+
+  it('draws a narrow V behind a moving swimmer through the normal only, with faint rings only while idle', () => {
+    const { water, fs } = pondShader();
+    // the V's arms at the Kelvin angle (19.5°), behind the swimmer only
+    expect(Math.atan(WAKES.armTan) / (Math.PI / 180)).toBeCloseTo(19.5, 0);
+    expect(fs).toContain('if (move > 0.0 && behind > 0.0) {');
+    expect(fs).toContain(`float off = abs(side) - ${WAKES.armTan.toFixed(3)} * behind;`);
+    // rings fade out as the swimmer moves off, and stay far fainter than the V
+    expect(fs).toContain('* fade * (1.0 - move);');
+    expect(WAKES.ringSlope).toBeLessThanOrEqual(WAKES.slope / 3 + 1e-9);
+    // no white water on the ripple crests: only a little broken foam at the body, within half a metre
+    expect(fs).not.toMatch(/pow\(max\(sin\(\w*[pP]hase\)/);
+    expect(fs).toContain('float churn = smoothstep(0.15, 0.25, r) * (1.0 - smoothstep(0.3, 0.45, r))');
+    expect(fs).toContain('foam = max(foam, min(wWake.z, 1.0) * smoothstep(0.3, 0.7, fn2));');
+    expect(WAKES.foam).toBeLessThanOrEqual(0.3);
+    // from above the ripples show through the reflectance (bright / dark ridges), not as paint
+    expect(fs).toContain(`F = clamp(F + (${WAKES.rough.toFixed(3)} * wWake.w - ${WAKES.sheen.toFixed(2)} * dot(wWake.xy, normalize(wV.xz + vec2(1e-4, 0.0)))) * wSheen, 0.0, 1.0);`);
+    expect(WAKES.rough).toBeLessThan(0.1); // a sheen, not a white line
+    water.dispose();
+  });
 });

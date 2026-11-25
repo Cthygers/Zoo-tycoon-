@@ -81,6 +81,14 @@ export interface GroundUniforms {
 export const NIGHT_GROUND = { lift: 0.2, mark: 0.18 } as const;
 
 /**
+ * The wet soil at the waterline of a pond in a lawn (the mud ring the turf
+ * takes back) leans this share toward the turf's hue (`SHORE_MOSS`, per unit
+ * luminance): a dark mossy green margin rather than neutral wet earth.
+ */
+export const SHORE_MOSS_SHARE = 0.45;
+const SHORE_MOSS = 'vec3(0.78, 1.1, 0.62)';
+
+/**
  * GLSL (after the lights, e.g. at <aomap_fragment>): the lift and the
  * neutral light for natural-ground share `nat` and albedo `alb` at night
  * level uNightLift; sets `mark` (declared by the caller) for nightGroundMark.
@@ -451,6 +459,8 @@ const MAIN = /* glsl */ `
   if (shoreSoil > 0.0) {
     float dryUp = smoothstep(0.0, 0.25, wy);
     vec3 earth = mix(vec3(gLuma(gAlb)), gAlb, 0.55) * mix(vec3(1.0), vec3(1.4, 1.38, 1.3), dryUp);
+    // its wet margin leans toward the turf's green (moss and drowned grass), not a neutral dark rim
+    earth = mix(earth, gLuma(earth) * ${SHORE_MOSS}, ${SHORE_MOSS_SHARE.toFixed(2)} * (1.0 - dryUp));
     gAlb = mix(gAlb, earth, shoreSoil * (0.4 + 0.6 * dryUp));
     gs.rough = mix(gs.rough, 0.92, shoreSoil * dryUp);
   }

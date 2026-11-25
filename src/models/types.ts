@@ -160,6 +160,20 @@ export interface LookSpec {
   /** Albedo clump variation 0..1 (default 0.12); pale coats get about a quarter of it. */
   mottle?: number;
   /**
+   * Hair shine of dark long-haired fur (default 0 = off): soft highlight bands
+   * of the key light and the sky across the hair flow, so a near-black coat
+   * (gorilla) shows its form. ≈ 0.03–0.06.
+   */
+  shine?: number;
+  /**
+   * Folded lower legs under a lying body (giraffe): while the animal lies
+   * (hips and chest low, RiggedModel's lying amount), the coat below rest
+   * height `below` (m, model space) darkens by up to `amount` toward a warm
+   * shade — the legs tucked under the belly get little light, and pale
+   * cannons no longer show as a white frame under the body. Batched only.
+   */
+  lieShade?: { amount: number; below: number };
+  /**
    * Darker and slicker for a while after a swim, drying from the top down
    * (the instance's wetness, RiggedModel). Default: thick ('wrinkled') skins;
    * set it on fur animals that swim (tigers, bears).

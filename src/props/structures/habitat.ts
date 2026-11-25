@@ -186,6 +186,8 @@ function caveMaterial(): THREE.MeshStandardMaterial {
     });
     caveMat.normalScale.set(1.3, 1.3);
     caveMat.name = 'struct/caveRock';
+    // a 4 m den: the follow-mode occluder cut (lod/fade.ts) tests its centre, so let it reach about its half width
+    caveMat.userData.occluderReach = 1.6;
   }
   return caveMat;
 }

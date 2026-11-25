@@ -11,6 +11,7 @@ import './structures';
 import { PropsLayer } from './layer';
 
 export { PropsLayer, supportsMultiDraw, type PropsBackend } from './layer';
+export { followBlockers, type Blocker, type BlockerHit } from './lod/blockers';
 export { setFollowCut } from './lod/fade';
 export { paintAtlasesOffThread, setNatureNightGround } from './nature';
 export { PROP_SPECS, registerProp, type PropSpec } from './registry';

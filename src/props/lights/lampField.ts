@@ -1,7 +1,7 @@
 // Lamp light on animals and people, on every tier and without real lights:
 // the night light pools' 1 m light grid (nightlights.ts) doubles as a small
 // texture over the whole map (one R8 texel per grid vertex). Creature and
-// human materials fetch it once per vertex (applyLampField) and add warm lamp
+// human materials fetch it per vertex (applyLampField) and add warm lamp
 // irradiance where they stand, so a guest under a lamp is lit like the paving
 // around them instead of being a black cut-out. No extra draws.
 //
@@ -9,7 +9,9 @@
 // further the higher it is (LAMP_REACH): the side and the upper body facing a
 // lamp catch its light beyond the pool's ground edge, the far side less, so a
 // guest at a pool's fringe gets a gradual warm side instead of the whole
-// figure flipping between lamp-lit and moonlit.
+// figure flipping between lamp-lit and moonlit. Its colour (the grade's mark,
+// not the light) reaches further still (LAMP_MARK_REACH), so that warm side
+// keeps its hue and is seen from the camera's side too.
 //
 // The same pixels are marked lamp-lit for the night grade (render/grade.ts),
 // so they keep their colour instead of turning to rod vision: through
@@ -105,6 +107,12 @@ const SKIN_TOE_LIFT = 6.5;
  * height (model space), ≈ 1 m at a guest's head.
  */
 const LAMP_REACH = [0.2, 0.5] as const;
+/**
+ * The same for the lamp-lit mark alone (≈ 2 m out at a guest's chest): a
+ * figure a step outside a pool keeps the colour of the light it faces (the
+ * larger of the two readings), while its brightness still follows LAMP_REACH.
+ */
+const LAMP_MARK_REACH = [0.5, 1.1] as const;
 
 const smooth = (a: number, b: number, x: number) => {
   const t = Math.min(Math.max((x - a) / (b - a), 0), 1);
@@ -137,6 +145,11 @@ export function lampReach(height: number): number {
   return LAMP_REACH[0] + LAMP_REACH[1] * Math.max(height, 0);
 }
 
+/** The same distance for the lamp-lit colour mark (the shader marks with the larger of the two readings). */
+export function lampMarkReach(height: number): number {
+  return LAMP_MARK_REACH[0] + LAMP_MARK_REACH[1] * Math.max(height, 0);
+}
+
 /** Lamp light level read back from the field at a world point (tests / debugging). */
 export function lampFieldAt(x: number, z: number): number {
   const ix = Math.round(x);
@@ -160,7 +173,8 @@ export function resetLampField(): void {
 
 const VERTEX_PARS = /* glsl */ `
 uniform sampler2D uLampField;
-varying float vLampLight;`;
+varying float vLampLight;
+varying float vLampMark;`;
 
 // after <project_vertex>: `transformed` is the final local position (its y
 // the height above the figure's feet), `transformedNormal` the view-space
@@ -178,13 +192,16 @@ const VERTEX = /* glsl */ `
   vec3 lfN = normalize((vec4(transformedNormal, 0.0) * viewMatrix).xyz);
   vec2 lfAt = lfPos.xz + lfN.xz * (${LAMP_REACH[0].toFixed(2)} + ${LAMP_REACH[1].toFixed(2)} * max(transformed.y, 0.0));
   vLampLight = textureLod(uLampField, (lfAt + 0.5) / vec2(${FIELD_W.toFixed(1)}, ${FIELD_H.toFixed(1)}), 0.0).r;
+  vec2 lfMarkAt = lfPos.xz + lfN.xz * (${LAMP_MARK_REACH[0].toFixed(2)} + ${LAMP_MARK_REACH[1].toFixed(2)} * max(transformed.y, 0.0));
+  vLampMark = max(vLampLight, textureLod(uLampField, (lfMarkAt + 0.5) / vec2(${FIELD_W.toFixed(1)}, ${FIELD_H.toFixed(1)}), 0.0).r);
 }`;
 
 const FRAGMENT_PARS = /* glsl */ `
 uniform vec3 uLampLight;
 uniform float uLampMark;
 uniform float uViewExposure;
-varying float vLampLight;`;
+varying float vLampLight;
+varying float vLampMark;`;
 
 // before <aomap_fragment>: lamps shine from above, so tops catch the most.
 // The light falls off like the pool the ground visibly shows: linear on the
@@ -213,7 +230,7 @@ if (vLampLight > 0.0) {
 // toe (SKIN_TOE, where the material defines LF_SKIN).
 const FRAGMENT_MARK = /* glsl */ `
 {
-  float lfShare = pow(smoothstep(${MARK_RAMP[0].toFixed(2)}, ${MARK_RAMP[1].toFixed(2)}, vLampLight) * uLampMark, ${MARK_GAMMA.toFixed(2)});
+  float lfShare = pow(smoothstep(${MARK_RAMP[0].toFixed(2)}, ${MARK_RAMP[1].toFixed(2)}, vLampMark) * uLampMark, ${MARK_GAMMA.toFixed(2)});
   float lfMark = ${GRADE_MARK_FULL.toFixed(2)} * (0.5 - sin(asin(clamp(1.0 - 2.0 * lfShare, -1.0, 1.0)) / 3.0));
   #ifdef TONE_MAPPING
   float lfExposure = toneMappingExposure;

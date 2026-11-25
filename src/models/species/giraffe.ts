@@ -531,7 +531,10 @@ function makeDriver(height: number, walkSpeed: number, runSpeed: number) {
     rig.fk(pose);
     const lap = Math.sin(t * TAU * 1.0);
     const target = 0.03 + up * 2.6;
-    reachMuzzle(ctx, pose, target, 0.2 - up * 0.3, 0, 2.6);
+    // the head hangs about vertically below the poll, continuing the neck's
+    // forward reach: with less head pitch it folded back toward the chest and
+    // the lowered neck read as a hook beside the forelegs
+    reachMuzzle(ctx, pose, target, -0.45 + up * 0.35, 0, 2.2);
     jaw(ctx, pose, 0.03 + 0.03 * Math.max(0, lap) * (1 - up));
     tail(ctx, st, pose, 0, 0.5);
     ears(ctx, st, pose, 0.2 - up * 0.2);
@@ -728,7 +731,8 @@ function design(ctx: DesignContext): CreatureDesign {
       tail: { scale: 0.26, aniso: [1, 2.5, 1] },
     },
     coat: giraffeCoat(male, eye),
-    look: { skin: 'fur', pattern: 'stripes', roughness: 0.86, sheen: 0.3, grain: 0.006, bump: 0.28, mottle: 0.08 },
+    // lying, the cream cannons folded under the body shade down (below the knees / hocks)
+    look: { skin: 'fur', pattern: 'stripes', roughness: 0.86, sheen: 0.3, grain: 0.006, bump: 0.28, mottle: 0.08, lieShade: { amount: 0.95, below: 1.2 } },
     eyes: [{ bone: 'head', pos: eye, radius: 0.027, color: 0x1c1009 }],
     anim: driver(makeDriver(3.25, ctx.def.walkSpeed, ctx.def.runSpeed)),
     babyScale: 0.36,

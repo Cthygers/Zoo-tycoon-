@@ -5,8 +5,10 @@
 // and big gut, a short neck sunk between the trapezius. Adult males are
 // silverbacks: larger (separate mesh), a tall sagittal crest, a bare chest
 // and a grey-silver saddle over the back and thighs. Faces, hands and feet are
-// bare leathery skin; the coat is black with a brownish cast and a reddish
-// crown. Animation (species-special-rigs/primate.ts): knuckle-walking, upright
+// bare leathery skin; the coat is charcoal with a brownish cast, browner
+// tips facing up and a reddish crown, and the hair shows a soft shine
+// (look.shine) that models the body where the albedo alone is near black.
+// Animation (species-special-rigs/primate.ts): knuckle-walking, upright
 // sitting (eating with hands to the mouth, grooming), bipedal chest-beating
 // call, belly-down sleep, crouched drinking, bouncy play.
 
@@ -169,12 +171,18 @@ function headPrims(male: boolean): Prim[] {
 // ---------------------------------------------------------------------------
 // Coat
 
-const FUR = 0x2e2a27;
-const FUR_BROWN = 0x4a3b31;
-const CROWN = 0x4a3022;
-const SILVER = 0x85817b;
-const SKIN = 0x121110;
-const CHESTSKIN = 0x232121;
+// charcoal hair with a brown cast (pure black read as a hole in the frame),
+// browner where it faces the sky (sun-bleached tips on the crown, shoulders
+// and back), darker underneath
+const FUR = 0x403a36;
+const FUR_BROWN = 0x5a493c;
+const FUR_TOP = 0x655242;
+const CROWN = 0x5a3a28;
+const SILVER = 0x8f8a83;
+// bare leathery skin: near-black, but lighter than the shadows in its folds
+const SKIN = 0x24201e;
+const SKIN_RIDGE = 0x3a3431;
+const CHESTSKIN = 0x2a2726;
 
 function gorillaCoat(male: boolean, eye: Vec3) {
   return (c: CoatSample): void => {
@@ -188,6 +196,9 @@ function gorillaCoat(male: boolean, eye: Vec3) {
     c.fur = 1.6;
     const limb = c.pw('arm') + c.pw('leg');
     c.fur += limb * 1.4;
+    // form: browner hair tips facing the sky, darker undersides and folds
+    blendHex(c.color, FUR_TOP, 0.45 * smooth(0.15, 0.85, c.ny) * (0.7 + n * 0.3));
+    c.color.multiplyScalar(1 - 0.3 * smooth(-0.1, -0.8, c.ny) - 0.45 * c.ao(0.1));
     // reddish-brown crown
     const crown = clamp01(c.pw('crest') * 1.4) * smooth(1.06, 1.12, y);
     blendHex(c.color, CROWN, crown * (0.75 + n * 0.2));
@@ -209,10 +220,18 @@ function gorillaCoat(male: boolean, eye: Vec3) {
     if (bare > 0.05) {
       const k = smooth(0.05, 0.6, bare);
       blendHex(c.color, SKIN, k);
-      c.gloss = Math.max(c.gloss, 0.34 * k);
+      // leathery and a little greasy: highlights on brow, nose and cheeks model the face
+      c.gloss = Math.max(c.gloss, 0.42 * k);
       c.fur = 1 + (c.fur - 1) * (1 - k);
-      // slightly lighter, greyer lips and a darker nose
-      if (face > 0.5 && y < 0.965 && z > 0.57) blendHex(c.color, 0x2b2726, 0.5);
+      if (face > 0.5) {
+        // greyer skin on the ridges facing up and forward (brow shelf, nose
+        // bridge, alae, lips) over deep, dark eye sockets, nostrils and mouth
+        // line: the face reads by its form, not as one black patch
+        const ridge = smooth(0.1, 0.7, c.ny * 0.7 + c.nz * 0.5);
+        blendHex(c.color, SKIN_RIDGE, 0.6 * ridge * k);
+        if (y < 0.965 && z > 0.57) blendHex(c.color, 0x2e2a29, 0.45);
+        c.color.multiplyScalar(1 - 0.7 * c.ao(0.035));
+      }
     }
     if (c.part === 'ear') {
       blendHex(c.color, SKIN, 0.85);
@@ -295,8 +314,8 @@ function design(ctx: DesignContext): CreatureDesign {
       HR: { scale: 0.45 },
     },
     coat: gorillaCoat(male, eye),
-    look: { skin: 'fur', pattern: 'none', roughness: 0.9, sheen: 0.4, grain: 0.008, bump: 0.45, mottle: 0.09 },
-    eyes: [{ bone: 'head', pos: eye, radius: 0.0105, color: 0x2b170b }],
+    look: { skin: 'fur', pattern: 'none', roughness: 0.9, sheen: 0.4, grain: 0.008, bump: 0.45, mottle: 0.09, shine: 0.035 },
+    eyes: [{ bone: 'head', pos: eye, radius: 0.0105, color: 0x4a2a12 }],
     anim: driver(anim),
     babyScale: 0.3,
     babyHead: 1.4,

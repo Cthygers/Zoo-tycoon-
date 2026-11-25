@@ -7,7 +7,7 @@ import { MAP_W } from '../src/core/constants';
 import { EventBus } from '../src/core/events';
 import { Terrain } from '../src/core/types';
 import { World } from '../src/core/world';
-import { createGroundMaterial } from '../src/render/groundMaterial';
+import { createGroundMaterial, SHORE_MOSS_SHARE } from '../src/render/groundMaterial';
 import { shoreLawnShares } from '../src/render/grass';
 import { crownCover, LakeBed, lakeBedKind, lawnShare, TileIndexTexture } from '../src/render/terrain';
 import type { GroundTextureSet } from '../src/render/textures';
@@ -111,6 +111,15 @@ describe('a pond\'s mud ring in a lawn', () => {
     expect(Number(back![2])).toBeLessThanOrEqual(0.1);
     expect(fs).toContain('return mixSample(r, sampleLayer(0, wp.xz), back);');
     expect(fs).toContain('float shoreSoil = gMud * gShoreMud;');
+    // its wet margin leans toward the turf's green at the same luminance (no dark neutral rim), only at the water
+    const moss = fs.match(/earth = mix\(earth, gLuma\(earth\) \* vec3\(([\d.]+), ([\d.]+), ([\d.]+)\), ([\d.]+) \* \(1\.0 - dryUp\)\);/);
+    expect(moss).not.toBeNull();
+    const [r, g, b, share] = moss!.slice(1).map(Number);
+    expect(0.2126 * r + 0.7152 * g + 0.0722 * b).toBeCloseTo(1, 1);
+    expect(g).toBeGreaterThan(r);
+    expect(r).toBeGreaterThan(b);
+    expect(share).toBe(SHORE_MOSS_SHARE);
+    expect(share).toBeLessThan(0.6); // a lean, not a painted green line
     // the dirt crust blurs sooner with distance (no 1-px crack net)
     expect(fs).toMatch(/if \(layer == 2\) \{[^}]*smoothstep\(0\.016, 0\.036/);
     ground.material.dispose();

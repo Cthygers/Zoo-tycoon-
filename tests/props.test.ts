@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { EventBus } from '../src/core/events';
 import { World } from '../src/core/world';
 import type { QualitySettings } from '../src/core/contracts';
-import { PropsLayer } from '../src/props';
+import { followBlockers, PropsLayer, type BlockerHit } from '../src/props';
 import { MultiBatch, frustumToArray, type CullView } from '../src/props/lod/batched';
 
 const QUALITY: QualitySettings = { level: 'low', pixelRatio: 1, antialias: false, shadows: true, shadowMapSize: 1024, grassDensity: 0.25, postFX: false, detailDistance: 26, creatureDetail: 0 };
@@ -72,6 +72,34 @@ describe('PropsLayer loading', () => {
     await layer.prewarm();
     expect(layer.debugInfo().templates).toBe(2);
     expect(layer.debugInfo().instances).toBeGreaterThan(0);
+    layer.dispose();
+  }, 60000);
+
+  it('lets boulders take the follow occluder cut and registers outcrops for the follow camera', async () => {
+    const events = new EventBus();
+    const world = new World(events, 3);
+    for (const o of [...world.objects.values()]) world.removeObject(o.id);
+    world.addObject('rock_boulder', 40, 40, 0, 1);
+    const outcrop = world.addObject('rock_outcrop', 50, 40, 0, 2);
+    const scene = new THREE.Scene();
+    const layer = new PropsLayer(world, events, scene, QUALITY);
+    await layer.prewarm();
+    const keys = new Set<string>();
+    scene.traverse((o) => {
+      const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+      if (m && !Array.isArray(m) && m.name.startsWith('nature/rock:')) keys.add(`${m.name} ${m.customProgramCacheKey()}`);
+    });
+    expect([...keys].find((k) => k.startsWith('nature/rock:granite'))).toContain('|propoccl0.6');
+    expect([...keys].find((k) => k.startsWith('nature/rock:sandstone'))).not.toContain('propoccl');
+    // the outcrop is a blocker on a low camera → subject line across it, until it is removed
+    const c = world.objectCenter(outcrop);
+    const y = world.heightAt(c.x, c.z);
+    const out: BlockerHit[] = [];
+    const across = (dz: number) => followBlockers({ x: c.x - 6, y: y + 1.2, z: c.z + dz }, { x: c.x + 4, y: y + 0.8, z: c.z + dz }, out);
+    expect(across(0)).toBe(1);
+    expect(across(6)).toBe(0);
+    world.removeObject(outcrop.id);
+    expect(across(0)).toBe(0);
     layer.dispose();
   }, 60000);
 

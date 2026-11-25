@@ -10,8 +10,9 @@
 //                   texture's alpha height, tinted by vertex colours; an
 //                   optional per-vertex `aSurf` attribute (0..1) blends to a
 //                   second roughness (snow on ice, wet moss, polished faces).
-//  bark             plain MeshStandardMaterial with albedo + normal maps and
-//                   vertex-colour tint / AO.
+//  BarkMaterial     standard material with albedo + normal maps and
+//                   vertex-colour tint / AO; at night it takes part of the
+//                   moonlit ground's neutral light (no blue-lit trunks).
 //
 // Shader patches live in prototype methods so Material.clone() (used for
 // ghost previews) keeps them; the constructors also make three honour
@@ -185,6 +186,34 @@ export interface FoliageParams extends THREE.MeshStandardMaterialParameters {
   translucency?: number;
 }
 
+/**
+ * Moonlit floor of a ground plant's own shade (a bush's inner and shadowed
+ * cards), as a share of the moonlit ground's brightness: skylight and the
+ * moonlit sand around it reach in, so a bush reads as a dark shrub, not a
+ * black hole, and stays darker than the ground. The ground's level is the
+ * moon's light on open ground (+ the hemisphere fill, MOON_FILL) on sand-like
+ * albedo; the floor keeps the plant's own hue.
+ */
+const LEAF_NIGHT_FLOOR = 0.3;
+const MOONLIT_GROUND = 0.4 * 1.3;
+
+// After nightGroundLight: lift a ground plant's diffuse light to the moonlit floor
+const LEAF_NIGHT_FLOOR_GLSL = /* glsl */ `
+#if NUM_DIR_LIGHTS > 0
+{
+  float lfK = uNightLift * vLfGround;
+  // at night the one directional light is the moon (render/context.ts)
+  float lfMoonH = dot( directionalLights[ 0 ].color, vec3( 0.2126, 0.7152, 0.0722 ) )
+                * saturate( dot( directionalLights[ 0 ].direction, normalize( ( viewMatrix * vec4( 0.0, 1.0, 0.0, 0.0 ) ).xyz ) ) );
+  vec3 lfAlb = material.diffuseContribution;
+  vec3 lfHue = clamp( lfAlb / max( dot( lfAlb, vec3( 0.2126, 0.7152, 0.0722 ) ), 1e-3 ), 0.0, 2.0 );
+  vec3 lfFloor = ${(LEAF_NIGHT_FLOOR * MOONLIT_GROUND).toFixed(3)} * lfMoonH * RECIPROCAL_PI * lfHue;
+  vec3 lfHave = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse;
+  reflectedLight.indirectDiffuse += max( lfFloor - lfHave, 0.0 ) * lfK;
+}
+#endif
+`;
+
 // Ground-plant share of a card (vLfGround): 1 on the ground sheet; on the
 // tree sheet, bushes (crown centre below ~1.8 m, from the near-camera fade's
 // crown data when the material carries it) are ground plants, tree crowns not
@@ -233,7 +262,7 @@ export class FoliageMaterial extends THREE.MeshStandardMaterial {
       .replace('#include <lights_physical_pars_fragment>', `#include <lights_physical_pars_fragment>\n${LEAF_LIGHT}`)
       .replace('#include <normal_fragment_begin>', nfb)
       .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>\n${LEAF_AMBIENT}`)
-      .replace('#include <aomap_fragment>', `float lfNightMark = 0.0;\n${nightGroundLight('vLfGround', 'diffuseColor.rgb', 'lfNightMark')}\n#include <aomap_fragment>`)
+      .replace('#include <aomap_fragment>', `float lfNightMark = 0.0;\n${nightGroundLight('vLfGround', 'diffuseColor.rgb', 'lfNightMark')}\n${LEAF_NIGHT_FLOOR_GLSL}\n#include <aomap_fragment>`)
       .replace('#include <opaque_fragment>', `#include <opaque_fragment>${nightGroundMark('lfNightMark')}`);
   }
 
@@ -286,6 +315,36 @@ export const LEAF_PARAMS = {
 // ---------------------------------------------------------------------------
 // Bark / solid textured surfaces
 
+/**
+ * Bark under the moon takes the ground's night look (nightGroundLight, the
+ * full share: 0.6 left trunks at sRGB R/B ≈ 0.67 next to neutral ground) and
+ * loses most of its sky reflection, so trunks read as moonlit grey-brown
+ * wood, not cold blue.
+ */
+const BARK_NIGHT_GROUND = 1;
+/** Share of bark's sky reflection (blue night sky) taken away at full night. */
+const BARK_NIGHT_SHEEN = 0.7;
+
+/** Bark, wood and soil: a standard material that takes part of the moonlit ground's look at night. */
+export class BarkMaterial extends THREE.MeshStandardMaterial {
+  readonly isBarkMaterial = true;
+
+  override onBeforeCompile(shader: THREE.WebGLProgramParametersWithUniforms): void {
+    shader.uniforms.uNightLift = nightGround;
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform float uNightLift;')
+      .replace(
+        '#include <aomap_fragment>',
+        `float bkNightMark = 0.0;\n${nightGroundLight(BARK_NIGHT_GROUND.toFixed(2), 'diffuseColor.rgb', 'bkNightMark')}\nreflectedLight.indirectSpecular *= 1.0 - ${BARK_NIGHT_SHEEN.toFixed(2)} * uNightLift;\n#include <aomap_fragment>`,
+      )
+      .replace('#include <opaque_fragment>', `#include <opaque_fragment>${nightGroundMark('bkNightMark')}`);
+  }
+
+  override customProgramCacheKey(): string {
+    return 'nature-bark';
+  }
+}
+
 export function barkMaterial(
   key: string,
   map: THREE.Texture,
@@ -294,7 +353,7 @@ export function barkMaterial(
 ): THREE.MeshStandardMaterial {
   // the texture set (tier resolution) is part of the identity
   return cachedMaterial(`bark:${key}#${map.uuid.slice(0, 8)}`, () => {
-    const m = new THREE.MeshStandardMaterial({
+    const m = new BarkMaterial({
       map,
       normalMap,
       vertexColors: true,

@@ -40,6 +40,7 @@ import { findEmitters, NightLights, type LocalEmitter } from './lights/nightligh
 import { LitterRenderer } from './litter';
 import { frustumToArray, InstancedBatch, MultiBatch, supportsMultiDraw, type CullView, type InstParams, type PropBatch } from './lod/batched';
 import { autoLod } from './lod/autolod';
+import { clearBlockers, setBlocker } from './lod/blockers';
 import { applyFade, applyOccluderCut, casterDepthMaterial, fadeModeOf, fadeUniforms, updateFade } from './lod/fade';
 import { propsTier, type PropsTier } from './lod/tiers';
 import { concreteMaterial, disposePropMaterials, projectBoxUVs, surfaceTextures } from './materials';
@@ -64,6 +65,14 @@ const SHADOW_STILL_SWAY = 0.005;
 
 /** Categories of built props that the follow-mode occluder cut may remove near the camera. */
 const OCCLUDER_CATEGORIES: ReadonlySet<ObjectDef['category']> = new Set(['amenity', 'decoration', 'enrichment', 'facility', 'feeder', 'shelter', 'shop']);
+/**
+ * Rocks narrower than this (half the footprint, m: boulders, ice blocks) take
+ * the occluder cut too; wider ones (outcrops) are ground animals stand on, so
+ * they stay and the follow camera looks around them (lod/blockers.ts).
+ */
+const ROCK_CUT_R = 1.8;
+/** … and only rocks taller than this (m): low stones and fallen logs hide nothing. */
+const ROCK_CUT_H = 0.8;
 
 // ---------------------------------------------------------------------------
 // Templates
@@ -105,6 +114,8 @@ interface Template {
   /** Tall enough that its shadow reads from afar (trees, buildings). */
   tall: boolean;
   emitters: LocalEmitter[];
+  /** A large rock's body (object space) for the follow camera's blocker query, null for anything else. */
+  body: { centre: THREE.Vector3; r: number; ry: number } | null;
 }
 
 interface Slot {
@@ -388,7 +399,9 @@ export class PropsLayer implements IPropsLayer {
     }
     // (not lamp posts: thin, and their halo would hang in the air without them)
     const lamp = cat === 'amenity' && OBJECTS_BY_ID[defId].light === true;
-    if (cat && OCCLUDER_CATEGORIES.has(cat) && !lamp) for (const p of parts) p.occluder = true;
+    const rock = cat === 'rock';
+    if ((cat && OCCLUDER_CATEGORIES.has(cat) && !lamp) || (rock && cls.r < ROCK_CUT_R && cls.h > ROCK_CUT_H)) for (const p of parts) p.occluder = true;
+    const body = rock && cls.r >= ROCK_CUT_R ? { centre: box.getCenter(new THREE.Vector3()), r: radius, ry: (box.max.y - Math.max(0, box.min.y)) * 0.55 } : null;
     let emitters = findEmitters(parts.filter((p) => p.levels & 1));
     if (emitters.length === 0 && OBJECTS_BY_ID[defId]?.light) {
       // lit def without glowing parts: a soft pool in front (+Z)
@@ -396,7 +409,7 @@ export class PropsLayer implements IPropsLayer {
       emitters = [{ pos: new THREE.Vector3(0, Math.min(2.2, height * 0.6), front), kind: 'window', dir: new THREE.Vector2(0, 1) }];
     }
     const lodRoots = lods.map((l) => l[0]);
-    t = { defId, variant, spec, root, lodRoots, hasLod: lodRoots.length > 0, parts, radius, height, tall: cls.tall, emitters };
+    t = { defId, variant, spec, root, lodRoots, hasLod: lodRoots.length > 0, parts, radius, height, tall: cls.tall, emitters, body };
     this.templates.set(key, t);
     return t;
   }
@@ -683,6 +696,10 @@ export class PropsLayer implements IPropsLayer {
       if (tpl.hasLod) this.lodRecs.push(rec);
     }
     if (tpl.emitters.length) this.night.setObject(o.id, tpl.emitters, rec.matrix);
+    if (tpl.body) {
+      const c = this.tmpP.copy(tpl.body.centre).applyMatrix4(rec.matrix);
+      setBlocker(o.id, { x: c.x, y: c.y, z: c.z, r: tpl.body.r * rec.scale, ry: tpl.body.ry * rec.scale });
+    }
     this.recs.set(o.id, rec);
     this.cullDirty = true;
     if (this.highlightId === o.id) this.showHighlight(rec);
@@ -722,6 +739,7 @@ export class PropsLayer implements IPropsLayer {
       if (i >= 0) this.lodRecs.splice(i, 1);
     }
     this.night.setObject(id, null, null);
+    setBlocker(id, null);
     this.recs.delete(id);
     this.cullDirty = true;
     if (this.highlightId === id) this.highlight.clear();
@@ -734,6 +752,7 @@ export class PropsLayer implements IPropsLayer {
     this.uniques.length = 0;
     this.lodRecs.length = 0;
     this.night.clear();
+    clearBlockers();
     this.recs.clear();
     this.highlight.clear();
     for (const o of this.world.objects.values()) this.addObject(o);
@@ -1132,6 +1151,7 @@ export class PropsLayer implements IPropsLayer {
     this.litter.dispose();
     this.highlight.dispose();
     this.night.dispose();
+    clearBlockers();
     disposePropMaterials();
     disposeNatureResources();
     disposeStructures();

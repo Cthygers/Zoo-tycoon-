@@ -62,6 +62,15 @@ describe('resting arms', () => {
     expect(j.L.hand.y).toBeLessThan(0.95);
   });
 
+  it('lets free arms hang beside the hips, the hands clear of the thighs', () => {
+    const j = joints(0, 'idle');
+    expect(j.L.hand.x).toBeGreaterThan(0.17);
+    expect(j.R.hand.x).toBeLessThan(-0.17);
+    // still hanging, not held out
+    expect(j.L.hand.x).toBeLessThan(0.23);
+    expect(j.L.hand.y).toBeLessThan(0.95);
+  });
+
   it('swings the arms again when walking, and holds what is carried instead', () => {
     const walking = joints(1, 'walk', 1.3);
     for (const s of [walking.L, walking.R]) expect(s.hand.y).toBeLessThan(1.0);

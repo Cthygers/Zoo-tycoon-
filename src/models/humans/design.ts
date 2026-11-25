@@ -34,6 +34,11 @@ export interface HumanDesign {
     /** Head ellipsoid centre and scale (adult male head = 1), for marks painted on the scalp. */
     headC: Vec3;
     headS: number;
+    /** Left wrist and ankle joints (rest): the hands hang below and beyond the wrist, the shoes sit below the ankle. */
+    wristL: Vec3;
+    ankleL: Vec3;
+    /** Body scale (adult man = 1). */
+    bodyScale: number;
   };
 }
 
@@ -57,6 +62,8 @@ export function fringeDistance(d: HumanDesign, y: number, z: number): number {
  * Proportions are authored for a 1.75 m adult; children use a smaller body
  * with a relatively larger head (the whole design is then ~1.25 m tall).
  */
+const lerp3 = (a: Vec3, b: Vec3, t: number): Vec3 => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+
 export function humanDesign(key: HumanBodyKey): HumanDesign {
   const f = key.female;
   const child = key.child;
@@ -123,33 +130,80 @@ export function humanDesign(key: HumanBodyKey): HumanDesign {
     ellipsoid('hips', [0, 0.95, -0.01], [0.155 * hipW, 0.1, 0.105], { blend: 0.06, part: 'pelvis' }),
     ellipsoid('hips', [0, 0.92, -0.05], [0.13 * hipW, 0.09, 0.08], { blend: 0.05, part: 'pelvis' }),
     // shoulders: deltoids drawn down into the arm (not round caps that read
-    // as puffed sleeves) under a trapezius sloping from the neck, so the
-    // shoulder line falls from the collar instead of a square shelf
-    ...symmetric([ellipsoid('upperArm.L', [0.17 * shW, 1.395, -0.015], [0.046, 0.058, 0.05], { blend: 0.06, part: 'arm', region: 'armL' })], (n) => n.replace('.L', '.R').replace('armL', 'armR')),
+    // as puffed sleeves) under the point of the shoulder, which stays with
+    // the shoulder blade when the arm is lowered, and a trapezius sloping from
+    // the neck, so the shoulder line falls from the collar instead of a square shelf
+    ...symmetric([ellipsoid('upperArm.L', [0.168 * shW, 1.382, -0.012], [0.044, 0.064, 0.048], { blend: 0.06, part: 'arm', region: 'armL' })], (n) => n.replace('.L', '.R').replace('armL', 'armR')),
+    ...symmetric([ellipsoid('clav.L', [0.152 * shW, 1.428, -0.02], [0.05 * shW, 0.024, 0.045], { rot: [0, 0, -0.3], blend: 0.04, part: 'torso' })]),
     ...symmetric([ellipsoid('chest', [0.075 * shW, 1.442, -0.03], [0.085 * shW, 0.03, 0.05], { rot: [0, 0, -0.32], blend: 0.05, part: 'torso' })]),
+    // shoulder blades: the back is not a smooth tube
+    ...symmetric([ellipsoid('chest', [0.07 * shW, 1.33, -0.075], [0.055 * shW, 0.07, 0.03], { rot: [0, 0, 0.2], blend: 0.05, part: 'torso' })]),
     // neck
     cone('neck', [0, 1.44, -0.02], [0, 1.56, -0.005], 0.055, 0.047, { blend: 0.04, part: 'neck' }),
   ];
   if (f) {
     torso.push(...symmetric([ellipsoid('chest', [0.055, 1.27, 0.07], [0.058, 0.055, 0.045], { blend: 0.05, part: 'torso' })]));
   }
-  // hand (A-pose: hanging along the forearm line, palm toward the thigh, thumb forward):
-  // a palm, slightly cupped tapering fingers and a thumb, instead of a paddle
+  // hand (A-pose: hanging along the forearm line, palm toward the thigh, thumb
+  // forward), built in its own frame: u down the hand from the wrist, v across
+  // it toward the thumb, t out of the back of the hand. A flat palm with the
+  // ball of the thumb, four fingers side by side with a fillet between them
+  // (grooves), relaxed into a slight curl at the knuckles, and a thumb set
+  // apart from the index finger: a hand, not a mitten.
   const hx = 0.185 * shW + 0.215, hr = 0.4;
+  const wrist: Vec3 = [hx, 0.906, -0.01];
+  const ha: Vec3 = [Math.sin(hr), -Math.cos(hr), 0];
+  const ht: Vec3 = [Math.cos(hr), Math.sin(hr), 0];
+  const hf = (u: number, v: number, t: number): Vec3 => [wrist[0] + u * ha[0] + t * ht[0], wrist[1] + u * ha[1] + t * ht[1], wrist[2] + v];
+  const hand = (p: Prim): Prim => ({ ...p, part: 'hand', region: 'handL' });
+  const fingers: Prim[] = [];
+  // [v across the knuckles, base radius, length, knuckle u]: index, middle, ring, little
+  const FINGERS: readonly (readonly [number, number, number, number])[] = [
+    [0.0275, 0.0088, 0.07, 0.088],
+    [0.0092, 0.0092, 0.078, 0.09],
+    [-0.0092, 0.0087, 0.073, 0.088],
+    [-0.0262, 0.0076, 0.058, 0.082],
+  ];
+  for (const [v, r, len, u0] of FINGERS) {
+    // the first half bent 0.25 rad toward the palm (−t), the rest 0.85 rad
+    const ju = u0 + 0.5 * len * Math.cos(0.25), jt = -0.5 * len * Math.sin(0.25);
+    const tip = hf(ju + 0.5 * len * Math.cos(0.85), v, jt - 0.5 * len * Math.sin(0.85));
+    fingers.push(hand(cone('hand.L', hf(u0 - 0.008, v, 0), hf(ju, v, jt), r, r * 0.88, { blend: 0.004 })), hand(cone('hand.L', hf(ju, v, jt), tip, r * 0.88, r * 0.74, { blend: 0.003 })));
+  }
   const armL: Prim[] = [
-    cone('upperArm.L', J.shoulder, J.elbow, 0.048, 0.038, { blend: 0.03, part: 'arm', region: 'armL' }),
+    // the upper arm starts a little down from the joint: a round end centred
+    // on the pivot would stay put as the arm is lowered from the modelling
+    // pose and stand out over it as a puffed sleeve
+    cone('upperArm.L', lerp3(J.shoulder, J.elbow, 0.12), J.elbow, 0.047, 0.038, { blend: 0.03, part: 'arm', region: 'armL' }),
     cone('foreArm.L', J.elbow, J.wrist, 0.038, 0.027, { blend: 0.02, part: 'arm', region: 'armL' }),
-    ellipsoid('hand.L', [hx + 0.016, 0.868, -0.004], [0.019, 0.04, 0.04], { rot: [0, 0, hr], blend: 0.014, part: 'hand', region: 'handL' }),
-    ellipsoid('hand.L', [hx + 0.031, 0.826, -0.002], [0.0135, 0.034, 0.034], { rot: [0.12, 0, hr + 0.08], blend: 0.012, part: 'hand', region: 'handL' }),
-    cone('hand.L', [hx + 0.006, 0.884, 0.026], [hx + 0.022, 0.846, 0.047], 0.0105, 0.0075, { blend: 0.01, part: 'hand', region: 'handL' }),
+    // the forearm's muscle belly below the elbow (no straight tube)
+    ellipsoid('foreArm.L', [0.185 * shW + 0.135, 1.09, -0.035], [0.037, 0.065, 0.037], { rot: [0, 0, hr], blend: 0.03, part: 'arm', region: 'armL' }),
+    hand(ellipsoid('hand.L', hf(0.047, 0.003, 0.001), [0.0155, 0.046, 0.041], { rot: [0, 0, hr], blend: 0.013 })),
+    // ball of the thumb on the palm
+    hand(ellipsoid('hand.L', hf(0.032, 0.024, -0.009), [0.012, 0.03, 0.017], { rot: [0, 0, hr], blend: 0.01 })),
+    ...fingers,
+    // thumb: metacarpal from the heel of the palm, then the phalanges reaching
+    // down beside (not against) the index finger
+    hand(cone('hand.L', hf(0.014, 0.026, -0.006), hf(0.052, 0.044, -0.016), 0.0118, 0.0105, { blend: 0.008 })),
+    hand(cone('hand.L', hf(0.052, 0.044, -0.016), hf(0.086, 0.05, -0.021), 0.0105, 0.0082, { blend: 0.004 })),
   ];
+  const ax = J.ankle[0];
   const legL: Prim[] = [
-    cone('thigh.L', [J.hip[0], 0.92, -0.005], J.knee, 0.088, 0.058, { blend: 0.05, part: 'leg' }),
+    // the thighs on the leg's own grid with a small blend: on the coarse body
+    // grid the gap between them filled in, an apron hanging from the hips
+    cone('thigh.L', [J.hip[0], 0.92, -0.005], J.knee, 0.085, 0.058, { blend: 0.028, part: 'leg', region: 'legL' }),
     cone('shin.L', J.knee, J.ankle, 0.056, 0.04, { blend: 0.025, part: 'leg', region: 'legL' }),
-    // shoe
-    roundBox('foot.L', [J.ankle[0], 0.045, 0.045], [0.045, 0.045, 0.125], 0.04, { blend: 0.025, part: 'shoe', region: 'legL' }),
+    // the calf's muscle high on the back of the shin and the kneecap in front
+    ellipsoid('shin.L', [J.knee[0] + 0.003, 0.37, -0.008], [0.052, 0.1, 0.056], { blend: 0.04, part: 'leg', region: 'legL' }),
+    ellipsoid('thigh.L', [J.knee[0], 0.51, 0.052], [0.03, 0.032, 0.02], { blend: 0.025, part: 'leg', region: 'legL' }),
+    // shoe: a low upper on a sole a little wider than it, a squared heel and a
+    // toe that springs up off the ground (no loaf)
+    roundBox('foot.L', [ax, 0.047, 0.045], [0.041, 0.034, 0.1], 0.03, { blend: 0.02, part: 'shoe', region: 'footL' }),
+    ellipsoid('foot.L', [ax + 0.003, 0.034, 0.125], [0.041, 0.028, 0.062], { rot: [-0.2, 0, 0], blend: 0.02, part: 'shoe', region: 'footL' }),
+    roundBox('foot.L', [ax, 0.011, 0.03], [0.045, 0.011, 0.112], 0.009, { blend: 0.006, part: 'shoe', region: 'footL' }),
+    roundBox('foot.L', [ax, 0.032, -0.052], [0.037, 0.032, 0.034], 0.018, { blend: 0.012, part: 'shoe', region: 'footL' }),
   ];
-  const mirrorSide = (n: string) => n.replace('.L', '.R').replace('armL', 'armR').replace('legL', 'legR').replace('handL', 'handR');
+  const mirrorSide = (n: string) => n.replace('.L', '.R').replace('armL', 'armR').replace('legL', 'legR').replace('handL', 'handR').replace('footL', 'footR');
   // skirt / dress: an A-line from the hips to just above the knee — a wide,
   // flat hem disc smooth-unioned into the hips (the large blend fills the cone
   // between them), covering the thighs
@@ -177,7 +231,9 @@ export function humanDesign(key: HumanBodyKey): HumanDesign {
     ellipsoid('head', [0, 1.586, 0.083], [0.019, 0.0075, 0.011], { blend: 0.012, part: 'head' }),
     ellipsoid('head', [0, 1.55, 0.07], [0.022, 0.017, 0.017], { blend: 0.02, part: 'head' }),
     ...symmetric([ellipsoid('head', [0.031, 1.651, 0.098], [0.017, 0.01, 0.011], { sub: true, blend: 0.012, part: 'head' })]),
-    ...symmetric([ellipsoid('head', [0.074, 1.632, -0.005], [0.012, 0.026, 0.017], { blend: 0.01, part: 'ear' })]),
+    // ears stand a little off the head, on a grid fine enough to keep the
+    // plate (long hair falls over them: they would poke through it)
+    ...(key.hair === 'long' ? [] : symmetric([ellipsoid('head', [0.077, 1.632, -0.008], [0.011, 0.027, 0.018], { rot: [0, -0.35, 0], blend: 0.008, part: 'ear', region: 'ear.L' })])),
   ];
   const hair: Prim[] = [];
   switch (key.hair) {
@@ -241,6 +297,9 @@ export function humanDesign(key: HumanBodyKey): HumanDesign {
       mouth: H([0, 1.585, 0.084]),
       headC: H([0, 1.645, 0]),
       headS: bs * hs,
+      wristL: S(J.wrist),
+      ankleL: S(J.ankle),
+      bodyScale: bs,
     },
   };
 }

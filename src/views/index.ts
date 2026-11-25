@@ -420,6 +420,18 @@ export function createEntityViews(
     return new THREE.Vector3(cx, sim.world.heightAt(cx, cz), cz);
   }
 
+  function positionInto(sel: SelectionRef, out: THREE.Vector3): boolean {
+    if (sel.kind === 'animal' || sel.kind === 'guest' || sel.kind === 'staff') {
+      const v = views.get(key(sel.kind, sel.id));
+      if (!v) return false;
+      out.copy(v.model.object.position);
+      return true;
+    }
+    const p = positionOf(sel);
+    if (p) out.copy(p);
+    return p !== null;
+  }
+
   function dispose(): void {
     disposed = true;
     offs.forEach((off) => off());
@@ -430,5 +442,5 @@ export function createEntityViews(
     ringMat.dispose();
   }
 
-  return { update, pick, setSelected, positionOf, dispose, prepare };
+  return { update, pick, setSelected, positionOf, positionInto, dispose, prepare };
 }

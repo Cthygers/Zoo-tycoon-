@@ -10,6 +10,9 @@
 //   * long hair (manes, shaggy bears) with darker partings between the locks
 //     and a raised fur shell of lock tips (build/furShell.ts) that breaks up
 //     the silhouette, up close only,
+//   * optional hair shine on dark long-haired coats (look.shine, gorilla): a
+//     soft Kajiya–Kay band of the key light and the sky across the hair flow,
+//     broken into locks up close, so a near-black coat still shows its form,
 //   * a matte coat: fur, feathers and dry skin get a weak, coat-tinted Fresnel
 //     instead of the white grazing reflection that makes them read as plastic,
 //     plus a soft coat-tinted sheen along the silhouette (tight on short coats,
@@ -22,6 +25,8 @@
 //     albedo) for elephants, rhinos and hippos instead of the cell plates of
 //     'hide', which read as reptile scales up close, plus deep folds across
 //     legs and trunks where the coat sets `fold` (baked as −pattern.w),
+//   * darker folded lower legs while lying (look.lieShade; the lying amount
+//     from the instance's look texel w, see RiggedModel),
 //   * an optional growth-dependent juvenile tint (chick down). Growth comes
 //     from the instance's look texel in the batched renderer (`USE_BATCHING`)
 //     and is 1 (adult) for standalone meshes,
@@ -49,6 +54,13 @@ export interface AnimalMaterialOptions {
   /** 0 low, 1 medium, 2 high (micro detail disabled on low). */
   detail: 0 | 1 | 2;
   highlight?: boolean;
+  /**
+   * The mesh carries a fur shell (build/furShell.ts). Only then does the
+   * program lift shell vertices and discard between their lock tips: a
+   * `discard` in a fragment shader can cost early depth testing on tile-based
+   * phone GPUs, so coats without a shell compile without it.
+   */
+  furShell?: boolean;
 }
 
 export function createAnimalMaterial(o: AnimalMaterialOptions): THREE.MeshStandardMaterial {
@@ -59,6 +71,9 @@ export function createAnimalMaterial(o: AnimalMaterialOptions): THREE.MeshStanda
   const juv = look.juvenile ? 1 : 0;
   const wets = (look.wets ?? look.skin === 'wrinkled') ? 1 : 0;
   const thick = look.skin === 'hide' || look.skin === 'wrinkled';
+  const shine = look.skin === 'fur' && (look.shine ?? 0) > 0 ? 1 : 0;
+  const shell = look.skin === 'fur' && o.furShell ? 1 : 0;
+  const lie = look.lieShade ? 1 : 0;
   const mat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     vertexColors: true,
@@ -70,6 +85,8 @@ export function createAnimalMaterial(o: AnimalMaterialOptions): THREE.MeshStanda
     uBump: { value: look.bump ?? 0.5 },
     uSheen: { value: look.sheen ?? (look.skin === 'fur' ? 0.3 : look.skin === 'feather' ? 0.2 : 0.05) },
     uMottle: { value: look.mottle ?? 0.12 },
+    uShine: { value: look.shine ?? 0 },
+    uLieShade: { value: new THREE.Vector2(look.lieShade?.amount ?? 0, look.lieShade?.below ?? 0) },
     uJuvColor: { value: new THREE.Color(look.juvenile?.color ?? 0x808080) },
     uJuvAmount: { value: look.juvenile?.amount ?? 0.85 },
     uJuvUntil: { value: Math.max(0.05, look.juvenile?.until ?? 0.65) },
@@ -95,12 +112,15 @@ varying float vCrGrowth;
 #endif
 #if ${wets} == 1
 varying float vCrWet;
+#endif
+#if ${lie} == 1
+varying float vCrLie;
 #endif`,
       )
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
-#if ${skin} == 0
+#if ${shell} == 1
 // fur shell (build/furShell.ts): raised along the normal by the fur length
 if (pattern.z < -0.5) transformed += normal * (${FUR_SHELL_LEN} * (pattern.w - ${FUR_SHELL_FROM.toFixed(1)}));
 #endif
@@ -121,6 +141,13 @@ vCrWet = crTexel(crBase).z;
 #else
 vCrWet = 0.0;
 #endif
+#endif
+#if ${lie} == 1
+#ifdef USE_BATCHING
+vCrLie = crTexel(crBase).w;
+#else
+vCrLie = 0.0;
+#endif
 #endif`,
       );
     shader.fragmentShader = shader.fragmentShader
@@ -133,10 +160,14 @@ vCrWet = 0.0;
 #define CR_JUV ${juv}
 #define CR_WETS ${wets}
 #define CR_HIGHLIGHT ${hl}
+#define CR_SHINE ${shine}
+#define CR_SHELL ${shell}
+#define CR_LIE ${lie}
 uniform float uGrain;
 uniform float uBump;
 uniform float uSheen;
 uniform float uMottle;
+uniform float uShine;
 uniform mat3 normalMatrix;
 #define CR_F90 ${GRAZING_F90[look.skin].toFixed(2)}
 #define CR_SHEEN_HUE ${SHEEN_HUE[look.skin].toFixed(2)}
@@ -148,6 +179,10 @@ varying vec3 vRestPos;
 varying vec3 vRestNormal;
 #if CR_WETS == 1
 varying float vCrWet;
+#endif
+#if CR_LIE == 1
+uniform vec2 uLieShade;
+varying float vCrLie;
 #endif
 #if CR_JUV == 1
 uniform vec3 uJuvColor;
@@ -170,16 +205,27 @@ float cr_clump(vec3 q, vec3 flow, float squash) {
   q += 7.3;
   return cr_vnoise(q - flow * dot(q, flow) * squash);
 }
-// Fur relief (strand units): strands and clumps (lock length from squash, see
-// cr_clump), weighted by their footprint fades. jit: the clumps wander by up
-// to jit.w (clump units) along jit.xyz, varying over ~2 clumps.
-float cr_fur(vec3 q, vec3 flow, float wS, float wC, float squash, vec4 jit) {
+// Fur relief (strand units): strands and clumps (lock and strand lengths from
+// squash.x / squash.y, see cr_clump), weighted by their footprint fades. jit:
+// the clumps wander by up to jit.w (clump units) along jit.xyz, varying over
+// ~2 clumps.
+float cr_fur(vec3 q, vec3 flow, float wS, float wC, vec2 squash, vec4 jit) {
   vec3 qc = q * (1.0 / CR_CLUMP);
   if (jit.w > 0.001) qc += jit.xyz * ((cr_vnoise(qc * 0.5 + 3.7) - 0.5) * jit.w);
-  float h = wC * 3.0 * cr_clump(qc, flow, squash);
-  if (wS > 0.001) h += wS * cr_vnoise(q - flow * dot(q, flow) * 0.85);
+  float h = wC * 3.0 * cr_clump(qc, flow, squash.x);
+  if (wS > 0.001) h += wS * cr_vnoise(q - flow * dot(q, flow) * squash.y);
   return h;
 }
+#if CR_SHINE == 1
+// Kajiya–Kay hair highlight: light mirrored by the hair cuticles around the
+// hair's tangent t (view space, on the surface), for light direction l; the
+// tangent is tilted toward the normal n by shift (per lock) so the band breaks up.
+float cr_hairShine(vec3 t, vec3 n, vec3 l, vec3 v, float shift) {
+  vec3 ts = normalize(t + n * shift);
+  float th = dot(ts, normalize(l + v));
+  return pow(max(1.0 - th * th, 0.0), 24.0);
+}
+#endif
 #endif
 #if CR_SKIN == 4
 // A groove along an iso-line of value noise: u = |noise − 0.5|, half-width w
@@ -264,11 +310,17 @@ float crWC = 1.0 - smoothstep(0.25, 0.7, crPix / (crGrain * CR_CLUMP));
   float lockW = crGrain * 1.8;
   float crNear = 1.0 - smoothstep(0.22, 0.4, crPix / lockW);
   float crLong = smoothstep(0.3, 1.3, vPattern.w) * crNear;
+  #if CR_SHELL == 1
   bool crShell = vPattern.z < -0.5;
+  #else
+  const bool crShell = false;
+  #endif
   if (crLong > 0.001 || crShell) {
     float lock = cr_clump(vRestPos / lockW, crFlow, 0.9);
+    #if CR_SHELL == 1
     // shell: about half the lock tips stay; fewer toward its border on shorter hair
     if (crShell && lock < 1.02 - 0.55 * crNear * smoothstep(1.6, 2.1, vPattern.w)) discard;
+    #endif
     float pale = smoothstep(0.55, 0.85, sqrt(dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722))));
     diffuseColor.rgb *= 1.0 + crLong * mix(0.9, 0.35, pale) * (lock - 0.5);
   }
@@ -365,6 +417,11 @@ float crCw;
   vec3 juv = uJuvColor * mix(1.0, clamp(l / lj, 0.3, 2.5), uJuvKeep);
   diffuseColor.rgb = mix(diffuseColor.rgb, juv, k);
 }
+#endif
+#if CR_LIE == 1
+// folded lower legs under a lying body: little light reaches them, and pale
+// cannons must not read as a white frame under the belly (LookSpec.lieShade)
+diffuseColor.rgb *= mix(vec3(1.0), vec3(0.42, 0.36, 0.3), uLieShade.x * vCrLie * (1.0 - smoothstep(uLieShade.y * 0.8, uLieShade.y, vRestPos.y)));
 #endif`,
       )
       .replace(
@@ -399,10 +456,13 @@ material.specularColorBlended = mix(material.specularColor, diffuseColor.rgb, me
     // whose long relief bands would shade into contour lines. Pale coats also
     // get half the clump relief, and their locks wander ~2 cm across the flow
     // so the relief never lines up into concentric bands where the flow
-    // curves (polar bear neck and shoulder).
-    float sq = mix(0.55, 0.8, (crPale - 0.25) / 0.75);
+    // curves (polar bear neck and shoulder). Their strands are shorter and
+    // fainter too: long parallel strands on a bright coat read as brushed
+    // wood at the closest zoom, not hair.
     float pale = 1.0 - smoothstep(0.3, 0.5, crPale);
+    vec2 sq = vec2(mix(0.55, 0.8, (crPale - 0.25) / 0.75), mix(0.85, 0.62, pale));
     float wC = crWC * (1.0 - 0.5 * pale);
+    wS *= 1.0 - 0.35 * pale;
     vec4 jit = vec4(normalize(cross(crN0, crFlow)), pale * 0.06 / (crGrain * CR_CLUMP));
     float h0 = cr_fur(p, crFlow, wS, wC, sq, jit);
     vec3 g = vec3(cr_fur(p + vec3(e, 0.0, 0.0), crFlow, wS, wC, sq, jit) - h0, cr_fur(p + vec3(0.0, e, 0.0), crFlow, wS, wC, sq, jit) - h0, cr_fur(p + vec3(0.0, 0.0, e), crFlow, wS, wC, sq, jit) - h0) / e;
@@ -458,7 +518,29 @@ if (crFade > 0.001 && crGloss < 0.5) {
       )
       .replace(
         '#include <opaque_fragment>',
-        `{
+        `#if CR_SHINE == 1
+{
+  // hair shine: the key light (with its shadow) and the sky above reflect
+  // off the cuticles of dark hair as soft bands across the hair flow, which
+  // model the shoulders, arms and crown of a near-black coat. Up close the
+  // band shifts per lock (the clumps' footprint fade: never finer than the
+  // clumps, so no shimmer); at range it is one smooth band on the surface's
+  // own normal.
+  vec3 crT = normalMatrix * crFl;
+  crT = normalize(crT - nonPerturbedNormal * dot(crT, nonPerturbedNormal) + vec3(0.0, -1e-4, 0.0));
+  float crShift = crWC * (cr_clump(vRestPos / (crGrain * CR_CLUMP) + 2.3, crFlow, 0.7) - 0.5) * 0.6;
+  vec3 crSky = (viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz;
+  // the sky's band in its brightness only (a blue band read as a dye on the coat)
+  float crSkyE = dot(irradiance + iblIrradiance, vec3(0.2126, 0.7152, 0.0722));
+  vec3 crShine = vec3(crSkyE * 0.5 * cr_hairShine(crT, nonPerturbedNormal, crSky, geometryViewDir, crShift));
+  #if NUM_DIR_LIGHTS > 0
+  crShine += directLight.color * saturate(dot(nonPerturbedNormal, directLight.direction)) * cr_hairShine(crT, nonPerturbedNormal, directLight.direction, geometryViewDir, crShift);
+  #endif
+  // hair only (bare face, chest, palms and soles bake fur ≈ 1); a faint warm cast from light scattered in the hair
+  outgoingLight += uShine * smoothstep(1.1, 1.5, crFur) * (1.0 - crGloss) * crShine * vec3(1.0, 0.94, 0.86);
+}
+#endif
+{
   // sheen: hairs (or dust) seen side-on near the silhouette scatter the light
   // that falls on the coat, so the edge gets a soft halo in the coat's hue
   // instead of a hard plastic line: a tight edge on short coats, a broad one
@@ -483,7 +565,7 @@ outgoingLight = crHighlightFurOf(outgoingLight, uHighlight, vPattern.w);
       );
     applyLampField(shader);
   };
-  mat.customProgramCacheKey = () => `creature-animal-${skin}-${pattern}-${micro}-${juv}-${wets}-${hl}`;
+  mat.customProgramCacheKey = () => `creature-animal-${skin}-${pattern}-${micro}-${juv}-${wets}-${hl}-${shine}-${shell}-${lie}`;
   mat.userData.creatureUniforms = uniforms;
   return mat;
 }

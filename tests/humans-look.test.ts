@@ -54,8 +54,9 @@ const MARKS: HumanMarks = { collarY: 1.43, waistY: 0.985, shoeTop: 0.1, eyeL: [0
 
 describe('guest outfits and close-range detail', () => {
   it('packs the style bits next to the body id in one exact float texel', () => {
-    const style = humanStyle({ print: HUMAN_PRINTS.graphic, lightSole: true, stubble: false, vNeck: true });
-    expect(style).toBe(4 + 8 + 32);
+    const style = humanStyle({ print: HUMAN_PRINTS.graphic, lightSole: true, stubble: false, neckline: 'deepV' });
+    expect(style).toBe(4 + 8 + 32 + 64);
+    expect(humanStyle({ print: HUMAN_PRINTS.plain, lightSole: false, stubble: true, neckline: 'v' })).toBe(16 + 32);
     const dst = new Float32Array(HUMAN_LOOK_TEXELS * 4);
     const colors = { skin: 0x5c3a25, hair: 0x16110e, shirt: 0xe6e6e2, pants: 0x2c3e5c, shoes: 0xe8e6e1, hat: 0x2c3e5c };
     writeHumanLook(dst, 0, colors, { sleeve: 0.13, pants: 1.1, coat: -1, inflate: 0, style }, 3, 0);
@@ -79,6 +80,18 @@ describe('guest outfits and close-range detail', () => {
     expect(prints.size).toBe(6);
     expect(stubble).toBeGreaterThan(10);
     expect(stubble).toBeLessThan(40);
+    // V-necks: a shallow cut on men, a deeper one on women, none on children
+    const necks = { man: new Set<number>(), woman: new Set<number>(), child: new Set<number>() };
+    for (let seed = 0; seed < 80; seed++) {
+      for (const [k, who] of [['man', app], ['woman', { ...app, female: true }], ['child', { ...app, child: true }]] as const) {
+        const g = f.createHuman(who, 'guest', seed);
+        necks[k].add(styleOf(g) & 96);
+        g.dispose();
+      }
+    }
+    expect([...necks.man].sort()).toEqual([0, 32]);
+    expect([...necks.woman].sort()).toEqual([0, 96]);
+    expect([...necks.child]).toEqual([0]);
     for (const role of ['keeper', 'groundskeeper', 'vet'] as const) {
       const s = f.createHuman(app, role, 7);
       expect(styleOf(s)).toBe(0);
@@ -107,7 +120,7 @@ describe('guest outfits and close-range detail', () => {
       // the toe reads the mask after the colour stage sets it
       expect(fs.indexOf('float hmSkinDark =')).toBeLessThan(fs.indexOf('(LF_SKIN)'));
       expect(vs).toContain('if (zone.z > 0.0 && zone.w <= 0.0) transformed += normal *');
-      expect(vs.indexOf('float hm_vnoise(')).toBeLessThan(vs.indexOf('if (zone.z > 0.0'));
+      expect(vs.indexOf('float cr_vnoise(')).toBeLessThan(vs.indexOf('if (zone.z > 0.0'));
       // no fragment-only derivatives in the vertex stage
       expect(vs).not.toMatch(/dFd[xy]|fwidth/);
     }

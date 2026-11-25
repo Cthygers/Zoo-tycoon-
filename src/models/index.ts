@@ -31,10 +31,12 @@ import { HumanFactory } from './humans/human';
 import { itemMaterial } from './humans/items';
 import { CrowdRenderer, type BatchSpec, type BatchedModel, type CrowdStats } from './crowd/crowd';
 import { ANIMAL_LOOK_TEXELS, batchedAnimalMaterials } from './crowd/materials';
+import type { SkinnedBatch } from './crowd/batch';
 import { LOD_LEVELS, LodChain } from './lod/lod';
 import type { SpeciesModel } from './types';
 
 export type { CreatureDesign, SpeciesModel, CoatSample, AnimCtx, AnimDriver } from './types';
+export { setCreatureFollowCut } from './crowd/batch';
 
 const yieldToBrowser = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 const now = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -52,8 +54,14 @@ export class AnimalModel extends RiggedModel implements BatchedModel {
       key: `animal:${a.key}`,
       bones: a.rig.count,
       look: ANIMAL_LOOK_TEXELS,
-      make: () => batchedAnimalMaterials(a.design.look, a.detail ?? 1),
+      make: () => batchedAnimalMaterials(a.design.look, a.detail ?? 1, a.furShell ?? false),
     };
+  }
+
+  override enterBatch(batch: SkinnedBatch, slot: number): void {
+    // other animals in front of a followed subject are cut (crowd/batch.ts)
+    batch.followCut = true;
+    super.enterBatch(batch, slot);
   }
 }
 

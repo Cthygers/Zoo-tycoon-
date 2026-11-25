@@ -119,10 +119,12 @@ const SHOES = [0xe8e6e1, 0x222222, 0x4a3426, 0x6b6b6b, 0x8a6a4a, 0x2c3a4f];
 /** Below this CIE76 ΔE a garment reads as skin. */
 const SKIN_DELTA_E = 15;
 /**
- * Minimum ΔE from the skin for a woman's top and bottom (either may be worn
- * as a dress or skirt over bare legs, one garment from collar to knee: a coral
- * dress on brown skin reads as one clay-coloured figure) and for hair (dark red
- * hair on brown skin: a blank head).
+ * Minimum ΔE from the skin for every top (it meets the face and the bare arms:
+ * a brown tee on brown skin reads as a bare torso, its rib as a collar), a
+ * woman's bottom (worn as a skirt over bare legs: with a top of its colour a
+ * dress, one garment from collar to knee, and a coral dress on brown skin reads
+ * as one clay-coloured figure, so a woman's garments also keep out of the
+ * skin's hue family) and hair (dark red hair on brown skin: a blank head).
  */
 const DRESS_DELTA_E = 25;
 /**
@@ -234,9 +236,9 @@ function darkerFrom(list: readonly number[], from: number, ok: (c: number) => bo
  * Make a guest's look read as a person in clothes: neither garment passes for
  * skin, the top differs in lightness from the bottom, a woman with grey or
  * blonde hair never gets a white / cream top (some wear it as a dress: a
- * statue), a woman's garments stand well apart from her skin (DRESS_DELTA_E,
- * outside its hue family), and so does the hair (re-dyed to the nearest
- * darker shade that does).
+ * statue), every top and a woman's bottom stand well apart from the skin
+ * (DRESS_DELTA_E; a woman's outside its hue family too), and so does the hair
+ * (re-dyed to the nearest darker shade that does).
  * Only colours drawn from the guest palettes are changed, each to a suitable
  * palette colour chosen by its own index, so it uses no random draws and can run again after
  * a companion takes on the party leader's skin.
@@ -245,16 +247,19 @@ export function fitOutfit(app: HumanAppearance): void {
   const hairs = GREY_HAIR.includes(app.hair) ? GREY_HAIR : DYED_HAIR;
   const hi = hairs.indexOf(app.hair);
   if (hi >= 0) app.hair = darkerFrom(hairs, hi, (c) => hairReads(c, app.skin));
-  const apart = (c: number) => !looksLikeSkin(c, app.skin) && (!app.female || (deltaE(c, app.skin) >= DRESS_DELTA_E && !skinHued(c, app.skin)));
+  const notSkin = (c: number) => !looksLikeSkin(c, app.skin);
+  const apart = (c: number) => notSkin(c) && deltaE(c, app.skin) >= DRESS_DELTA_E;
+  // a woman's garments may meet as a dress: outside the skin's hue family too
+  const dressApart = (c: number) => apart(c) && !skinHued(c, app.skin);
   const pi = PANTS.indexOf(app.pants);
-  if (pi >= 0) app.pants = pickFrom(PANTS, pi, apart);
+  if (pi >= 0) app.pants = pickFrom(PANTS, pi, app.female ? dressApart : notSkin);
   const si = SHIRT.indexOf(app.shirt);
   if (si < 0) return;
   const pantsL = hexToLab(app.pants)[0];
   const paleHair = app.female && hexToLab(app.hair)[0] > PALE_HAIR_L;
   app.shirt = pickFrom(SHIRT, si, (c) => {
     const L = hexToLab(c)[0];
-    return apart(c) && Math.abs(L - pantsL) >= TOP_BOTTOM_L && !(paleHair && L > PALE_TOP_L);
+    return (app.female ? dressApart(c) : apart(c)) && Math.abs(L - pantsL) >= TOP_BOTTOM_L && !(paleHair && L > PALE_TOP_L);
   });
 }
 
