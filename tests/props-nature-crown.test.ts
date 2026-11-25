@@ -185,7 +185,8 @@ describe('near-camera fade shader', () => {
     expect(treeBark.customProgramCacheKey()).not.toBe(bark.customProgramCacheKey());
     // leaves and bark of a tree: one decision per instance (no per-vertex hole, lens or limb cut)
     for (const sh of [crown.vertexShader, tb]) {
-      expect(sh).toContain('float hit = propTreeF( M, uFadeCam + dir * max( tEnd, 0.0 ), mix( grow, 0.50, uFadeFollow * ( 1.0 - uFadeCrown ) ) ) * between;');
+      // while following, at every zoom, crowns grow by the follow cut's small margin only (no thinned neighbours)
+      expect(sh).toContain('float hit = propTreeF( M, uFadeCam + dir * max( tEnd, 0.0 ), mix( grow, 0.50, uFadeFollow ) ) * between;');
       expect(sh).toContain('float fade = propTreeFade( max( instF, hit * uFadeCrown ) );');
       // the crown thins by at most half over a wide band, then the tree goes whole
       expect(sh).toContain(`return tree < ${TREE_GONE.toFixed(2)} ? 0.5 * smoothstep( 0.15, ${TREE_GONE.toFixed(2)}, tree ) : 1.0;`);

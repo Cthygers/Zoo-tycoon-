@@ -57,8 +57,9 @@
 //   - leaf cards right on that line (within uFadeCard, decided from each
 //     card's centre, so a card goes whole) go too, even from the subject's own
 //     tree, which stays standing with its shade: the leaves over the animal go;
-//     the near-camera view hole shrinks to that radius, so trees around the
-//     subject keep their crowns (no bare limbs under a leafy shadow);
+//     the close views' crown hole shrinks to the follow cut's small margin, so
+//     trees around the subject keep their crowns (no limbs thinned bare under
+//     a full leafy shadow);
 //   - at the closest follow zooms (the cut switches on and off with
 //     hysteresis and a short time cross-fade, so nothing rests half
 //     dissolved), fence pieces, small structures and rocks standing on that
@@ -333,8 +334,10 @@ float propFadeAt( vec3 p, mat4 M ) {
   // back over a couple of seconds, not in one step)
   float between = smoothstep( ${TREE_KEEP_R.toFixed(1)}, ${(TREE_KEEP_R + 1).toFixed(1)} + uFadeFollow, length( o.xz - uFadeFocus.xz ) )
                 * ( 1.0 - smoothstep( -0.04, 0.04, tc - 1.0 + ${TREE_KEEP_R.toFixed(1)} / len ) );
-  // beyond the close views the follow cut grows crowns by a small radius only
-  float hit = propTreeF( M, uFadeCam + dir * max( tEnd, 0.0 ), mix( grow, ${FOLLOW_GROW.toFixed(2)}, uFadeFollow * ( 1.0 - uFadeCrown ) ) ) * between;
+  // while following, crowns grow by a small radius only, at every zoom: the
+  // card cut opens the window, so the trees around the subject keep their
+  // crowns (not thinned to bare limbs over a full leafy shadow)
+  float hit = propTreeF( M, uFadeCam + dir * max( tEnd, 0.0 ), mix( grow, ${FOLLOW_GROW.toFixed(2)}, uFadeFollow ) ) * between;
   float fade = propTreeFade( max( instF, hit * uFadeCrown ) );
 #ifdef PROP_FADE_SHADOW
   // its shadow goes with it only near the camera (close views)

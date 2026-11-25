@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { barkTextures } from '../src/props/nature/barks';
-import { BarkMaterial, barkMaterial, FoliageMaterial, LEAF_PARAMS, RockMaterial, setNatureNight, setNatureNightGround, withQuality } from '../src/props/nature/mats';
-import { buildIceRocks } from '../src/props/nature/rocks';
+import { applyNightLook, BarkMaterial, barkMaterial, FoliageMaterial, GROUND_PLANT_OCCLUDER, LEAF_PARAMS, RockMaterial, setNatureNight, setNatureNightGround, STRUCTURE_NIGHT_GROUND, withQuality } from '../src/props/nature/mats';
+import { buildBoulder, buildIceRocks, buildRockSmall } from '../src/props/nature/rocks';
+import { buildFlowerBed, buildReeds, buildTallGrass } from '../src/props/nature/plants';
+import { stoneMaterial, weatheredWoodMaterial, woodMaterial } from '../src/props/materials';
 
 /** Run a material's onBeforeCompile on a copy of the physical shader source. */
 function compile(m: THREE.Material): THREE.WebGLProgramParametersWithUniforms {
@@ -73,15 +75,57 @@ describe('ground plants under the moon', () => {
     expect('groundPlant' in LEAF_PARAMS.trees).toBe(false);
   });
 
-  it("keep a moonlit floor in their own shade (no black bushes), after the ground's look", () => {
+  it("keep a moonlit floor in their own shade (no black bushes or crowns), after the ground's look", () => {
     const sh = compile(new FoliageMaterial()).fragmentShader;
-    const floor = 'reflectedLight.indirectDiffuse += max( lfFloor - lfHave, 0.0 ) * lfK;';
+    const floor = 'reflectedLight.indirectDiffuse += max( lfFloor - lfHave, 0.0 ) * uNightLift;';
     expect(sh).toContain(floor);
-    expect(sh).toContain('float lfK = uNightLift * vLfGround;');
-    // a share of the moon's light on open ground, in the plant's own colour
-    expect(sh).toContain('vec3 lfFloor = 0.156 * lfMoonH * RECIPROCAL_PI * lfHue;');
+    // a share of the moon's light on open ground, in the plant's own colour: bushes 0.3, tree crowns less
+    expect(sh).toContain('float lfShare = mix( 0.17, 0.30, vLfGround );');
+    expect(sh).toContain('vec3 lfFloor = 0.520 * lfShare * lfAO * lfMoonH * RECIPROCAL_PI * lfHue;');
+    // inner cards (baked occlusion in the vertex colour) keep their depth
+    expect(sh).toContain('lfAO = mix( 0.60, 1.0, saturate( dot( vColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) ) ) );');
     expect(sh.indexOf(floor)).toBeGreaterThan(sh.indexOf('float ngK = uNightLift * (vLfGround);'));
     expect(sh.indexOf(floor)).toBeLessThan(sh.indexOf('#include <aomap_fragment>'));
+  });
+});
+
+describe('ground plants on the follow line', () => {
+  it('reach about their half width and carry their height, leaves and stems alike', () => {
+    expect(GROUND_PLANT_OCCLUDER.occluderReach).toBeGreaterThanOrEqual(0.5);
+    expect(GROUND_PLANT_OCCLUDER.occluderReach).toBeLessThanOrEqual(0.7);
+    for (const g of [buildTallGrass(0), buildReeds(1), buildFlowerBed(0)]) {
+      const box = new THREE.Box3().setFromObject(g);
+      let n = 0;
+      g.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh || (mesh.material as THREE.Material).userData.occluderTop !== true) return;
+        const a = mesh.geometry.getAttribute('aOcclTop');
+        expect(a.count).toBe(mesh.geometry.getAttribute('position').count);
+        // the whole clump's top: its leaves, stems (and a bed's kerb) go together
+        expect(a.getX(0)).toBeCloseTo(box.max.y, 4);
+        n++;
+      });
+      expect(n).toBeGreaterThan(0);
+    }
+    // the tall clump reaches up to a low follow line, the flower bed does not
+    expect(new THREE.Box3().setFromObject(buildTallGrass(0)).max.y).toBeGreaterThan(0.9);
+    expect(new THREE.Box3().setFromObject(buildFlowerBed(0)).max.y).toBeLessThan(0.7);
+  });
+});
+
+describe('rocks on the follow line', () => {
+  it('cut boulders anywhere in front of the subject, only when they reach the line (every rock carries its height)', () => {
+    const boulder = buildBoulder(0).children[0] as THREE.Mesh;
+    const small = buildRockSmall(0).children[0] as THREE.Mesh;
+    const m = boulder.material as THREE.Material;
+    expect(m.userData.occluderAnywhere).toBe(true);
+    expect(m.userData.occluderTop).toBe(true);
+    // the same material as the small stones: one layout, each with its own (low) height
+    expect(small.material).toBe(m);
+    boulder.geometry.computeBoundingBox();
+    expect(boulder.geometry.getAttribute('aOcclTop').getX(0)).toBeCloseTo(boulder.geometry.boundingBox!.max.y, 4);
+    expect(small.geometry.getAttribute('aOcclTop').getX(0)).toBeLessThan(0.7);
+    expect(Object.keys(small.geometry.attributes).sort()).toEqual(Object.keys(boulder.geometry.attributes).sort());
   });
 });
 
@@ -92,7 +136,7 @@ describe('bark under the moon', () => {
     expect(m).toBeInstanceOf(BarkMaterial);
     const sh = compile(m);
     expect(sh.fragmentShader).toContain('float ngK = uNightLift * (1.00);');
-    expect(sh.fragmentShader).toContain('reflectedLight.indirectSpecular *= 1.0 - 0.70 * uNightLift;');
+    expect(sh.fragmentShader).toContain('reflectedLight.indirectSpecular *= 1.0 - 0.80 * uNightLift;');
     expect(sh.fragmentShader).toContain('whLampLit = bkNightMark;');
     setNatureNightGround(0.7);
     expect((sh.uniforms.uNightLift as THREE.IUniform<number>).value).toBe(0.7);
@@ -100,6 +144,36 @@ describe('bark under the moon', () => {
     // clones (ghost previews) keep the patch and share the program
     expect(compile(m.clone()).fragmentShader).toContain('bkNightMark');
     expect(m.clone().customProgramCacheKey()).toBe(m.customProgramCacheKey());
+  });
+});
+
+describe('wood, paint and stone under the moon', () => {
+  it('take part of the moonlit ground look through a chained, idempotent patch', () => {
+    const wood = weatheredWoodMaterial();
+    expect(wood.userData.nightGround).toBe(STRUCTURE_NIGHT_GROUND);
+    expect(woodMaterial().userData.nightGround).toBe(STRUCTURE_NIGHT_GROUND);
+    expect(stoneMaterial().userData.nightGround).toBe(STRUCTURE_NIGHT_GROUND);
+    const m = wood.clone();
+    const key = m.customProgramCacheKey();
+    applyNightLook(m);
+    applyNightLook(m);
+    const sh = compile(m);
+    expect(sh.fragmentShader.match(/uniform float uNightLift;/g)?.length).toBe(1);
+    expect(sh.fragmentShader).toContain(`float ngK = uNightLift * (${STRUCTURE_NIGHT_GROUND.toFixed(2)});`);
+    expect(sh.fragmentShader).toContain('whLampLit = stNightMark;');
+    expect(m.customProgramCacheKey()).toBe(`${key}|nightlook${STRUCTURE_NIGHT_GROUND}`);
+    // a copy that already carries the look through its source's hook is left alone
+    const copy = m.clone();
+    copy.onBeforeCompile = m.onBeforeCompile;
+    applyNightLook(copy);
+    expect(compile(copy).fragmentShader.match(/uniform float uNightLift;/g)?.length).toBe(1);
+    // unflagged materials (glass, concrete, metal) are untouched
+    const glass = new THREE.MeshStandardMaterial();
+    applyNightLook(glass);
+    expect(compile(glass).fragmentShader).not.toContain('uNightLift');
+    // rocks too
+    const ice = (buildIceRocks(0).children[0] as THREE.Mesh).material as THREE.Material;
+    expect(ice.userData.nightGround).toBeGreaterThan(STRUCTURE_NIGHT_GROUND);
   });
 });
 
