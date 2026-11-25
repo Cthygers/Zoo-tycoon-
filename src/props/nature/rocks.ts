@@ -390,8 +390,8 @@ function minY(shape: RockShape): number {
 
 function finishRocks(md: MeshData, mat: THREE.Material, name = 'rock'): THREE.Group {
   const g = groupOf([[md, mat, name]]);
-  // every rock batch shares one layout: the occluder cut's height on all of them
-  for (const c of g.children) setOcclTop((c as THREE.Mesh).geometry);
+  // the occluder cut's height on every rock drawn with a cut material (small stones too: one batch layout)
+  if (mat.userData.occluderTop === true) for (const c of g.children) setOcclTop((c as THREE.Mesh).geometry);
   g.userData.tris = md.tris;
   return g;
 }
