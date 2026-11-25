@@ -600,7 +600,7 @@ export class PropsLayer implements IPropsLayer {
       } else {
         if (this.noCrown.length < pos.count * 4) this.noCrown = new Int16Array(Math.max(pos.count * 4, this.noCrown.length * 2));
         s.setAttribute('aCrown', new THREE.BufferAttribute(this.noCrown.subarray(0, pos.count * 4), 4));
-        s.setAttribute('aCrownR', new THREE.BufferAttribute(this.noCrown.subarray(0, pos.count * 2), 2));
+        s.setAttribute('aCrownR', new THREE.BufferAttribute(this.noCrown.subarray(0, pos.count * 3), 3));
       }
       if (g.index) s.setIndex(g.index);
       if (!g.boundingSphere) g.computeBoundingSphere();

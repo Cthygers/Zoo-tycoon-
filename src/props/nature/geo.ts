@@ -407,7 +407,9 @@ export function groupOf(parts: [MeshData, THREE.Material, string?][]): THREE.Gro
  * Near-camera crown dissolve data (props/lod/fade.ts) on every mesh of a tree
  * group whose material is flagged crownFade (the leaves, and the bark that
  * goes with them): every vertex carries the crown ellipsoid (centre,
- * horizontal and vertical radius, cm) and a dissolve rank shared by its whole
+ * horizontal and vertical radius, cm), the trunk's radius (cm, trunkRadius:
+ * the follow cut takes a tree whose big trunk covers the subject) and a
+ * dissolve rank shared by its whole
  * card, frond or limb (one connected piece of the mesh), so a tree on the
  * camera's view line drops out piece by piece, never as a half-transparent
  * sheet. Leaf cards get scattered ranks; bark pieces are ranked by how far
@@ -421,18 +423,37 @@ export function groupOf(parts: [MeshData, THREE.Material, string?][]): THREE.Gro
  * attribute layout per batch).
  */
 export function addCrownFade(group: THREE.Object3D, crown: Ellipsoid | null): void {
+  const meshes: THREE.Mesh[] = [];
   group.traverse((o) => {
     const mesh = o as THREE.Mesh;
-    if (!mesh.isMesh) return;
-    const mat = mesh.material as THREE.Material;
-    if (mat.userData.crownFade === true) setCrownAttributes(mesh.geometry, crown, mat.userData.fadeNear === true);
+    if (mesh.isMesh && (mesh.material as THREE.Material).userData.crownFade === true) meshes.push(mesh);
   });
+  const barks = meshes.filter((m) => (m.material as THREE.Material).userData.fadeNear === true);
+  const trunk = crown ? Math.max(0, ...barks.map((m) => trunkRadius(m.geometry))) : 0;
+  for (const m of meshes) setCrownAttributes(m.geometry, crown, (m.material as THREE.Material).userData.fadeNear === true, trunk);
+}
+
+/**
+ * Radius (m) of a tree's trunk at about chest height: the median distance of
+ * the bark's vertices 0.5–1.2 m up from the vertical axis (a clump of thin
+ * stems or canes spread over the same radius gives much less).
+ */
+export function trunkRadius(g: THREE.BufferGeometry): number {
+  const pos = g.getAttribute('position');
+  const d: number[] = [];
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i);
+    if (y > 0.5 && y < 1.2) d.push(Math.hypot(pos.getX(i), pos.getZ(i)));
+  }
+  if (d.length === 0) return 0;
+  d.sort((a, b) => a - b);
+  return d[d.length >> 1];
 }
 
 /** Rank given to every piece of a geometry without a crown (switches at a fade of 0.5). */
 const NEUTRAL_RANK = 128;
 
-function setCrownAttributes(g: THREE.BufferGeometry, crown: Ellipsoid | null, bark: boolean): void {
+function setCrownAttributes(g: THREE.BufferGeometry, crown: Ellipsoid | null, bark: boolean, trunk: number): void {
   const n = g.getAttribute('position').count;
   const piece = connectedPieces(g);
   const barkRank = bark && crown ? barkRanks(g, piece) : null;
@@ -440,19 +461,21 @@ function setCrownAttributes(g: THREE.BufferGeometry, crown: Ellipsoid | null, ba
   const centre = crown ? [cm(crown.c.x), cm(crown.c.y), cm(crown.c.z)] : [0, 0, 0];
   const rh = crown ? cm(Math.max(crown.r.x, crown.r.z)) : 0;
   const ry = crown ? cm(crown.r.y) : 0;
+  const tr = cm(trunk);
   const c = new Int16Array(n * 4);
-  const r = new Int16Array(n * 2);
+  const r = new Int16Array(n * 3);
   for (let i = 0; i < n; i++) {
     c[i * 4] = centre[0];
     c[i * 4 + 1] = centre[1];
     c[i * 4 + 2] = centre[2];
     // leaves: a multiplicative hash, so neighbouring cards get unrelated ranks
     c[i * 4 + 3] = !crown ? NEUTRAL_RANK : barkRank ? barkRank.get(piece[i])! : Math.imul(piece[i] + 1, 0x9e3779b1) >>> 24;
-    r[i * 2] = rh;
-    r[i * 2 + 1] = ry;
+    r[i * 3] = rh;
+    r[i * 3 + 1] = ry;
+    r[i * 3 + 2] = tr;
   }
   g.setAttribute('aCrown', new THREE.BufferAttribute(c, 4));
-  g.setAttribute('aCrownR', new THREE.BufferAttribute(r, 2));
+  g.setAttribute('aCrownR', new THREE.BufferAttribute(r, 3));
   if (!bark) g.setAttribute('aCard', new THREE.BufferAttribute(pieceCentres(g, piece), 3));
 }
 
