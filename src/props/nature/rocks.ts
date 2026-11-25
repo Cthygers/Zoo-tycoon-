@@ -10,6 +10,7 @@ import { hashFloat as hashF, Noise, Rng } from '../../core/rng';
 import { barkMat, barkTextures } from './barks';
 import { addCrownFade, addTube, groupOf, MeshData, v3, type V3 } from './geo';
 import { barkMaterial, cachedTexture, natureQuality, rockMaterial, type RockMaterial } from './mats';
+import { setOcclTop } from '../lod/fade';
 import { albedoHeightTexture, Img, lin, mix, pfbm, pworley, sat, sstep } from './tex';
 
 // ---------------------------------------------------------------------------
@@ -115,10 +116,21 @@ function genIce(): Img {
  */
 const ROCK_OCCLUDER_REACH = 0.6;
 
-function graniteMat(): RockMaterial {
-  const m = rockMaterial('granite', { triTex: cachedTexture('rock-granite', () => albedoHeightTexture(genGranite())), tile: 1.1, bump: 0.012, roughness: 0.82, surfRoughness: 0.95, surfTint: 0x8fa060 });
+/**
+ * Follow-mode occluder cut of boulders and ice blocks (props/lod/fade.ts):
+ * reach, anywhere on the line in front of the subject (they hide it from
+ * close by too), and only when they reach up to the line (every rock
+ * geometry carries its height, finishRocks; low stones and kerbs stay).
+ */
+function cutAsOccluder(m: RockMaterial): RockMaterial {
   m.userData.occluderReach = ROCK_OCCLUDER_REACH;
+  m.userData.occluderAnywhere = true;
+  m.userData.occluderTop = true;
   return m;
+}
+
+function graniteMat(): RockMaterial {
+  return cutAsOccluder(rockMaterial('granite', { triTex: cachedTexture('rock-granite', () => albedoHeightTexture(genGranite())), tile: 1.1, bump: 0.012, roughness: 0.82, surfRoughness: 0.95, surfTint: 0x8fa060 }));
 }
 
 function sandstoneMat(): RockMaterial {
@@ -138,11 +150,10 @@ function iceMat(): RockMaterial {
     emissive: 0x0b1a24,
     emissiveIntensity: 0.1,
   });
-  m.userData.occluderReach = ROCK_OCCLUDER_REACH;
-  return m;
+  return cutAsOccluder(m);
 }
 
-/** Shared granite material (used by other nature props, e.g. bed kerbs). */
+/** Shared granite material (used by other nature props, e.g. bed kerbs: their geometry needs the occluder height too, lod/fade.ts setOcclTop). */
 export function graniteMaterial(): RockMaterial {
   return graniteMat();
 }
@@ -379,6 +390,8 @@ function minY(shape: RockShape): number {
 
 function finishRocks(md: MeshData, mat: THREE.Material, name = 'rock'): THREE.Group {
   const g = groupOf([[md, mat, name]]);
+  // every rock batch shares one layout: the occluder cut's height on all of them
+  for (const c of g.children) setOcclTop((c as THREE.Mesh).geometry);
   g.userData.tris = md.tris;
   return g;
 }

@@ -36,7 +36,8 @@ import {
   weatheredWoodMaterial,
 } from './materials';
 import { MultiBatch, type CullView, type InstParams, type SlotRef } from './lod/batched';
-import { applyOccluderCut } from './lod/fade';
+import { applyOccluderCut, setOcclTop } from './lod/fade';
+import { applyNightLook } from './nature/mats';
 import { cloneWithHooks } from './wind';
 
 const HALF = TILE / 2;
@@ -469,6 +470,9 @@ export function fenceStyle(fenceId: number, detail: FenceDetail = 1): FenceStyle
   const def = FENCES_BY_ID[fenceId];
   if (!def) return null;
   s = (STYLE_BUILDERS[def.key] ?? timberStyle)(def, detail);
+  // the occluder cut keeps a fence whose top stays below the camera → subject line
+  const top = Math.max(...[...s.posts, ...s.panel].map((p) => (p.geometry.computeBoundingBox(), p.geometry.boundingBox!.max.y)));
+  for (const p of [...s.posts, ...s.panel]) setOcclTop(p.geometry, top);
   styleCache.set(key, s);
   return s;
 }
@@ -544,6 +548,7 @@ function fenceCasterDepth(): THREE.MeshDepthMaterial {
     };
     d.customProgramCacheKey = () => 'fence-caster-depth';
     d.userData.occluderPosts = true;
+    d.userData.occluderTop = true;
     applyOccluderCut(d);
     casterDepth = d;
   }
@@ -685,7 +690,7 @@ export class FenceRenderer {
   private multiList: MultiBatch[] = [];
   /** Batched back-end: shadow-only batches by shadow side (also in multiList). */
   private shadowMulti = new Map<THREE.Side, MultiBatch>();
-  /** Position-only copies of style geometries for the shadow-only batches. */
+  /** Position-only copies (plus the occluder cut's height) of style geometries for the shadow-only batches. */
   private shadowGeos = new WeakMap<THREE.BufferGeometry, THREE.BufferGeometry>();
   /** Shadow-only instances carry the same per-instance colour (ground extension, post mask) for their depth material. */
   private readonly shadowInst: InstParams = { cull: Infinity, shadow: 0, lodOn: false, shadowOn: true, tint: null };
@@ -820,6 +825,8 @@ export class FenceRenderer {
     if (!s) {
       s = new THREE.BufferGeometry();
       s.setAttribute('position', g.getAttribute('position'));
+      // the occluder cut's height: the shadow goes with the piece
+      s.setAttribute('aOcclTop', g.getAttribute('aOcclTop'));
       s.setIndex(g.index);
       if (!g.boundingSphere) g.computeBoundingSphere();
       s.boundingSphere = g.boundingSphere;
@@ -862,7 +869,10 @@ export class FenceRenderer {
       // in rails / mesh reads as noise; only whole pieces go, right in front
       // of the camera while it follows a subject (lod/fade.ts)
       m = groundPatched(p.material, p.groundUv);
+      // timber and painted fences: moonlit like the ground at night
+      applyNightLook(m);
       m.userData.occluderPosts = true;
+      m.userData.occluderTop = true;
       applyOccluderCut(m);
       this.patched.set(key, m);
     }

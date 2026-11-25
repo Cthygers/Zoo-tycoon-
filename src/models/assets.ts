@@ -36,6 +36,7 @@ export function assetFromDesign(key: string, design: CreatureDesign, detail: 0 |
     highlightMaterial: createAnimalMaterial({ look: design.look, detail, highlight: true, furShell }),
     furShell,
     sphere,
+    body: new THREE.Box3().setFromBufferAttribute(built.geometry.getAttribute('position') as THREE.BufferAttribute),
     height: design.height ?? built.bounds.max.y,
     radius: design.radius ?? 0.5 * Math.max(size.x, size.z),
     triangles: geometry.getIndex()!.count / 3,

@@ -80,11 +80,19 @@ describe('giraffe lying shade', () => {
     };
     run('walk', 1);
     expect(lying()).toBe(0);
-    run('rest', 1);
-    // kneeling on the way down: partly
-    expect(lying()).toBeLessThan(0.9);
-    run('rest', 8);
-    expect(lying()).toBeGreaterThan(0.95);
+    // kneeling on the way down (hips still high, cannons folded back under the
+    // chest): the folded legs are shaded already, not only once the body is down
+    const trace: number[] = [];
+    for (let t = 0; t < 9; t += 0.1) {
+      run('rest', 0.1);
+      trace.push(lying());
+    }
+    expect(trace[0]).toBeLessThan(0.5);
+    expect(trace[10]).toBeGreaterThan(0.9);
+    expect(trace[trace.length - 1]).toBeGreaterThan(0.95);
+    // rising hind-first, still on the carpi: still shaded; standing: none
+    run('walk', 0.8);
+    expect(lying()).toBeGreaterThan(0.9);
     run('walk', 6);
     expect(lying()).toBe(0);
     m.dispose();

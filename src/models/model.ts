@@ -20,7 +20,7 @@
 import * as THREE from 'three';
 import type { CreatureAnim, CreatureModel } from '../core/contracts';
 import { Pose, RigDef, RigRuntime, blendPoses } from './rig/rig';
-import type { AnimCtx, AnimDriver, CreatureDesign, ResolvedRoles } from './types';
+import type { AnimCtx, AnimDriver, CreatureDesign, LegId, ResolvedRoles } from './types';
 import { clamp01, damp, lerp, smooth } from './anim/util';
 import type { LodChain } from './lod/lod';
 import type { SkinnedBatch } from './crowd/batch';
@@ -37,6 +37,8 @@ export interface RigAsset {
   highlightMaterial: THREE.Material;
   /** Bounding sphere (mesh space) generous enough for every pose. */
   sphere: THREE.Sphere;
+  /** Rest-pose bounds (mesh space): the body other animals' follow cut tests (crowd/batch.ts). */
+  body?: THREE.Box3;
   height: number;
   radius: number;
   triangles: number;
@@ -217,6 +219,14 @@ const BABY_BONES_TO = 0.95;
 /** Hips + chest height (fraction of standing) at which an animal counts as fully lying / not lying at all. */
 const LIE_FULL = 0.45;
 const LIE_NONE = 0.75;
+/**
+ * Carpus / hock height (fraction of standing) at which a leg counts as fully
+ * folded / not folded: a giraffe kneels on its carpi, cannons folded back,
+ * while the hips are still high (the lie-down and get-up sequence).
+ */
+const FOLD_FULL = 0.4;
+const FOLD_NONE = 0.7;
+const LEG_IDS: readonly LegId[] = ['FL', 'FR', 'HL', 'HR'];
 
 type MutableCtx = { -readonly [K in keyof AnimCtx]: AnimCtx[K] };
 
@@ -542,9 +552,12 @@ export class RiggedModel implements CreatureModel {
   protected afterSkin(): void {}
 
   /**
-   * Lying amount from the pose just skinned (FK holds it): 1 once hips and
-   * chest sit below LIE_FULL of their standing height, 0 above LIE_NONE, so it
-   * follows the lie-down / get-up sequence rather than the action crossfade.
+   * Lying amount from the pose just skinned (FK holds it), so it follows the
+   * lie-down / get-up sequence rather than the action crossfade: 1 once hips
+   * and chest sit below LIE_FULL of their standing height (0 above LIE_NONE),
+   * or once a leg is folded, its carpus or hock below FOLD_FULL of its
+   * standing height (0 above FOLD_NONE): the folded cannons are shaded all the
+   * way through kneeling and rising, not only once the body is down.
    */
   private updateLying(): void {
     const roles = this.asset.roles;
@@ -552,7 +565,13 @@ export class RiggedModel implements CreatureModel {
     const hips = roles.root;
     const chest = roles.chest >= 0 ? roles.chest : hips;
     const ratio = (FK.wp[hips * 3 + 1] + FK.wp[chest * 3 + 1]) / Math.max(1e-3, rest[hips * 3 + 1] + rest[chest * 3 + 1]);
-    const lying = 1 - smooth(LIE_FULL, LIE_NONE, ratio);
+    let lying = 1 - smooth(LIE_FULL, LIE_NONE, ratio);
+    for (const id of LEG_IDS) {
+      const leg = roles.legs[id];
+      if (!leg) continue;
+      const joint = leg.foot * 3 + 1;
+      lying = Math.max(lying, 1 - smooth(FOLD_FULL, FOLD_NONE, FK.wp[joint] / Math.max(1e-3, rest[joint])));
+    }
     if (Math.abs(lying - this.lying) < 0.02 && (lying === 0) === (this.lying === 0)) return;
     this.lying = lying;
     this.writeLook();

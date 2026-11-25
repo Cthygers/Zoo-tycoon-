@@ -37,6 +37,7 @@ import type { SpeciesModel } from './types';
 
 export type { CreatureDesign, SpeciesModel, CoatSample, AnimCtx, AnimDriver } from './types';
 export { setCreatureFollowCut } from './crowd/batch';
+export { setFigureNightGround } from './material/figureNight';
 
 const yieldToBrowser = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 const now = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -61,6 +62,7 @@ export class AnimalModel extends RiggedModel implements BatchedModel {
   override enterBatch(batch: SkinnedBatch, slot: number): void {
     // other animals in front of a followed subject are cut (crowd/batch.ts)
     batch.followCut = true;
+    batch.cutBody = this.asset.body ?? null;
     super.enterBatch(batch, slot);
   }
 }

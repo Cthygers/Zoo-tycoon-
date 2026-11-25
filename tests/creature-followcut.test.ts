@@ -7,28 +7,56 @@ import { FilteredBatch, FOLLOW_CUT_MAX_D, inFollowCut, setCreatureFollowCut } fr
 
 /** Camera 5.25 m from a subject at the origin, looking at it from +z and a little above. */
 const CAM = new THREE.Vector3(0, 3.1, 4.9);
-const v = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
+/** Rest-pose boxes (mesh space, facing +z) of a camel, a lion and an elephant (assets.ts, detail 0). */
+const CAMEL = new THREE.Box3(new THREE.Vector3(-0.35, 0, -1.18), new THREE.Vector3(0.35, 2.25, 2.35));
+const LION = new THREE.Box3(new THREE.Vector3(-0.33, 0, -1.34), new THREE.Vector3(0.34, 1.27, 1.25));
+const ELEPHANT = new THREE.Box3(new THREE.Vector3(-1.69, 0, -2.07), new THREE.Vector3(1.71, 3.24, 3.59));
+/** An instance standing at (x, z) on the ground, heading `yaw` (rad), scaled by `s`. */
+const at = (x: number, z: number, yaw = Math.PI / 2, s = 1) =>
+  new THREE.Matrix4().compose(new THREE.Vector3(x, 0, z), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw), new THREE.Vector3(s, s, s));
 
 describe('creature follow cut', () => {
   afterEach(() => setCreatureFollowCut(null));
 
   it('cuts a body on the view line in front of the subject, not the subject or animals off the line', () => {
     setCreatureFollowCut({ x: 0, y: 0, z: 0 });
-    // a camel-sized body halfway to the camera
-    expect(inFollowCut(CAM, v(0, 1.2, 2.5), 1.2, false)).toBe(true);
-    // the subject itself, and a neighbour right beside it
-    expect(inFollowCut(CAM, v(0, 0.8, 0), 1.2, false)).toBe(false);
-    expect(inFollowCut(CAM, v(1.0, 0.8, 0.4), 0.8, false)).toBe(false);
+    // a camel side-on halfway to the camera
+    expect(inFollowCut(CAM, at(0, 2.5), CAMEL, false)).toBe(true);
+    // the subject itself (even a big one), and a neighbour right beside it
+    expect(inFollowCut(CAM, at(0, 0), ELEPHANT, false)).toBe(false);
+    expect(inFollowCut(CAM, at(1.2, 0.4, 0), LION, false)).toBe(false);
     // well to the side of the line, and behind the subject
-    expect(inFollowCut(CAM, v(4, 1.0, 2.5), 1.0, false)).toBe(false);
-    expect(inFollowCut(CAM, v(0, 1.0, -4), 1.0, false)).toBe(false);
+    expect(inFollowCut(CAM, at(4, 2.5, 0), CAMEL, false)).toBe(false);
+    expect(inFollowCut(CAM, at(0, -4), CAMEL, false)).toBe(false);
+  });
+
+  it('cuts a big animal whose body reaches past the subject, and one around the camera', () => {
+    setCreatureFollowCut({ x: 0, y: 0, z: 0 });
+    // an elephant side-on 1.8, 3.2 and 4.2 m in front of a followed hippo (its centre in front, its rump or flank around the subject)
+    for (const d of [1.8, 3.2, 4.2]) expect(inFollowCut(CAM, at(0, d), ELEPHANT, false)).toBe(true);
+    // end-on, its flank (ears) 0.2 m beside the line covers half the frame; 1.5 m beside it, the frame's edge
+    expect(inFollowCut(CAM, at(0.2 + 1.7, 3, 0), ELEPHANT, false)).toBe(true);
+    expect(inFollowCut(CAM, at(1.5 + 1.7, 3, 0), ELEPHANT, false)).toBe(false);
+    // the camera inside its body
+    expect(inFollowCut(CAM, at(0, 5.2), ELEPHANT, false)).toBe(true);
+    // a calf (half size) beside the line is clear of it
+    expect(inFollowCut(CAM, at(2.2, 3, 0, 0.5), ELEPHANT, false)).toBe(false);
+  });
+
+  it('keeps a low animal the view passes over (it hides nothing of the subject), cuts it end-on', () => {
+    setCreatureFollowCut({ x: 0, y: 0, z: 0 });
+    // a lion side-on 2.5 m in front: the line passes ~0.7 m over its back, its silhouette ends below the subject's feet
+    expect(inFollowCut(CAM, at(0, 2.5), LION, false)).toBe(false);
+    // end-on its head reaches 1.2 m from the subject, under the subject's body
+    expect(inFollowCut(CAM, at(0, 2.5, Math.PI), LION, false)).toBe(true);
   });
 
   it('needs a wider clearance to bring a cut animal back (no flicker at the edge)', () => {
     setCreatureFollowCut({ x: 0, y: 0, z: 0 });
-    const edge = v(1.4, 1.0, 2.6);
-    expect(inFollowCut(CAM, edge, 1.0, false)).toBe(false);
-    expect(inFollowCut(CAM, edge, 1.0, true)).toBe(true);
+    // an end-on camel whose flank is 0.6 m from the line
+    const edge = at(0.35 + 0.6, 2.6, 0);
+    expect(inFollowCut(CAM, edge, CAMEL, false)).toBe(false);
+    expect(inFollowCut(CAM, edge, CAMEL, true)).toBe(true);
   });
 
   it('hides cut instances for the main pass only while a subject is followed up close', () => {

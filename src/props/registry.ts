@@ -18,9 +18,14 @@ import type { QualitySettings } from '../core/contracts';
  *      geometry drawn with it needs the crown attributes (nature/geo.ts addCrownFade)
  *  - material.userData.trunkRadius = number → with fadeNear only: distance (m) from the trunk axis inside which the view
  *      hole never cuts (default 0.9, lod/fade.ts TRUNK_R)
- *  - material.userData.occluderReach = number → for structures and small rocks (follow-mode occluder cut, lod/fade.ts
- *      applyOccluderCut): about the piece's half width (m), so a bulky piece counts as on the camera → subject line
- *      from that much farther out
+ *  - material.userData.occluderReach = number → for structures, small rocks and ground plants (follow-mode occluder
+ *      cut, lod/fade.ts applyOccluderCut): about the piece's half width (m), so a bulky piece counts as on the
+ *      camera → subject line from that much farther out
+ *  - material.userData.occluderTop = true    → every geometry drawn with it carries its height (lod/fade.ts setOcclTop):
+ *      the occluder cut keeps a piece whose top stays below the camera → subject line
+ *  - material.userData.occluderAnywhere = true → (boulders, ice) cut anywhere on the line in front of the subject,
+ *      not only near the camera
+ *  - material.userData.occluderShell = true  → (a den) cut whole while the followed subject stands inside it
  * Mesh userData conventions:
  *  - mesh.userData.noShadow = true          → never cast shadows (tiny details, glass)
  */

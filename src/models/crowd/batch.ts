@@ -30,8 +30,8 @@ import type { CrowdUniforms } from './skinning';
 const _v = new THREE.Vector3();
 const _m = new THREE.Matrix4();
 const _sphere = new THREE.Sphere();
+const _box = new THREE.Box3();
 const _cam = new THREE.Vector3();
-const _line = new THREE.Vector3();
 
 /**
  * Follow cut of other animals. Following a subject at the closest zooms, an
@@ -39,25 +39,38 @@ const _line = new THREE.Vector3();
  * camel in front of the followed camel, an elephant in front of a hippo).
  * While a subject is set and the camera is within FOLLOW_CUT_MAX_D of it,
  * batches with `followCut` leave out of the main pass every instance whose
- * body (its bounding sphere scaled by BODY_OF_SPHERE) reaches within
- * CUT_LINE_R of the line from the camera to the subject's body and lies at
- * least CUT_FRONT in front of the subject: whole animals, never the subject
- * itself, with a wider band to come back so one standing at the edge does
- * not flicker. Shadows stay (the animal is still there). No draw calls,
- * no shader cost.
+ * body stands in front of the subject (its body centre at least CUT_FRONT
+ * ahead of the subject on the ground, toward the camera) and comes within
+ * the cut margin of the view line from the camera to the subject: whole
+ * animals, never the subject itself, with a wider margin to come back so one
+ * standing at the edge does not flicker. Shadows stay (the animal is still
+ * there). No draw calls, no shader cost.
+ *
+ * The body is the animal's rest-pose box (`cutBody`, mesh space, carried by
+ * the instance matrix: heading, growth): an elephant beside the line is cut
+ * by how far its flank or rump reaches, not by a sphere around every pose
+ * (5 m across for an elephant, whose centre then never counted as in front).
+ * The margin narrows from CUT_LINE_R at the subject to CUT_CAM_R at the
+ * camera, as the subject's own size does on screen: a lion lying low in front
+ * of the subject that the view passes over (it covers no part of the subject)
+ * stays, a body reaching the line near the camera, or around it, goes.
  */
-const cutAim = { on: false, subject: new THREE.Vector3() };
+const cutAim = { on: false, subject: new THREE.Vector3(), feet: new THREE.Vector3() };
 /** Camera-to-subject distance (m) up to which other animals are cut. */
 export const FOLLOW_CUT_MAX_D = 16;
 /** The view line aims this high above the subject's feet (m). */
 const CUT_AIM_Y = 0.9;
-/** Batch bounding spheres cover every pose (lying, rearing, swimming): the body is about this fraction of the radius. */
-const BODY_OF_SPHERE = 0.5;
-/** Clearance (m) between an animal's body and the view line below which it is cut; CUT_LINE_R_OUT to come back. */
+/** Clearance (m) between an animal's body and the view line below which it is cut, at the subject's end and at the camera's; × CUT_OUT to come back. */
 const CUT_LINE_R = 0.5;
-const CUT_LINE_R_OUT = 0.9;
-/** An animal is only cut when its body starts this far (m) in front of the subject's aim point. */
-const CUT_FRONT = 0.8;
+const CUT_CAM_R = 0.25;
+const CUT_OUT = 1.8;
+/** An animal is cut only when its body centre stands this far (m, on the ground) in front of the subject; CUT_FRONT_OUT to stay cut. */
+const CUT_FRONT = 1.1;
+const CUT_FRONT_OUT = 0.9;
+/** The view line is searched from this far (m) in front of the subject's aim point (a neighbour touching the subject's side stays). */
+const CUT_LINE_FROM = 0.5;
+/** Another instance whose feet are this close (m) to the subject's is the subject (never cut). */
+const SUBJECT_EPS = 0.05;
 
 /**
  * Aim the follow cut at the followed subject (its feet, world space; null
@@ -66,20 +79,61 @@ const CUT_FRONT = 0.8;
  */
 export function setCreatureFollowCut(subject: { x: number; y: number; z: number } | null): void {
   cutAim.on = subject !== null;
-  if (subject) cutAim.subject.set(subject.x, subject.y + CUT_AIM_Y, subject.z);
+  if (!subject) return;
+  cutAim.feet.set(subject.x, subject.y, subject.z);
+  cutAim.subject.set(subject.x, subject.y + CUT_AIM_Y, subject.z);
 }
 
-/** Is a body (centre `c`, radius `r`) in the follow cut seen from `cam`? `was`: it was cut last frame (hysteresis). */
-export function inFollowCut(cam: THREE.Vector3, c: THREE.Vector3, r: number, was: boolean): boolean {
+const _inv = new THREE.Matrix4();
+const _camL = new THREE.Vector3();
+const _aimL = new THREE.Vector3();
+const _p = new THREE.Vector3();
+const _c = new THREE.Vector3();
+
+/** Distance (mesh units) from `p` to the box `b` (0 inside). */
+function boxDistance(b: THREE.Box3, p: THREE.Vector3): number {
+  const dx = Math.max(b.min.x - p.x, 0, p.x - b.max.x);
+  const dy = Math.max(b.min.y - p.y, 0, p.y - b.max.y);
+  const dz = Math.max(b.min.z - p.z, 0, p.z - b.max.z);
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+/**
+ * Is a body (rest-pose box `body` in mesh space, placed by `world`, a
+ * rotation + uniform scale + translation) in the follow cut seen from `cam`?
+ * `was`: it was cut last frame (hysteresis).
+ */
+export function inFollowCut(cam: THREE.Vector3, world: THREE.Matrix4, body: THREE.Box3, was: boolean): boolean {
   const s = cutAim.subject;
-  _line.subVectors(cam, s);
-  const len = _line.length();
-  if (len < 1e-3) return false;
-  _line.divideScalar(len);
-  const along = _v.subVectors(c, s).dot(_line);
-  if (along - r < CUT_FRONT || along > len + r) return false;
-  const perp = _v.addScaledVector(_line, -along).length() - r;
-  return perp < (was ? CUT_LINE_R_OUT : CUT_LINE_R);
+  const e = world.elements;
+  // the subject itself is never cut
+  if (Math.abs(e[12] - cutAim.feet.x) < SUBJECT_EPS && Math.abs(e[14] - cutAim.feet.z) < SUBJECT_EPS) return false;
+  // in front: the body centre's ground distance ahead of the subject, toward the camera
+  const hx = cam.x - s.x;
+  const hz = cam.z - s.z;
+  const hl = Math.hypot(hx, hz);
+  if (hl < 1e-3) return false;
+  body.getCenter(_c).applyMatrix4(world);
+  if (((_c.x - s.x) * hx + (_c.z - s.z) * hz) / hl < (was ? CUT_FRONT_OUT : CUT_FRONT)) return false;
+  // clearance between the view line and the box, in the body's own space;
+  // box distance minus a linear margin is convex along the line: ternary search
+  const scale = Math.hypot(e[0], e[1], e[2]);
+  if (scale < 1e-6) return false;
+  _inv.copy(world).invert();
+  _camL.copy(cam).applyMatrix4(_inv);
+  _aimL.copy(s).applyMatrix4(_inv);
+  const len = cam.distanceTo(s);
+  const out = was ? CUT_OUT : 1;
+  const gap = (t: number) => boxDistance(body, _p.lerpVectors(_aimL, _camL, t)) * scale - out * (CUT_LINE_R + (CUT_CAM_R - CUT_LINE_R) * t);
+  let lo = Math.min(CUT_LINE_FROM / len, 1);
+  let hi = 1;
+  for (let k = 0; k < 18; k++) {
+    const a = lo + (hi - lo) / 3;
+    const b = hi - (hi - lo) / 3;
+    if (gap(a) < gap(b)) hi = b;
+    else lo = a;
+  }
+  return gap((lo + hi) * 0.5) < 0;
 }
 
 // three.js internals of BatchedMesh used here (r187)
@@ -146,6 +200,8 @@ export class FilteredBatch extends THREE.BatchedMesh {
   live = 0;
   /** Take part in the follow cut (animal batches; see setCreatureFollowCut). */
   followCut = false;
+  /** The batch's body for the follow cut: rest-pose box in mesh space (null: half the all-pose sphere). */
+  cutBody: THREE.Box3 | null = null;
   /** Instances cut last frame (hysteresis) and ids hidden for the current main pass. */
   private cut = new Uint8Array(16);
   private readonly cutHidden: number[] = [];
@@ -373,10 +429,14 @@ export class FilteredBatch extends THREE.BatchedMesh {
         cut[i] = 0;
         continue;
       }
-      const sphere = this.getBoundingSphereAt(this.getGeometryIdAt(i), _sphere);
-      if (!sphere) continue;
-      sphere.applyMatrix4(this.getMatrixAt(i, _m).premultiply(this.matrixWorld));
-      const on = inFollowCut(_cam, sphere.center, sphere.radius * BODY_OF_SPHERE, cut[i] === 1);
+      let body = this.cutBody;
+      if (!body) {
+        // no rest-pose box: half the all-pose sphere
+        const sphere = this.getBoundingSphereAt(this.getGeometryIdAt(i), _sphere);
+        if (!sphere) continue;
+        body = _box.setFromCenterAndSize(sphere.center, _v.setScalar(sphere.radius));
+      }
+      const on = inFollowCut(_cam, this.getMatrixAt(i, _m).premultiply(this.matrixWorld), body, cut[i] === 1);
       cut[i] = on ? 1 : 0;
       if (on) {
         this.setVisibleAt(i, false);

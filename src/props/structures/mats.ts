@@ -12,6 +12,7 @@ import {
   paintedMetalMaterial,
   stoneMaterial,
   weatheredWoodMaterial,
+  withNightLook,
   woodMaterial,
 } from '../materials';
 import { NO_SHADOW } from './kit';
@@ -92,7 +93,7 @@ export const TILE = {
 
 /** Planed hardwood (benches, tables, posts, trims), tinted by stain. */
 export function hardwood(tint: number = 0xffffff): THREE.MeshStandardMaterial {
-  return cached(`hardwood:${tint.toString(16)}`, () => pbr(surf('hardwood'), { metalness: 0, color: tint }));
+  return cached(`hardwood:${tint.toString(16)}`, () => withNightLook(pbr(surf('hardwood'), { metalness: 0, color: tint })));
 }
 /** Hardwood stain tints (keep this palette small: each tint is a material). */
 export const HW = {
@@ -157,7 +158,7 @@ export const COL = {
 
 /** Cladding / deck boards, tinted (stain colour). */
 export function boards(tint: number): THREE.MeshStandardMaterial {
-  return cached(`boards:${tint.toString(16)}`, () => pbr(surf('boards'), { metalness: 0, color: tint }));
+  return cached(`boards:${tint.toString(16)}`, () => withNightLook(pbr(surf('boards'), { metalness: 0, color: tint })));
 }
 
 export const STAIN = {

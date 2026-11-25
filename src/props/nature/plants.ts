@@ -6,21 +6,38 @@ import { Noise, Rng } from '../../core/rng';
 import { atlas, cellUV, hedgeTextures, leafMaterial, soilTextures } from './atlases';
 import { barkMat } from './barks';
 import { addCrownFade, addRibbon, addTube, CardSet, type Ellipsoid, ellipsoidNormal, groupOf, MeshData, v3, type V3 } from './geo';
-import { barkMaterial, cachedMaterial, detail, natureQuality } from './mats';
+import { barkMaterial, cachedMaterial, detail, GROUND_PLANT_OCCLUDER, natureQuality } from './mats';
 import { graniteMaterial } from './rocks';
+import { setOcclTop } from '../lod/fade';
 import { sstep } from './tex';
 import { crownOf, growTree, leafAO, meshBark, placeLeaves, type TreeSpec } from './treegen';
 
 const UP = v3(0, 1, 0);
 
-/** Plain vertex-coloured material for small stems / seed heads. */
+/** Plain vertex-coloured material for small stems / seed heads (ground plants: the clump's occluder cut too). */
 function stemMaterial(sway: number): THREE.MeshStandardMaterial {
   return cachedMaterial(`stem:${sway}`, () => {
     const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0 });
     m.userData.sway = sway;
     m.userData.foliage = true;
+    Object.assign(m.userData, GROUND_PLANT_OCCLUDER);
     return m;
   });
+}
+
+/**
+ * The follow-mode occluder cut's height on every mesh of a ground plant
+ * whose material asks for it (userData.occluderTop): the clump's top, so
+ * leaves, stems and a bed's kerb go together, and only when the clump
+ * reaches up to the camera → subject line (low tufts and beds stay).
+ */
+function withOcclTops(g: THREE.Group): THREE.Group {
+  const top = Math.max(0, new THREE.Box3().setFromObject(g).max.y);
+  g.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (mesh.isMesh && (mesh.material as THREE.Material).userData.occluderTop === true) setOcclTop(mesh.geometry, top);
+  });
+  return g;
 }
 
 // ---------------------------------------------------------------------------
@@ -152,7 +169,7 @@ export function buildFern(variant: number): THREE.Group {
       });
     }
   }
-  const g = groupOf([[md, leafMaterial('ground'), 'fronds']]);
+  const g = withOcclTops(groupOf([[md, leafMaterial('ground'), 'fronds']]));
   g.userData.tris = md.tris;
   return g;
 }
@@ -201,7 +218,7 @@ export function buildTallGrass(variant: number): THREE.Group {
   const crown: Ellipsoid = { c: v3(0, 0.0, 0), r: v3(1.2, 1.3, 1.2) };
   const md = new MeshData();
   cards.emit(md, crown, 0.55, (p) => 0.55 + 0.45 * sstep(0.0, 0.7, p.y));
-  const g = groupOf([[md, leafMaterial('ground'), 'grass']]);
+  const g = withOcclTops(groupOf([[md, leafMaterial('ground'), 'grass']]));
   g.userData.tris = md.tris;
   return g;
 }
@@ -265,10 +282,12 @@ export function buildReeds(variant: number): THREE.Group {
   const crown: Ellipsoid = { c: v3(0, 0.3, 0), r: v3(1.2, 2.0, 1.2) };
   const md = new MeshData();
   cards.emit(md, crown, 0.45, (p) => 0.5 + 0.5 * sstep(0.0, 1.2, p.y));
-  const g = groupOf([
-    [md, leafMaterial('ground'), 'reeds'],
-    [stems, stemMaterial(0.04), 'stems'],
-  ]);
+  const g = withOcclTops(
+    groupOf([
+      [md, leafMaterial('ground'), 'reeds'],
+      [stems, stemMaterial(0.04), 'stems'],
+    ]),
+  );
   g.userData.tris = md.tris + stems.tris;
   return g;
 }
@@ -519,7 +538,7 @@ export function buildFlowerBed(variant: number): THREE.Group {
   fm.name = 'flowers';
   g.add(fm);
   g.userData.tris = kerb.tris + soil.tris + flowers.tris;
-  return g;
+  return withOcclTops(g);
 }
 
 // ---------------------------------------------------------------------------

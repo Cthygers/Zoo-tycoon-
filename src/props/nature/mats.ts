@@ -181,6 +181,15 @@ export function setNatureNightGround(level: number): void {
   nightGround.value = level;
 }
 
+/**
+ * Follow-mode occluder cut of ground-plant clumps (props/lod/fade.ts): a
+ * clump about a metre wide still covers a subject when its centre stands
+ * just beside the camera → subject line, so it counts from about its half
+ * width farther out, and only while it reaches up to the line (its
+ * geometries carry their height, plants.ts withOcclTops).
+ */
+export const GROUND_PLANT_OCCLUDER = { occluderReach: 0.6, occluderTop: true } as const;
+
 export interface FoliageParams extends THREE.MeshStandardMaterialParameters {
   /** Strength of light transmitted through the leaves (0..1). */
   translucency?: number;
@@ -195,21 +204,30 @@ export interface FoliageParams extends THREE.MeshStandardMaterialParameters {
  * albedo; the floor keeps the plant's own hue.
  */
 const LEAF_NIGHT_FLOOR = 0.3;
+/** … a tree crown's (palm fronds too): less, a crown stays a dark mass above the bushes, but not a black hole. */
+const CROWN_NIGHT_FLOOR = 0.17;
 const MOONLIT_GROUND = 0.4 * 1.3;
+/** The floor follows the card's baked occlusion (vertex colour) down to this share: inner cards stay deeper. */
+const NIGHT_FLOOR_AO = 0.6;
 
-// After nightGroundLight: lift a ground plant's diffuse light to the moonlit floor
+// After nightGroundLight: lift a plant's diffuse light (after its shadow) to
+// the moonlit floor, by its card's baked occlusion
 const LEAF_NIGHT_FLOOR_GLSL = /* glsl */ `
 #if NUM_DIR_LIGHTS > 0
 {
-  float lfK = uNightLift * vLfGround;
   // at night the one directional light is the moon (render/context.ts)
   float lfMoonH = dot( directionalLights[ 0 ].color, vec3( 0.2126, 0.7152, 0.0722 ) )
                 * saturate( dot( directionalLights[ 0 ].direction, normalize( ( viewMatrix * vec4( 0.0, 1.0, 0.0, 0.0 ) ).xyz ) ) );
   vec3 lfAlb = material.diffuseContribution;
   vec3 lfHue = clamp( lfAlb / max( dot( lfAlb, vec3( 0.2126, 0.7152, 0.0722 ) ), 1e-3 ), 0.0, 2.0 );
-  vec3 lfFloor = ${(LEAF_NIGHT_FLOOR * MOONLIT_GROUND).toFixed(3)} * lfMoonH * RECIPROCAL_PI * lfHue;
+  float lfAO = 1.0;
+#ifdef USE_COLOR
+  lfAO = mix( ${NIGHT_FLOOR_AO.toFixed(2)}, 1.0, saturate( dot( vColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) ) ) );
+#endif
+  float lfShare = mix( ${CROWN_NIGHT_FLOOR.toFixed(2)}, ${LEAF_NIGHT_FLOOR.toFixed(2)}, vLfGround );
+  vec3 lfFloor = ${MOONLIT_GROUND.toFixed(3)} * lfShare * lfAO * lfMoonH * RECIPROCAL_PI * lfHue;
   vec3 lfHave = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse;
-  reflectedLight.indirectDiffuse += max( lfFloor - lfHave, 0.0 ) * lfK;
+  reflectedLight.indirectDiffuse += max( lfFloor - lfHave, 0.0 ) * uNightLift;
 }
 #endif
 `;
@@ -293,7 +311,10 @@ export function foliageMaterial(
       alphaTest: opts.alphaTest ?? 0.5,
     });
     m.userData.sway = opts.sway;
-    if (opts.groundPlant) m.groundPlant.value = 1;
+    if (opts.groundPlant) {
+      m.groundPlant.value = 1;
+      Object.assign(m.userData, GROUND_PLANT_OCCLUDER);
+    }
     // near-camera dissolve (props layer) for occluding leaves / fronds; whole
     // crowns too when every geometry carries its crown (geo.ts addCrownFade)
     m.userData.foliage = true;
@@ -323,7 +344,7 @@ export const LEAF_PARAMS = {
  */
 const BARK_NIGHT_GROUND = 1;
 /** Share of bark's sky reflection (blue night sky) taken away at full night. */
-const BARK_NIGHT_SHEEN = 0.7;
+const BARK_NIGHT_SHEEN = 0.8;
 
 /** Bark, wood and soil: a standard material that takes part of the moonlit ground's look at night. */
 export class BarkMaterial extends THREE.MeshStandardMaterial {
@@ -343,6 +364,45 @@ export class BarkMaterial extends THREE.MeshStandardMaterial {
   override customProgramCacheKey(): string {
     return 'nature-bark';
   }
+}
+
+/**
+ * Share of the moonlit ground's night look for wood, paint and stone on
+ * structures (fences, shelters, benches; material userData.nightGround,
+ * applyNightLook): less than bark's, so they keep a little of their stain
+ * and paint, but no longer read cold blue next to the neutral ground.
+ */
+export const STRUCTURE_NIGHT_GROUND = 0.6;
+
+const nightLook = new WeakSet<THREE.Material>();
+
+/**
+ * Give a standard material flagged with userData.nightGround (a share,
+ * 0..1) BarkMaterial's night look at that share: the moonlit ground's neutral
+ * light in its own hue and less blue sky sheen. Chains onto the material's
+ * hooks (idempotent; a program that already has the look, e.g. through a
+ * copied hook, is left alone). Apply before the occluder cut.
+ */
+export function applyNightLook(m: THREE.Material): void {
+  const share = m.userData.nightGround;
+  if (typeof share !== 'number' || nightLook.has(m)) return;
+  nightLook.add(m);
+  const prev = m.onBeforeCompile;
+  const prevKey = m.customProgramCacheKey.call(m);
+  m.onBeforeCompile = function (shader, renderer) {
+    prev.call(this, shader, renderer);
+    if (shader.fragmentShader.includes('uniform float uNightLift;')) return;
+    shader.uniforms.uNightLift = nightGround;
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform float uNightLift;')
+      .replace(
+        '#include <aomap_fragment>',
+        `float stNightMark = 0.0;\n${nightGroundLight(share.toFixed(2), 'diffuseColor.rgb', 'stNightMark')}\nreflectedLight.indirectSpecular *= 1.0 - ${(BARK_NIGHT_SHEEN * share).toFixed(2)} * uNightLift;\n#include <aomap_fragment>`,
+      )
+      .replace('#include <opaque_fragment>', `#include <opaque_fragment>${nightGroundMark('stNightMark')}`);
+  };
+  m.customProgramCacheKey = () => `${prevKey}|nightlook${share}`;
+  m.needsUpdate = true;
 }
 
 export function barkMaterial(
@@ -493,6 +553,13 @@ export class RockMaterial extends THREE.MeshStandardMaterial {
   }
 }
 
+/** Share of the moonlit ground's night look for rocks (applyNightLook): ground-like stone, not slate-blue boulders. */
+const ROCK_NIGHT_GROUND = 0.8;
+
 export function rockMaterial(key: string, p: RockParams): RockMaterial {
-  return cachedMaterial(`rock:${key}`, () => new RockMaterial(p));
+  return cachedMaterial(`rock:${key}`, () => {
+    const m = new RockMaterial(p);
+    m.userData.nightGround = ROCK_NIGHT_GROUND;
+    return m;
+  });
 }

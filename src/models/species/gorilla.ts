@@ -139,22 +139,23 @@ function headPrims(male: boolean): Prim[] {
     // mid face and cheekbones
     ellipsoid('head', [0, 1.02, 0.55], [0.07, 0.058, 0.05], { blend: 0.04, part: 'face' }),
     ...symmetric([ellipsoid('head', [0.058, 1.018, 0.548], [0.036, 0.034, 0.04], { blend: 0.03, part: 'face' })]),
-    // brow ridge (supraorbital torus): a heavy shelf arching over each eye
-    ellipsoid('head', [0, 1.084, 0.566], [0.03, 0.026, 0.036], { blend: 0.025, part: 'face' }),
-    ...symmetric([ellipsoid('head', [0.043, 1.076, 0.57], [0.05, 0.025, 0.038], { rot: [0, 0.2, -0.22], blend: 0.025, part: 'face' })]),
-    // narrow nasal bridge, then the broad nose with big flared alae
-    ellipsoid('head', [0, 1.038, 0.585], [0.017, 0.03, 0.018], { blend: 0.02, part: 'face' }),
-    ellipsoid('head', [0, 1.0, 0.603], [0.03, 0.03, 0.022], { blend: 0.02, part: 'face' }),
-    ...symmetric([sphere('head', [0.027, 0.994, 0.598], 0.024, { blend: 0.014, part: 'face' })]),
+    // brow ridge (supraorbital torus): a heavy shelf arching over each eye,
+    // overhanging the sockets so the face reads by its shading at a distance
+    ellipsoid('head', [0, 1.087, 0.571], [0.034, 0.03, 0.04], { blend: 0.025, part: 'face' }),
+    ...symmetric([ellipsoid('head', [0.045, 1.079, 0.576], [0.056, 0.029, 0.04], { rot: [0, 0.2, -0.22], blend: 0.025, part: 'face' })]),
+    // narrow nasal bridge, then the broad nose pad with big flared alae
+    ellipsoid('head', [0, 1.038, 0.588], [0.018, 0.03, 0.019], { blend: 0.02, part: 'face' }),
+    ellipsoid('head', [0, 1.0, 0.607], [0.036, 0.034, 0.025], { blend: 0.02, part: 'face' }),
+    ...symmetric([sphere('head', [0.03, 0.994, 0.601], 0.028, { blend: 0.014, part: 'face' })]),
     // projecting muzzle / upper lip
     ellipsoid('head', [0, 0.958, 0.584], [0.07, 0.04, 0.046], { blend: 0.03, part: 'face' }),
     // mandible + chin
     ellipsoid('jaw', [0, 0.925, 0.548], [0.076, 0.042, 0.06], { blend: 0.035, part: 'face' }),
     ellipsoid('jaw', [0, 0.916, 0.58], [0.054, 0.027, 0.03], { blend: 0.02, part: 'face' }),
     // nostrils, mouth line, eye sockets under the brow
-    ...symmetric([ellipsoid('head', [0.022, 0.986, 0.62], [0.012, 0.009, 0.012], { rot: [0.3, 0, -0.4], sub: true, blend: 0.006, part: 'face' })]),
+    ...symmetric([ellipsoid('head', [0.025, 0.986, 0.627], [0.014, 0.01, 0.013], { rot: [0.3, 0, -0.4], sub: true, blend: 0.006, part: 'face' })]),
     ellipsoid('head', [0, 0.94, 0.616], [0.05, 0.003, 0.026], { sub: true, blend: 0.005, part: 'face' }),
-    ...symmetric([sphere('head', [0.038, 1.045, 0.594], 0.016, { sub: true, blend: 0.008, part: 'face' })]),
+    ...symmetric([sphere('head', [0.038, 1.045, 0.594], 0.019, { sub: true, blend: 0.008, part: 'face' })]),
     // small ears close to the skull
     ...symmetric([ellipsoid('ear.L', [0.096, 1.056, 0.45], [0.013, 0.024, 0.018], { rot: [0, 0.35, 0], blend: 0.012, part: 'ear' })]),
   ];
@@ -178,10 +179,13 @@ const FUR = 0x403a36;
 const FUR_BROWN = 0x5a493c;
 const FUR_TOP = 0x655242;
 const CROWN = 0x5a3a28;
-const SILVER = 0x8f8a83;
-// bare leathery skin: near-black, but lighter than the shadows in its folds
+const SILVER = 0x8b8884;
+// bare leathery skin: near-black, but lighter than the shadows in its folds;
+// greyer on the ridges and the muzzle (lips), so brow, sockets, nose pad and
+// mouth still read on a face a dozen pixels tall
 const SKIN = 0x24201e;
-const SKIN_RIDGE = 0x3a3431;
+const SKIN_RIDGE = 0x433c38;
+const SKIN_MUZZLE = 0x47403c;
 const CHESTSKIN = 0x2a2726;
 
 function gorillaCoat(male: boolean, eye: Vec3) {
@@ -203,12 +207,14 @@ function gorillaCoat(male: boolean, eye: Vec3) {
     const crown = clamp01(c.pw('crest') * 1.4) * smooth(1.06, 1.12, y);
     blendHex(c.color, CROWN, crown * (0.75 + n * 0.2));
     if (male) {
-      // silver saddle: back from behind the shoulders to the rump, down onto the thighs
-      const back = smooth(-0.1, 0.45, c.ny) * smooth(0.12, -0.04, z) * smooth(-0.46, -0.3, z) * smooth(0.62, 0.78, y);
-      const thigh = c.pw('leg') * smooth(0.0, 0.5, c.ny + 0.4 * Math.sign(x) * c.nx) * smooth(0.45, 0.65, y) * smooth(-0.1, -0.2, z);
-      // streaky: grey-tipped hairs mixed with black
-      const streak = fbm(x * 40, y * 9, z * 40, 2, 47);
-      const sd = clamp01(Math.max(back, thigh * 0.6) * (0.8 + streak * 0.5) + (n2 - 0.2) * 0.25);
+      // silver saddle: across the top of the back from behind the shoulders to
+      // the rump (not down the flanks, where a broad pale sheet read as a
+      // beige cloth), a little onto the outer thighs
+      const back = smooth(0.15, 0.6, c.ny) * smooth(0.27, 0.12, ax) * smooth(0.1, -0.04, z) * smooth(-0.44, -0.3, z) * smooth(0.66, 0.8, y);
+      const thigh = c.pw('leg') * smooth(0.2, 0.6, c.ny + 0.4 * Math.sign(x) * c.nx) * smooth(0.5, 0.66, y) * smooth(-0.1, -0.2, z);
+      // hair-broken: grey-tipped hairs parted by dark strands running back along the hair
+      const streak = fbm(x * 28, y * 28, z * 7, 2, 47);
+      const sd = clamp01(Math.max(back, thigh * 0.5) * (0.7 + streak * 1.1) + (n2 - 0.2) * 0.2);
       if (sd > 0) {
         blendHex(c.color, SILVER, sd * (0.8 + n * 0.2));
         c.fur = Math.max(1, c.fur - sd * 0.5);
@@ -228,9 +234,9 @@ function gorillaCoat(male: boolean, eye: Vec3) {
         // bridge, alae, lips) over deep, dark eye sockets, nostrils and mouth
         // line: the face reads by its form, not as one black patch
         const ridge = smooth(0.1, 0.7, c.ny * 0.7 + c.nz * 0.5);
-        blendHex(c.color, SKIN_RIDGE, 0.6 * ridge * k);
-        if (y < 0.965 && z > 0.57) blendHex(c.color, 0x2e2a29, 0.45);
-        c.color.multiplyScalar(1 - 0.7 * c.ao(0.035));
+        blendHex(c.color, SKIN_RIDGE, 0.65 * ridge * k);
+        blendHex(c.color, SKIN_MUZZLE, 0.6 * k * smooth(0.975, 0.955, y) * smooth(0.55, 0.585, z));
+        c.color.multiplyScalar(1 - 0.75 * c.ao(0.035));
       }
     }
     if (c.part === 'ear') {
@@ -248,8 +254,8 @@ function gorillaCoat(male: boolean, eye: Vec3) {
     // darker, wet-looking skin around the eyes
     const ex = ax - eye[0], ey = y - eye[1], ez = z - eye[2];
     const ed = Math.sqrt(ex * ex + ey * ey + ez * ez);
-    if (ed < 0.03) {
-      const k = smooth(0.03, 0.016, ed);
+    if (ed < 0.034) {
+      const k = smooth(0.034, 0.018, ed);
       blendHex(c.color, 0x0d0c0c, k);
       c.gloss = Math.max(c.gloss, 0.25 * k);
     }
@@ -315,7 +321,7 @@ function design(ctx: DesignContext): CreatureDesign {
     },
     coat: gorillaCoat(male, eye),
     look: { skin: 'fur', pattern: 'none', roughness: 0.9, sheen: 0.4, grain: 0.008, bump: 0.45, mottle: 0.09, shine: 0.035 },
-    eyes: [{ bone: 'head', pos: eye, radius: 0.0105, color: 0x4a2a12 }],
+    eyes: [{ bone: 'head', pos: eye, radius: 0.0105, color: 0x2b1a0e }],
     anim: driver(anim),
     babyScale: 0.3,
     babyHead: 1.4,

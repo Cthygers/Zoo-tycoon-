@@ -44,7 +44,7 @@ import { clearBlockers, setBlocker } from './lod/blockers';
 import { applyFade, applyOccluderCut, casterDepthMaterial, fadeModeOf, fadeUniforms, updateFade } from './lod/fade';
 import { propsTier, type PropsTier } from './lod/tiers';
 import { concreteMaterial, disposePropMaterials, projectBoxUVs, surfaceTextures } from './materials';
-import { atlasSteps, disposeNatureResources, paintAtlasesOffThread, setNatureNight, withQuality } from './nature';
+import { applyNightLook, atlasSteps, disposeNatureResources, paintAtlasesOffThread, setNatureNight, withQuality } from './nature';
 import { PROP_SPECS, type PropSpec } from './registry';
 import { disposeStructures } from './structures';
 import { applyWind, cloneWithHooks, disposeWind, hasSway, setupWindMesh, updateWind } from './wind';
@@ -73,6 +73,24 @@ const OCCLUDER_CATEGORIES: ReadonlySet<ObjectDef['category']> = new Set(['amenit
 const ROCK_CUT_R = 1.8;
 /** … and only rocks taller than this (m): low stones and fallen logs hide nothing. */
 const ROCK_CUT_H = 0.8;
+
+/** How far (m) a rock body reaches above the rock: a line that close over the top still loses the subject's legs behind it. */
+const ROCK_BODY_OVER = 0.3;
+
+/**
+ * A large rock's body for the follow camera's blocker query: an ellipsoid
+ * around the part above the ground (the buried base would sink it below the
+ * rock a camera looks over), reaching ROCK_BODY_OVER above the rock's top,
+ * and a bit narrower than the footprint (the ledges thin out toward the
+ * corners).
+ */
+export function outcropBody(box: THREE.Box3, radius: number): { centre: THREE.Vector3; r: number; ry: number } {
+  const base = Math.max(0, box.min.y);
+  const h = Math.max(0, box.max.y - base);
+  const centre = box.getCenter(new THREE.Vector3());
+  centre.y = base + h / 2;
+  return { centre, r: radius * 0.85, ry: h * 0.6 + ROCK_BODY_OVER };
+}
 
 // ---------------------------------------------------------------------------
 // Templates
@@ -401,7 +419,7 @@ export class PropsLayer implements IPropsLayer {
     const lamp = cat === 'amenity' && OBJECTS_BY_ID[defId].light === true;
     const rock = cat === 'rock';
     if ((cat && OCCLUDER_CATEGORIES.has(cat) && !lamp) || (rock && cls.r < ROCK_CUT_R && cls.h > ROCK_CUT_H)) for (const p of parts) p.occluder = true;
-    const body = rock && cls.r >= ROCK_CUT_R ? { centre: box.getCenter(new THREE.Vector3()), r: radius, ry: (box.max.y - Math.max(0, box.min.y)) * 0.55 } : null;
+    const body = rock && cls.r >= ROCK_CUT_R ? outcropBody(box, radius) : null;
     let emitters = findEmitters(parts.filter((p) => p.levels & 1));
     if (emitters.length === 0 && OBJECTS_BY_ID[defId]?.light) {
       // lit def without glowing parts: a soft pool in front (+Z)
@@ -457,6 +475,8 @@ export class PropsLayer implements IPropsLayer {
       // above, so colour variants still merge; their merged copy is registered here too)
       const sm = m as THREE.MeshStandardMaterial;
       if (sm.isMeshStandardMaterial && sm.envMapIntensity !== 1) useEnvMapIntensity(sm);
+      // wood and paint: moonlit like the ground at night (after the plain check: colour variants still merge)
+      applyNightLook(m);
     }
     if (hasSway(m)) applyWind(m);
     const fade = this.fadeMats.has(m) ? null : fadeModeOf(m);
@@ -846,7 +866,7 @@ export class PropsLayer implements IPropsLayer {
     for (const r of this.uniques) r.tpl.spec.animate?.(r.unique!.children[0], this.time, nightFactor);
 
     this.night.update(dt, nightFactor, view.focus);
-    updateFade(view.cam, view.focus, this.tier.fade);
+    updateFade(view.cam, view.focus, this.tier.fade, undefined, dt);
     this.highlight.update(dt, this.time);
   }
 

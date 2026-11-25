@@ -31,11 +31,14 @@
 //     from the instance's look texel in the batched renderer (`USE_BATCHING`)
 //     and is 1 (adult) for standalone meshes,
 //   * for the standalone highlight material, the selection rim (crHighlight),
+//   * the moonlit night look of the ground: neutral moonlight in the coat's
+//     own hue instead of the blue sky fill (figureNight.ts),
 //   * warm light from the night lamps it stands under (props/lights/lampField.ts).
 
 import * as THREE from 'three';
 import type { LookSpec } from '../types';
 import { applyLampField } from '../../props/lights/lampField';
+import { applyFigureNight } from './figureNight';
 import { HIGHLIGHT_FN_GLSL, NOISE_GLSL } from './shaderChunks';
 import { FUR_SHELL_FROM, FUR_SHELL_LEN } from '../build/furShell';
 
@@ -536,8 +539,11 @@ if (crFade > 0.001 && crGloss < 0.5) {
   #if NUM_DIR_LIGHTS > 0
   crShine += directLight.color * saturate(dot(nonPerturbedNormal, directLight.direction)) * cr_hairShine(crT, nonPerturbedNormal, directLight.direction, geometryViewDir, crShift);
   #endif
-  // hair only (bare face, chest, palms and soles bake fur ≈ 1); a faint warm cast from light scattered in the hair
-  outgoingLight += uShine * smoothstep(1.1, 1.5, crFur) * (1.0 - crGloss) * crShine * vec3(1.0, 0.94, 0.86);
+  // dark hair only: bare face, chest, palms and soles bake fur ≈ 1, and pale
+  // hair (a silverback's saddle) already shows its form, where the band read
+  // as a broad beige plastic sheen; a faint warm cast from light scattered in the hair
+  float crDarkHair = 1.0 - smoothstep(0.1, 0.22, dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722)));
+  outgoingLight += uShine * smoothstep(1.1, 1.5, crFur) * crDarkHair * (1.0 - crGloss) * crShine * vec3(1.0, 0.94, 0.86);
 }
 #endif
 {
@@ -563,6 +569,7 @@ outgoingLight = crHighlightFurOf(outgoingLight, uHighlight, vPattern.w);
 #endif
 #include <opaque_fragment>`,
       );
+    applyFigureNight(shader);
     applyLampField(shader);
   };
   mat.customProgramCacheKey = () => `creature-animal-${skin}-${pattern}-${micro}-${juv}-${wets}-${hl}-${shine}-${shell}-${lie}`;

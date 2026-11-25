@@ -3,7 +3,7 @@
 
 import * as THREE from 'three';
 import { Noise, Rng } from '../../core/rng';
-import { projectBoxUVs } from '../materials';
+import { projectBoxUVs, withNightLook } from '../materials';
 import { registerProp } from '../registry';
 import { tiered } from './tiers';
 import { box, cyl, displace, gablePlanes, Kit, kitLod, roof, rod, segs, segScale, skillionPlane, V, wall } from './kit';
@@ -186,8 +186,11 @@ function caveMaterial(): THREE.MeshStandardMaterial {
     });
     caveMat.normalScale.set(1.3, 1.3);
     caveMat.name = 'struct/caveRock';
-    // a 4 m den: the follow-mode occluder cut (lod/fade.ts) tests its centre, so let it reach about its half width
+    withNightLook(caveMat);
+    // a 4 m den: the follow-mode occluder cut (lod/fade.ts) tests its centre, so let it reach about its half width;
+    // a subject inside it is hidden from every side, so then it goes whole
     caveMat.userData.occluderReach = 1.6;
+    caveMat.userData.occluderShell = true;
   }
   return caveMat;
 }

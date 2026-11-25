@@ -60,7 +60,7 @@ it comes back into view.
 
 * animals (`ANIMAL_LOOK_TEXELS = 1`, crowd/materials.ts): texel 0 = (highlight,
   growth 0..1, wetness 0..1 after a swim (RiggedModel.writeLook; thick skins and fur with look.wets (tiger, bears) show it),
-  lying 0..1 from how low hips and chest sit (species with look.lieShade: giraffe's folded legs shade down)) → fragment `flat varying vec4 vCrLook0`; plus
+  lying 0..1 from how low hips and chest sit or how far a leg is folded (species with look.lieShade: giraffe's folded legs shade down)) → fragment `flat varying vec4 vCrLook0`; plus
   `flat varying vec2 vCrYaw` (instance yaw) — `normalMatrix` is redefined in the
   fragment shader as normalMatrix × instance rotation, so object-space
   micro-normals keep working.
@@ -102,6 +102,15 @@ it comes back into view.
   as `crHighlightFurOf(light, h, vPattern.w)`: the rim fades on long hair
   (manes), whose deep folds face away from the camera and would otherwise
   light up as bright streaks inside the silhouette.
+* **Night look** (`material/figureNight.ts`): animal (and human) materials call
+  `applyFigureNight(shader, share?)` just before `applyLampField`. At the
+  moonlit-ground night level (`setFigureNightGround`, main.ts every frame,
+  the value it gives `setNatureNightGround`) their diffuse light leans toward
+  its luminance in the albedo's hue (`FIGURE_NIGHT.light`), as the moonlit
+  ground's does, instead of the blue sky fill, and they are marked for the
+  night grade (`FIGURE_NIGHT.mark`): the larger of that mark and the lamp
+  field's, applied as tone mapping runs (a `toneMapping` wrapper) or to the
+  HDR alpha on the post-FX tier. No lift, so figures don't glow.
 * **Lamp light**: animal and human materials call `applyLampField(shader)`
   (props/lights/lampField.ts) last in onBeforeCompile: an R8 field fetch per
   vertex (`vLampLight`, read a little way out along the normal, further up
@@ -139,10 +148,15 @@ it comes back into view.
 * **Follow cut** (`setCreatureFollowCut`, crowd/batch.ts): while the camera
   follows a subject within `FOLLOW_CUT_MAX_D`, animal batches (`followCut`,
   set by AnimalModel) leave out of the main pass every other animal whose body
-  (its batch bounding sphere × 0.5) reaches the line from the camera to the
-  subject's body in front of the subject — whole animals, hysteresis to come
-  back, shadows kept, no shader or draw-call cost. main.ts calls it every frame
-  with the followed subject's position (null when not following).
+  centre stands at least `CUT_FRONT` in front of the subject (on the ground,
+  toward the camera) and whose body — the asset's rest-pose box (`cutBody`,
+  `RigAsset.body`) placed by the instance matrix, so heading and growth count
+  — comes within a margin of the line from the camera to the subject that
+  narrows toward the camera (the subject's size on screen): an elephant whose
+  rump overlaps a followed hippo goes, a lion lying low under the view stays.
+  Whole animals, never the subject, hysteresis to come back, shadows kept, no
+  shader or draw-call cost. main.ts calls it every frame with the followed
+  subject's position (null when not following).
 * **Fur shell** (`build/furShell.ts`): fur coats append a raised copy of their
   long-hair triangles to level 0 (shell vertices flagged by `pattern.z = −1`,
   after the base vertices); the animal material lifts them along the normal

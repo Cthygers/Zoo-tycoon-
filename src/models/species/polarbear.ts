@@ -172,7 +172,9 @@ function design(ctx: DesignContext): CreatureDesign {
     legs: LEGS,
     tailR: 0.055,
     coat: polarCoat(eye),
-    look: { skin: 'fur', grain: 0.012, bump: 0.45, sheen: 0.5, roughness: 0.93, mottle: 0.07, wets: true },
+    // soft relief: on a bright, low-contrast coat the fur's clump relief along
+    // the hair flow read as wavy wood-grain bands at the closest zoom
+    look: { skin: 'fur', grain: 0.012, bump: 0.28, sheen: 0.5, roughness: 0.93, mottle: 0.07, wets: true },
     eyes: [{ bone: 'head', pos: eye, radius: 0.0125, color: 0x0e0a08 }],
     resolution: 0.95,
     regions: {

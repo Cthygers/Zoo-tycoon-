@@ -50,20 +50,26 @@
 //
 // While the camera follows a subject (setFollowCut, driven from the view's
 // follow state) more cuts run, all off in free-camera play:
-//   - crowns the camera → subject line crosses in its far 60 % go, tree by
-//     tree as above (thinning, then whole), up to FOLLOW_CUT_D of zoom, with
-//     their shadows: a followed animal is not lost behind a leaf wall;
+//   - crowns the camera → subject line crosses go, tree by tree as above
+//     (thinning, then whole), up to FOLLOW_CUT_D of zoom, with their shadows,
+//     unless the line only grazes the top of the crown: a followed animal is
+//     not lost behind a leaf wall;
 //   - leaf cards right on that line (within uFadeCard, decided from each
 //     card's centre, so a card goes whole) go too, even from the subject's own
 //     tree, which stays standing with its shade: the leaves over the animal go;
-//   - at the closest follow zooms, fence pieces, small structures and rocks
-//     standing on that line near the camera (OCCLUDER_R, or the near
-//     OCCLUDER_SHARE of the line, widened by a bulky piece's occluderReach) and
-//     at least a metre in front of the subject dissolve as whole pieces
-//     (applyOccluderCut: an instance-wide decision, dithered over a short band
-//     so a piece does not pop); a fence post only once every panel it joins
-//     has gone. Ground-plant clumps and tree trunks (with their tree) on the
-//     line go anywhere in front of the subject.
+//     the near-camera view hole shrinks to that radius, so trees around the
+//     subject keep their crowns (no bare limbs under a leafy shadow);
+//   - at the closest follow zooms (the cut switches on and off with
+//     hysteresis and a short time cross-fade, so nothing rests half
+//     dissolved), fence pieces, small structures and rocks standing on that
+//     line near the camera (OCCLUDER_R, or the near OCCLUDER_SHARE of the
+//     line, widened by a bulky piece's occluderReach), at least a metre in
+//     front of the subject and reaching up to the line (a piece whose top
+//     stays below it hides nothing) dissolve as whole pieces
+//     (applyOccluderCut: an instance-wide decision); a fence post only once
+//     every panel it joins has gone. Boulders, ice blocks, ground-plant clumps
+//     and tree trunks (with their tree) on the line go anywhere in front of
+//     the subject, and a den the subject stands in goes whole.
 
 import * as THREE from 'three';
 import { TILE } from '../../core/constants';
@@ -117,24 +123,38 @@ export const FOLLOW_CARD_R = 1.2;
 export const FOLLOW_CARD_R_MAX = 2;
 /** Hole radius (m) the follow cut grows a crown by: only crowns the line really crosses go. */
 const FOLLOW_GROW = 0.5;
-/** Share of the camera → subject line, from the camera, where the follow cut leaves crowns alone (they are below the line). */
-const FOLLOW_SKIP = 0.4;
-/** Camera → subject distance (m) up to which occluders on the line are cut (fully back 3 m farther). */
+/** The follow cut keeps a crown the line passes this far (m) or more above (its grown hit is only the margin). */
+const FOLLOW_CLEAR = 0.5;
+/** Leaf cards within this distance (m) of the lens stay to the card cut (the lens sphere handles them). */
+const FOLLOW_LENS = 1.5;
+/** Camera → subject distance (m) at or below which the occluder cut switches on … */
 export const OCCLUDER_D = 11;
+/** … and at or above which it switches off again (hysteresis: no flicker while zooming around one distance). */
+export const OCCLUDER_OFF_D = 13;
+/** Seconds the occluder cut takes to cross-fade on or off (time, not zoom: nothing rests half dissolved). */
+export const OCCLUDER_FADE_S = 0.3;
+/** A piece is cut only if its top reaches within this distance (m) under the camera → subject line above it. */
+export const OCCLUDER_BELOW = 0.3;
 /** Horizontal camera → piece distance (m) within which a fence piece or small structure on the line is cut… */
 export const OCCLUDER_R = 4;
 /** … or within this share of the horizontal camera → subject distance, if farther (a feeder in front of a giraffe followed from 8 m). */
 export const OCCLUDER_SHARE = 0.65;
 /** Horizontal distance (m) of a piece's origin from the camera → subject line within which it counts as on the line. */
 export const OCCLUDER_SIDE = 1.4;
-/** A fence piece, structure or rock goes only this far (m, horizontal) in front of the subject or more … */
+/** A fence piece or structure goes only this far (m, horizontal) in front of the subject or more … */
 const OCCLUDER_FRONT = 1;
+/** … a boulder or ice block on the line, anywhere from this far … */
+const ROCK_FRONT = 0.6;
 /** … a ground plant or a tree trunk on the line (the subject's own tree too), anywhere from this far. */
 const PLANT_FRONT = 0.5;
 
 const FADE_PARS_VERT = /* glsl */ `
 #ifndef PROP_OCCL_REACH
 #define PROP_OCCL_REACH 0.0
+#endif
+#ifdef PROP_OCCL_TOP
+// the piece's height above its origin (m, model space; one value per geometry, layer / builders)
+attribute float aOcclTop;
 #endif
 #ifdef PROP_OCCL_POSTS
 // a fence post's fenced edges (bits −x, +x, −z, +z; 0 = not a post), defined by the fence patch (props/fences.ts)
@@ -202,11 +222,22 @@ float propTreeFade( float tree ) {
 #endif
 }
 #endif
-// a fence piece, small structure or rock (origin o) standing near the camera
-// on the camera → subject line, at least front m in front of the subject;
-// with anywhere (ground plants, trunks: they hide a subject from close by
-// too) anywhere on the line in front of it; one value per instance
-float propOccluderAt( vec3 o, float front, bool anywhere ) {
+// world height of a piece's top (origin o, instance matrix M): from its
+// geometry's aOcclTop, scaled with the instance; without that data, high
+// enough to pass the height test (structures, trunks)
+float propOcclTop( vec3 o, mat4 M ) {
+#ifdef PROP_OCCL_TOP
+  return o.y + aOcclTop * length( M[ 1 ].xyz );
+#else
+  return o.y + 1e4;
+#endif
+}
+// a fence piece, small structure or rock (origin o, top at height top)
+// standing near the camera on the camera → subject line, at least front m in
+// front of the subject; with anywhere (boulders, ground plants, trunks: they
+// hide a subject from close by too) anywhere on the line in front of it; one
+// value per instance
+float propOccluderAt( vec3 o, float top, float front, bool anywhere ) {
   vec2 co = o.xz - uFadeCam.xz;
   vec2 cs = uFadeFocus.xz - uFadeCam.xz;
   float len = max( length( cs ), 1e-3 );
@@ -218,23 +249,31 @@ float propOccluderAt( vec3 o, float front, bool anywhere ) {
   float nearR = max( ${OCCLUDER_R.toFixed(2)}, ${OCCLUDER_SHARE.toFixed(2)} * len ) + PROP_OCCL_REACH;
   float near = anywhere ? 1.0 : 1.0 - smoothstep( nearR - 0.25, nearR, length( co ) );
   float sideR = ${OCCLUDER_SIDE.toFixed(2)} + PROP_OCCL_REACH;
-  float onLine = ( 1.0 - smoothstep( sideR - 0.15, sideR, side ) )
+  float onLine = near * ( 1.0 - smoothstep( sideR - 0.15, sideR, side ) )
                * smoothstep( -0.3, 0.0, t ) * ( 1.0 - smoothstep( len - front - 0.3, len - front, t ) );
-  return near * onLine * uFadeOccl;
+#ifdef PROP_OCCL_SHELL
+  // a den the subject stands in hides it from every side: it goes whole
+  onLine = max( onLine, 1.0 - smoothstep( PROP_OCCL_REACH, PROP_OCCL_REACH + 0.4, length( o.xz - uFadeFocus.xz ) ) );
+#endif
+  // only a piece reaching up to the line hides the subject: a low stone,
+  // kerb, tuft or a rock in the foreground under the view stays
+  float lineY = mix( uFadeCam.y, uFadeFocus.y, clamp( t / len, 0.0, 1.0 ) );
+  float tall = smoothstep( lineY - ${(OCCLUDER_BELOW + 0.2).toFixed(2)}, lineY - ${OCCLUDER_BELOW.toFixed(2)}, top );
+  return onLine * tall * uFadeOccl;
 }
 #ifdef PROP_FADE_CARDS
 // leaf card centre (model space, cm; nature/geo.ts addCrownFade)
 attribute vec3 aCard;
 // following: 1 for a leaf card right on the camera → subject line in front of
-// the subject (beyond the line's first stretch, which passes above crowns).
-// Built from the card's centre, so the card goes whole; the band only ranks
-// the cards at the hole's edge
+// the subject, anywhere past the lens (the card's distance to the line already
+// proves it is in the way). Built from the card's centre, so the card goes
+// whole; the band only ranks the cards at the hole's edge
 float propCardCut( mat4 M, vec3 dir, float len ) {
   vec3 c = ( M * vec4( aCard * 0.01, 1.0 ) ).xyz - uFadeCam;
   float t = dot( c, dir );
   float r = length( c - dir * clamp( t, 0.0, len ) );
   return ( 1.0 - smoothstep( uFadeCard * 0.75, uFadeCard, r ) )
-       * smoothstep( ${(FOLLOW_SKIP - 0.05).toFixed(2)}, ${(FOLLOW_SKIP + 0.05).toFixed(2)}, t / len )
+       * smoothstep( ${FOLLOW_LENS.toFixed(2)}, ${(FOLLOW_LENS + 1).toFixed(2)}, t )
        * ( 1.0 - smoothstep( len - 0.6, len - 0.2, t ) ) * uFadeFollow;
 }
 #endif
@@ -242,6 +281,7 @@ float propCardCut( mat4 M, vec3 dir, float len ) {
 float propFadeAt( vec3 p, mat4 M ) {
   vec3 o = M[ 3 ].xyz;
 #ifdef PROP_FADE_OCCLUDER
+  float top = propOcclTop( o, M );
 #ifdef PROP_OCCL_POSTS
   // a fence post goes only with every panel it joins (each tested at its
   // centre, half a tile out): a run's end post stays as a clean end, and no
@@ -252,12 +292,17 @@ float propFadeAt( vec3 p, mat4 M ) {
     for ( int i = 0; i < 4; i++ ) {
       if ( mod( floor( mask / exp2( float( i ) ) ), 2.0 ) < 0.5 ) continue;
       vec2 e = i < 2 ? vec2( i == 0 ? -1.0 : 1.0, 0.0 ) : vec2( 0.0, i == 2 ? -1.0 : 1.0 );
-      cut = min( cut, propOccluderAt( o + vec3( e.x, 0.0, e.y ) * ${(TILE / 2).toFixed(2)}, ${OCCLUDER_FRONT.toFixed(1)}, false ) );
+      cut = min( cut, propOccluderAt( o + vec3( e.x, 0.0, e.y ) * ${(TILE / 2).toFixed(2)}, top, ${OCCLUDER_FRONT.toFixed(1)}, false ) );
     }
     return cut;
   }
 #endif
-  return propOccluderAt( o, ${OCCLUDER_FRONT.toFixed(1)}, false );
+#ifdef PROP_OCCL_ANYWHERE
+  // boulders and ice blocks hide a subject from close by too
+  return propOccluderAt( o, top, ${ROCK_FRONT.toFixed(1)}, true );
+#else
+  return propOccluderAt( o, top, ${OCCLUDER_FRONT.toFixed(1)}, false );
+#endif
 #else
 #ifdef PROP_FADE_TREES_ONLY
   // shared shadow casters: only pieces with crown data (tree bark) go
@@ -276,7 +321,8 @@ float propFadeAt( vec3 p, mat4 M ) {
 #ifdef PROP_FADE_CROWN
   // a tree: one decision for the whole instance, with the hole's radius where
   // the line passes the crown
-  float tc = dot( ( M * vec4( aCrown.xyz * 0.01, 1.0 ) ).xyz - uFadeCam, dir ) / len;
+  vec3 cw = ( M * vec4( aCrown.xyz * 0.01, 1.0 ) ).xyz;
+  float tc = dot( cw - uFadeCam, dir ) / len;
   float grow = mix( uFadeParams.y, uFadeParams.z, clamp( tc, 0.0, 1.0 ) ) * k;
   // the tree the camera looks at stays: its trunk stands within TREE_KEEP_R
   // of the focus, or its crown centre is not clearly between the camera and
@@ -294,14 +340,18 @@ float propFadeAt( vec3 p, mat4 M ) {
   // its shadow goes with it only near the camera (close views)
   fade *= 1.0 - smoothstep( ${TREE_SHADOW_R.toFixed(1)}, ${(TREE_SHADOW_R + 4).toFixed(1)}, length( uFadeCam.xz - o.xz ) );
 #endif
-  // following: crowns the line crosses beyond its first stretch (nearer ones
-  // stand below the line), at any zoom up to FOLLOW_CUT_D, shadow included
-  fade = max( fade, propTreeFade( hit * uFadeFollow * smoothstep( ${(FOLLOW_SKIP - 0.05).toFixed(2)}, ${(FOLLOW_SKIP + 0.05).toFixed(2)}, tc ) ) );
+  // following: crowns the line crosses, at any zoom up to FOLLOW_CUT_D,
+  // shadow included; not where the line passes over the crown's top (the
+  // grown crown's margin alone)
+  float lineY = uFadeCam.y + dir.y * clamp( tc, 0.0, 1.0 ) * len;
+  float crownTop = cw.y + aCrownR.y * 0.01 * length( M[ 1 ].xyz );
+  float under = 1.0 - smoothstep( crownTop + ${(FOLLOW_CLEAR - 0.2).toFixed(2)}, crownTop + ${(FOLLOW_CLEAR + 0.2).toFixed(2)}, lineY );
+  fade = max( fade, propTreeFade( hit * uFadeFollow * under ) );
 #ifndef PROP_FADE_SHADOW
   // following at the closest zooms: a trunk on the line in front of the
   // subject goes with its tree, even the subject's own (the crown is above
   // the frame there); its shade stays on the subject
-  fade = max( fade, propTreeFade( propOccluderAt( o, ${PLANT_FRONT.toFixed(1)}, true ) ) );
+  fade = max( fade, propTreeFade( propOccluderAt( o, propOcclTop( o, M ), ${PLANT_FRONT.toFixed(1)}, true ) ) );
 #endif
 #ifdef PROP_FADE_CARDS
   // following: the leaf cards right on the line go, card by card, also from
@@ -328,7 +378,7 @@ float propFadeAt( vec3 p, mat4 M ) {
 #ifdef PROP_FADE_PLANT
   // following at the closest zooms: a whole clump on the line in front of the
   // subject (dissolved through its own threshold, see PLANT_DISCARD)
-  vPropOccl = propOccluderAt( o, ${PLANT_FRONT.toFixed(1)}, true );
+  vPropOccl = propOccluderAt( o, propOcclTop( o, M ), ${PLANT_FRONT.toFixed(1)}, true );
 #endif
   return max( max( instF, lensF ), lineF );
 #endif
@@ -426,15 +476,17 @@ export function applyFade(m: THREE.Material, mode: FadeMode): void {
     (mode === 'crown' ? '#define PROP_FADE_CARDS\n' : '') +
     (mode === 'foliage' ? '#define PROP_FADE_PLANT\n' : '');
   const plant = mode === 'foliage';
+  // a ground plant dissolving on the follow line: its clump's reach and height (occluderDefines)
+  const occl = plant ? occluderDefines(m) : '';
   m.onBeforeCompile = function (shader, renderer) {
     prev.call(this, shader, renderer);
-    if (plant) patchFadeShader(shader, define, PLANT_DISCARD, PLANT_PARS_FRAG);
+    if (plant) patchFadeShader(shader, define + occl, PLANT_DISCARD, PLANT_PARS_FRAG);
     else patchFadeShader(shader, define);
   };
   // resolve the previous key now: the default key is the hook's source text,
   // which would otherwise read the wrapper below for every material
   const prevKey = prevKeyFn.call(m);
-  m.customProgramCacheKey = () => `${prevKey}|propfade-${mode}${solid ? trunkR : ''}`;
+  m.customProgramCacheKey = () => `${prevKey}|propfade-${mode}${solid ? trunkR : ''}${occl ? `|${occlKey(m)}` : ''}`;
   m.needsUpdate = true;
 }
 
@@ -459,28 +511,73 @@ function patchFadeShader(shader: THREE.WebGLProgramParametersWithUniforms, defin
     .replace('#include <clipping_planes_fragment>', `${discard}\n#include <clipping_planes_fragment>`);
 }
 
+/**
+ * The occluder cut's height data (for materials with userData.occluderTop):
+ * every vertex carries the piece's top above its origin (aOcclTop, m;
+ * default the geometry's highest point), so the cut keeps a piece whose top
+ * stays below the camera → subject line. Every geometry drawn with such a
+ * material needs it (BatchedMesh wants one attribute layout per batch).
+ */
+export function setOcclTop(g: THREE.BufferGeometry, top?: number): THREE.BufferGeometry {
+  if (top === undefined) {
+    if (!g.boundingBox) g.computeBoundingBox();
+    top = Math.max(0, g.boundingBox!.max.y);
+  }
+  const n = g.getAttribute('position').count;
+  g.setAttribute('aOcclTop', new THREE.BufferAttribute(new Float32Array(n).fill(top), 1));
+  return g;
+}
+
 const occluderData = new WeakSet<THREE.Material>();
+
+/**
+ * Occluder-cut defines from a material's userData (registry.ts): its reach,
+ * whether its geometries carry their height (aOcclTop), fence posts, the
+ * "anywhere in front of the subject" rule of boulders and a den's shell.
+ */
+function occluderDefines(m: THREE.Material): string {
+  const u = m.userData;
+  const reach = typeof u.occluderReach === 'number' ? u.occluderReach : 0;
+  return (
+    `#define PROP_OCCL_REACH ${reach.toFixed(2)}\n` +
+    (u.occluderTop === true ? '#define PROP_OCCL_TOP\n' : '') +
+    (u.occluderPosts === true ? '#define PROP_OCCL_POSTS\n' : '') +
+    (u.occluderAnywhere === true ? '#define PROP_OCCL_ANYWHERE\n' : '') +
+    (u.occluderShell === true ? '#define PROP_OCCL_SHELL\n' : '')
+  );
+}
+
+/** Program cache key part matching occluderDefines. */
+function occlKey(m: THREE.Material): string {
+  const u = m.userData;
+  const reach = typeof u.occluderReach === 'number' ? u.occluderReach : 0;
+  return `${reach}${u.occluderTop === true ? 't' : ''}${u.occluderPosts === true ? 'p' : ''}${u.occluderAnywhere === true ? 'a' : ''}${u.occluderShell === true ? 's' : ''}`;
+}
 
 /**
  * Patch a fence, structure or rock material with the near-camera occluder
  * cut (idempotent; see the header): while following at the closest zooms, a
  * piece near the camera on the camera → subject line dissolves as a whole.
- * `userData.occluderReach` (m, about the piece's half width) widens the
- * line and the near-camera range for bulky pieces (boulders, a rock den).
- * Apply last. Its shadow stays (the piece is still there, only not drawn).
+ * userData (registry.ts): `occluderReach` (m, about the piece's half width)
+ * widens the line and the near-camera range for bulky pieces (boulders, a
+ * rock den); `occluderTop` says every geometry drawn with it carries its
+ * height (aOcclTop), so a piece below the line stays; `occluderAnywhere`
+ * (boulders, ice) cuts it anywhere in front of the subject; `occluderShell`
+ * (a den) cuts it whole while the subject stands inside it. Apply last. Its
+ * shadow stays (the piece is still there, only not drawn).
  */
 export function applyOccluderCut(m: THREE.Material): void {
   if (occluderData.has(m) || fadeData.has(m)) return;
   occluderData.add(m);
   const prev = m.onBeforeCompile;
   const prevKey = m.customProgramCacheKey.call(m);
-  const reach = typeof m.userData.occluderReach === 'number' ? m.userData.occluderReach : 0;
-  const side = `#define PROP_OCCL_REACH ${reach.toFixed(2)}\n${m.userData.occluderPosts === true ? '#define PROP_OCCL_POSTS\n' : ''}`;
+  const defs = occluderDefines(m);
+  const key = occlKey(m);
   m.onBeforeCompile = function (shader, renderer) {
     prev.call(this, shader, renderer);
-    patchFadeShader(shader, `#define PROP_FADE_OCCLUDER\n#define PROP_FADE_ON uFadeOccl > 0.0\n${side}`, OCCLUDER_DISCARD);
+    patchFadeShader(shader, `#define PROP_FADE_OCCLUDER\n#define PROP_FADE_ON uFadeOccl > 0.0\n${defs}`, OCCLUDER_DISCARD);
   };
-  m.customProgramCacheKey = () => `${prevKey}|propoccl${reach}${m.userData.occluderPosts === true ? 'p' : ''}`;
+  m.customProgramCacheKey = () => `${prevKey}|propoccl${key}`;
   m.needsUpdate = true;
 }
 
@@ -545,6 +642,10 @@ const followSubject = new THREE.Vector3();
 /** Seconds over which the follow cuts hand crowns and occluders back after following ends (thinning, no pop). */
 const FOLLOW_RELEASE_S = 0.6;
 let followWeight = 0;
+/** Occluder cut: switched on (hysteresis between OCCLUDER_D and OCCLUDER_OFF_D) … */
+let occlOn = false;
+/** … and its cross-fade weight (0..1, eased over OCCLUDER_FADE_S). */
+let occlWeight = 0;
 
 /**
  * Follow mode of the cuts (see the header): call every frame with the
@@ -563,13 +664,19 @@ export function setFollowCut(subject: { x: number; y: number; z: number } | null
 
 /**
  * Update the shared fade uniforms from the camera and the point it looks at.
- * `focus` is the ground point at the screen centre.
+ * `focus` is the ground point at the screen centre; `dt` (s) paces the
+ * occluder cut's cross-fade (without it, it switches at once).
  */
-export function updateFade(camPos: THREE.Vector3, focus: THREE.Vector3, enabled: boolean, tuning: FadeTuning = { maxDist: 42 }): void {
+export function updateFade(camPos: THREE.Vector3, focus: THREE.Vector3, enabled: boolean, tuning: FadeTuning = { maxDist: 42 }, dt = Infinity): void {
   const u = fadeUniforms;
   const follow = enabled && following;
   const aim = follow ? followSubject : focus;
   const d = camPos.distanceTo(aim);
+  // the occluder cut is on or off, never parked half dissolved at some zoom
+  if (!follow || d >= OCCLUDER_OFF_D) occlOn = false;
+  else if (d <= OCCLUDER_D) occlOn = true;
+  const step = dt / OCCLUDER_FADE_S;
+  occlWeight = occlOn ? Math.min(1, occlWeight + step) : Math.max(0, occlWeight - step);
   // hole size: full when close, shrinking to nothing by maxDist (smooth so nothing pops)
   const k = enabled ? 1 - THREE.MathUtils.smoothstep(d, tuning.maxDist * 0.7, tuning.maxDist) : 0;
   u.uFadeParams.value.w = k;
@@ -577,7 +684,7 @@ export function updateFade(camPos: THREE.Vector3, focus: THREE.Vector3, enabled:
   // line is part of the picture (and never half dissolved, see FADE_PARS_VERT)
   u.uFadeCrown.value = enabled ? 1 - THREE.MathUtils.smoothstep(d, tuning.maxDist * 0.55, tuning.maxDist * 0.75) : 0;
   u.uFadeFollow.value = follow ? followWeight * (1 - THREE.MathUtils.smoothstep(d, FOLLOW_CUT_D, FOLLOW_CUT_D + 3)) : 0;
-  u.uFadeOccl.value = follow ? followWeight * (1 - THREE.MathUtils.smoothstep(d, OCCLUDER_D, OCCLUDER_D + 3)) : 0;
+  u.uFadeOccl.value = follow ? followWeight * occlWeight : 0;
   if (k <= 0 && u.uFadeFollow.value <= 0) return;
   u.uFadeCam.value.copy(camPos);
   // aim at the subject's body, not its feet

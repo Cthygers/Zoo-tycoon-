@@ -17,6 +17,7 @@
 
 import * as THREE from 'three';
 import { hash3, mulberry32 } from '../core/rng';
+import { STRUCTURE_NIGHT_GROUND } from './nature/mats';
 
 // ---------------------------------------------------------------------------
 // Tileable noise
@@ -650,14 +651,20 @@ function cached<T extends THREE.Material>(key: string, make: () => T): T {
   return m;
 }
 
+/** Wood, paint and natural stone under the moon: part of the moonlit ground's look (nature/mats.ts applyNightLook, applied by the props layer and fences). */
+export function withNightLook<T extends THREE.Material>(m: T): T {
+  m.userData.nightGround = STRUCTURE_NIGHT_GROUND;
+  return m;
+}
+
 /** Fresh sawn / planed timber (tile 1 m, grain along U). */
 export function woodMaterial(): THREE.MeshStandardMaterial {
-  return cached('wood', () => standard('wood', { metalness: 0 }));
+  return cached('wood', () => withNightLook(standard('wood', { metalness: 0 })));
 }
 
 /** Silver-grey weathered outdoor timber (tile 1 m, grain along U). */
 export function weatheredWoodMaterial(): THREE.MeshStandardMaterial {
-  return cached('weatheredWood', () => standard('weatheredWood', { metalness: 0 }, 1.2));
+  return cached('weatheredWood', () => withNightLook(standard('weatheredWood', { metalness: 0 }, 1.2)));
 }
 
 /** Hot-dip galvanised steel (tile 0.5 m). */
@@ -668,12 +675,12 @@ export function galvanisedMaterial(): THREE.MeshStandardMaterial {
 /** Painted steel in the given colour (tile 1 m). Cached per colour. */
 export function paintedMetalMaterial(color: THREE.ColorRepresentation): THREE.MeshStandardMaterial {
   const c = new THREE.Color(color);
-  return cached(`paint:${c.getHexString()}`, () => standard('paint', { color: c, metalness: 1, envMapIntensity: 0.9 }));
+  return cached(`paint:${c.getHexString()}`, () => withNightLook(standard('paint', { color: c, metalness: 1, envMapIntensity: 0.9 })));
 }
 
 /** Natural weathered rock (tile 1.5 m). */
 export function stoneMaterial(): THREE.MeshStandardMaterial {
-  return cached('stone', () => standard('stone', { metalness: 0 }));
+  return cached('stone', () => withNightLook(standard('stone', { metalness: 0 })));
 }
 
 /** Cast concrete (tile 2 m). */
@@ -683,7 +690,7 @@ export function concreteMaterial(): THREE.MeshStandardMaterial {
 
 /** Dry-stone wall face: stacked field stones (tile 2 m × 2 m, courses along U). */
 export function drystoneMaterial(): THREE.MeshStandardMaterial {
-  return cached('drystone', () => standard('drystone', { metalness: 0 }, 1.3));
+  return cached('drystone', () => withNightLook(standard('drystone', { metalness: 0 }, 1.3)));
 }
 
 /** Galvanised chain-link mesh, alpha-blended (tile 0.42 m). Double sided, casts no useful shadow. */
