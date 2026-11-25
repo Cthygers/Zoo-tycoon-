@@ -7,9 +7,10 @@ import * as THREE from 'three';
 import type { QualitySettings } from '../src/core/contracts';
 import { PROP_SPECS } from '../src/props/registry';
 import '../src/props/nature';
-import { applyFade, applyOccluderCut, casterDepthMaterial, fadeModeOf, updateFade, fadeUniforms, FOLLOW_CARD_R, FOLLOW_CARD_R_MAX, FOLLOW_CUT_D, OCCLUDER_BELOW, OCCLUDER_D, OCCLUDER_FADE_S, OCCLUDER_OFF_D, OCCLUDER_R, OCCLUDER_SHARE, OCCLUDER_SIDE, setFollowCut, setOcclTop, TREE_GONE, TREE_KEEP_R, TREE_SHADOW_R } from '../src/props/lod/fade';
+import { applyFade, applyOccluderCut, BIG_TRUNK_R, casterDepthMaterial, fadeModeOf, updateFade, fadeUniforms, FOLLOW_CARD_R, FOLLOW_CARD_R_MAX, FOLLOW_CUT_D, OCCLUDER_BELOW, OCCLUDER_D, OCCLUDER_FADE_S, OCCLUDER_OFF_D, OCCLUDER_R, OCCLUDER_SHARE, OCCLUDER_SIDE, setFollowCut, setOcclTop, TREE_GONE, TREE_KEEP_R, TREE_SHADOW_R } from '../src/props/lod/fade';
 import { windDepthMaterial } from '../src/props/wind';
-import { addCrownFade, barkRanks, connectedPieces } from '../src/props/nature/geo';
+import { addCrownFade, barkRanks, connectedPieces, trunkRadius } from '../src/props/nature/geo';
+import { buildAcacia, buildBamboo, buildBaobab } from '../src/props/nature/trees';
 
 const QUALITY: QualitySettings = { level: 'low', pixelRatio: 1, antialias: false, shadows: true, shadowMapSize: 1024, grassDensity: 0.25, postFX: false, detailDistance: 26, creatureDetail: 0 };
 
@@ -52,8 +53,8 @@ describe('tree crown dissolve data', () => {
     const r = g.getAttribute('aCrownR') as THREE.BufferAttribute;
     expect(c.array).toBeInstanceOf(Int16Array);
     expect([c.getX(5), c.getY(5), c.getZ(5)]).toEqual([50, 600, -100]);
-    // horizontal radius = the larger of x / z, vertical separately
-    expect([r.getX(0), r.getY(0)]).toEqual([400, 150]);
+    // horizontal radius = the larger of x / z, vertical separately; no bark here: no trunk
+    expect([r.getX(0), r.getY(0), r.getZ(0)]).toEqual([400, 150, 0]);
     for (let i = 1; i < 4; i++) expect(c.getW(i)).toBe(c.getW(0));
     for (let i = 5; i < 8; i++) expect(c.getW(i)).toBe(c.getW(4));
     expect(c.getW(0)).not.toBe(c.getW(4));
@@ -192,7 +193,7 @@ describe('near-camera fade shader', () => {
       expect(sh).toContain(`return tree < ${TREE_GONE.toFixed(2)} ? 0.5 * smoothstep( 0.15, ${TREE_GONE.toFixed(2)}, tree ) : 1.0;`);
       // bark stays whole until the tree goes (no bare trunk or skeleton)
       expect(sh).toContain(`return step( ${TREE_GONE.toFixed(2)}, tree );`);
-      expect(sh.indexOf('float propTreeF( mat4 M')).toBeGreaterThan(sh.indexOf('attribute vec2 aCrownR;'));
+      expect(sh.indexOf('float propTreeF( mat4 M')).toBeGreaterThan(sh.indexOf('attribute vec3 aCrownR;'));
     }
     expect(tb).toContain('#define PROP_FADE_BARK');
     expect(crown.vertexShader.indexOf('#define PROP_FADE_BARK')).toBe(-1);
@@ -477,6 +478,50 @@ describe('follow-mode occluder cut (fences, small structures)', () => {
     } finally {
       setFollowCut(null);
     }
+  });
+});
+
+describe('big trunks on the follow line', () => {
+  it("carry the trunk's radius: only baobabs count as big, not clumps of canes", () => {
+    const radius = (g: THREE.Object3D) => {
+      let r = -1;
+      g.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (m.isMesh && (m.material as THREE.Material).userData.crownFade === true) r = (m.geometry.getAttribute('aCrownR') as THREE.BufferAttribute).getZ(0) / 100;
+      });
+      return r;
+    };
+    expect(radius(buildBaobab(0))).toBeGreaterThan(BIG_TRUNK_R);
+    expect(radius(buildAcacia(0))).toBeLessThan(BIG_TRUNK_R);
+    expect(radius(buildBamboo(0))).toBeLessThan(BIG_TRUNK_R);
+    // leaves and bark of a tree agree
+    const g = buildBaobab(1);
+    const all = new Set<number>();
+    g.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.isMesh && (m.material as THREE.Material).userData.crownFade === true) all.add((m.geometry.getAttribute('aCrownR') as THREE.BufferAttribute).getZ(0));
+    });
+    expect(all.size).toBe(1);
+    expect(trunkRadius(new THREE.CylinderGeometry(1.2, 1.2, 4, 16, 8).translate(0, 2, 0))).toBeCloseTo(1.2, 3);
+  });
+
+  it('take their tree (visible pass only, at every follow zoom) when the trunk covers the subject', () => {
+    const leaf = new THREE.MeshStandardMaterial();
+    leaf.userData.foliage = true;
+    leaf.userData.crownFade = true;
+    applyFade(leaf, 'crown');
+    const sh = compile(leaf).vertexShader;
+    const cut = 'fade = max( fade, propTreeFade( propBigTrunk( o, M, cw.y ) * uFadeFollow ) );';
+    expect(sh).toContain(cut);
+    expect(sh).toContain(`return step( ${BIG_TRUNK_R.toFixed(2)}, tr ) * ( 1.0 - smoothstep( tr + 0.2, tr + 0.5, side ) )`);
+    // the line passes the trunk below the crown, not over it
+    expect(sh).toContain('* ( 1.0 - smoothstep( crownY - 0.5, crownY, lineY ) );');
+    expect(sh.lastIndexOf('#ifndef PROP_FADE_SHADOW', sh.indexOf(cut))).toBeGreaterThan(sh.lastIndexOf('#endif', sh.indexOf(cut)) - 400);
+    const depth = windDepthMaterial(Object.assign(new THREE.MeshStandardMaterial({ alphaTest: 0.5 }), { userData: { foliage: true, crownFade: true, sway: 0.011 } }))!;
+    const dv = compileDepth(depth).vertexShader;
+    // the shadow pass compiles with PROP_FADE_SHADOW, which skips the term: the shade stays
+    expect(dv).toContain('#define PROP_FADE_SHADOW');
+    expect(dv.indexOf('#ifndef PROP_FADE_SHADOW')).toBeLessThan(dv.indexOf(cut));
   });
 });
 

@@ -2,6 +2,7 @@
 // frame, hay rack, meat platform and water trough.
 
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { Noise, Rng } from '../../core/rng';
 import { projectBoxUVs, withNightLook } from '../materials';
 import { registerProp } from '../registry';
@@ -323,14 +324,9 @@ function buildDen(v: number): THREE.Object3D {
   g.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
   g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
   g.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  g.computeBoundingBox();
-  g.computeBoundingSphere();
-  const grp = new THREE.Group();
-  grp.name = `den${v}`;
-  grp.add(new THREE.Mesh(g, caveMaterial()));
   // dark earth floor inside the chamber/tunnel (irregular outline) so lit
-  // terrain never shows inside the den
-  const k = new Kit();
+  // terrain never shows inside the den; part of the rock mesh, so it goes
+  // with the den when the follow camera cuts it (lod/fade.ts)
   const fl = new THREE.CircleGeometry(1, 24).rotateX(-Math.PI / 2);
   const fp = fl.getAttribute('position') as THREE.BufferAttribute;
   for (let i = 0; i < fp.count; i++) {
@@ -344,11 +340,26 @@ function buildDen(v: number): THREE.Object3D {
     const xx = x * (z > 0 ? 0.55 + 0.4 * (1 - z) : 0.92);
     fp.setXYZ(i, xx * wob * (r > 0 ? 1 : 0), 0.012, zz * wob - 0.1);
   }
-  k.add(M.voidDark(), fl);
-  const fk = k.build('denfloor');
-  for (const c of [...fk.children]) grp.add(c);
+  const floor = fl.toNonIndexed();
+  fl.dispose();
+  const fpos = floor.getAttribute('position') as THREE.BufferAttribute;
+  const fuv = floor.getAttribute('uv') as THREE.BufferAttribute;
+  for (let i = 0; i < fpos.count; i++) fuv.setXY(i, fpos.getX(i) / tile, fpos.getZ(i) / tile);
+  // near black on the rock texture (the old void material's 0x050403)
+  floor.setAttribute('color', new THREE.BufferAttribute(new Float32Array(fpos.count * 3).fill(DEN_FLOOR), 3));
+  const den = mergeGeometries([g, floor]);
+  g.dispose();
+  floor.dispose();
+  den.computeBoundingBox();
+  den.computeBoundingSphere();
+  const grp = new THREE.Group();
+  grp.name = `den${v}`;
+  grp.add(new THREE.Mesh(den, caveMaterial()));
   return grp;
 }
+
+/** Vertex colour of the den's earth floor (× the rock texture ≈ the near-black void material). */
+const DEN_FLOOR = 0.004;
 
 // ---------------------------------------------------------------------------
 // Enrichment ball (0.9 m hard plastic, scuffed)

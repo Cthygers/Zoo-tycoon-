@@ -70,7 +70,9 @@
 //     (applyOccluderCut: an instance-wide decision); a fence post only once
 //     every panel it joins has gone. Boulders, ice blocks, ground-plant clumps
 //     and tree trunks (with their tree) on the line go anywhere in front of
-//     the subject, and a den the subject stands in goes whole.
+//     the subject, and a den the subject stands in goes whole;
+//   - a big trunk (BIG_TRUNK_R, a baobab's) covering the subject takes its
+//     tree at every follow zoom, its shade staying.
 
 import * as THREE from 'three';
 import { TILE } from '../../core/constants';
@@ -148,6 +150,8 @@ const OCCLUDER_FRONT = 1;
 const ROCK_FRONT = 0.6;
 /** … a ground plant or a tree trunk on the line (the subject's own tree too), anywhere from this far. */
 const PLANT_FRONT = 0.5;
+/** Trunk radius (m) from which a trunk on the line takes its tree at every follow zoom, not only the closest (baobabs). */
+export const BIG_TRUNK_R = 0.8;
 
 const FADE_PARS_VERT = /* glsl */ `
 #ifndef PROP_OCCL_REACH
@@ -177,8 +181,9 @@ varying float vPropOccl;
 #ifdef PROP_FADE_CROWN
 // crown ellipsoid centre (model space, cm) + the piece's dissolve rank (0..255)
 attribute vec4 aCrown;
-// crown radii (cm): horizontal, vertical (0: no crown, never cut as a tree)
-attribute vec2 aCrownR;
+// crown radii (cm): horizontal, vertical (0: no crown, never cut as a tree),
+// and the trunk's radius
+attribute vec3 aCrownR;
 // 1 when the camera → line-end segment passes through this tree: through its
 // crown grown by grow (the view hole's radius there), or among its limbs, a
 // cone around the trunk axis (base → crown centre) that widens from a quarter
@@ -212,6 +217,22 @@ float propTreeF( mat4 M, vec3 lineEnd, float grow ) {
 }
 #endif
 #ifdef PROP_FADE_CROWN
+// following: 1 when a big trunk (a baobab's) stands on the camera → subject
+// line in front of the subject, below the crown (the line passes the trunk,
+// not over it): it covers the subject at any zoom
+float propBigTrunk( vec3 o, mat4 M, float crownY ) {
+  float tr = aCrownR.z * 0.01 * length( M[ 1 ].xyz );
+  vec2 co = o.xz - uFadeCam.xz;
+  vec2 cs = uFadeFocus.xz - uFadeCam.xz;
+  float len = max( length( cs ), 1e-3 );
+  vec2 dir = cs / len;
+  float t = dot( co, dir );
+  float side = abs( co.x * dir.y - co.y * dir.x );
+  float lineY = mix( uFadeCam.y, uFadeFocus.y, clamp( t / len, 0.0, 1.0 ) );
+  return step( ${BIG_TRUNK_R.toFixed(2)}, tr ) * ( 1.0 - smoothstep( tr + 0.2, tr + 0.5, side ) )
+       * smoothstep( 0.0, 0.5, t ) * ( 1.0 - smoothstep( len - tr - ${(PLANT_FRONT + 0.3).toFixed(2)}, len - tr - ${PLANT_FRONT.toFixed(2)}, t ) )
+       * ( 1.0 - smoothstep( crownY - 0.5, crownY, lineY ) );
+}
 // per-tree cut strength → fade: the crown thins card by card over a wide band
 // (≈2-3 m of zoom), at most by half while the bark stays whole, then the whole
 // tree goes at once: further thinning would leave a bare trunk and main limbs
@@ -355,6 +376,8 @@ float propFadeAt( vec3 p, mat4 M ) {
   // subject goes with its tree, even the subject's own (the crown is above
   // the frame there); its shade stays on the subject
   fade = max( fade, propTreeFade( propOccluderAt( o, propOcclTop( o, M ), ${PLANT_FRONT.toFixed(1)}, true ) ) );
+  // … and a big trunk at every follow zoom
+  fade = max( fade, propTreeFade( propBigTrunk( o, M, cw.y ) * uFadeFollow ) );
 #endif
 #ifdef PROP_FADE_CARDS
   // following: the leaf cards right on the line go, card by card, also from
