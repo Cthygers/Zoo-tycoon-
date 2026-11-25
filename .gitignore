@@ -10,3 +10,8 @@ android/local.properties
 android/app/src/main/assets/public/
 android/capacitor-cordova-android-plugins/build/
 *.keystore
+
+# Signing keys and their passwords never belong in the repo
+*.jks
+*.keystore
+*-key-password.txt
