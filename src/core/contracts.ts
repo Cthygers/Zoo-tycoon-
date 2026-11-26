@@ -446,6 +446,8 @@ export interface IAudio {
   volume?(ch: AudioChannel): number;
   /** Camera-follow hint: the followed animal's id, or null. */
   follow?(animalId: number | null): void;
+  /** Duck ambience and world ~9 dB while the tutorial's read-aloud speaks; repeated calls are harmless (ZooAudio lets go on its own after 30 s). */
+  speechDuck?(on: boolean): void;
   setEnabled(on: boolean): void;
   readonly enabled: boolean;
   /** Must be called from a user gesture on mobile to unlock the AudioContext. */

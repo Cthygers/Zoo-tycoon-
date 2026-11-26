@@ -205,6 +205,14 @@ export class FakeConvolver extends FakeNode {
   normalize = true;
 }
 
+export class FakeDelay extends FakeNode {
+  readonly delayTime: FakeParam;
+  constructor(ctx: FakeAudioContext, readonly maxDelayTime = 1) {
+    super(ctx);
+    this.delayTime = new FakeParam(ctx, 0);
+  }
+}
+
 export class FakeCompressor extends FakeNode {
   readonly threshold: FakeParam;
   readonly knee: FakeParam;
@@ -261,6 +269,9 @@ export class FakeAudioContext {
   }
   createConvolver(): FakeConvolver {
     return new FakeConvolver(this);
+  }
+  createDelay(maxDelayTime = 1): FakeDelay {
+    return new FakeDelay(this, maxDelayTime);
   }
   createDynamicsCompressor(): FakeCompressor {
     const c = new FakeCompressor(this);

@@ -10,17 +10,7 @@ import { MAP_H, MAP_W, TILE } from '../src/core/constants';
 import type { ISimulation } from '../src/core/contracts';
 import { EventBus } from '../src/core/events';
 import { Terrain, type AnimalState, type GuestState } from '../src/core/types';
-import { FakeAudioContext, FakeNode, FakeParam, steepestRamp, type FakeGain, type FakeSource } from './helpers/fakeAudio';
-
-// The split shared reverb feeds its later IR segments through DelayNodes; give the
-// helper's context one until it has its own.
-if (!('createDelay' in FakeAudioContext.prototype)) {
-  Object.assign(FakeAudioContext.prototype, {
-    createDelay(this: FakeAudioContext) {
-      return Object.assign(new FakeNode(this), { delayTime: new FakeParam(this, 0) });
-    },
-  });
-}
+import { FakeAudioContext, FakeParam, steepestRamp, type FakeGain, type FakeSource } from './helpers/fakeAudio';
 
 vi.mock('../src/audio/render', async (orig) => {
   const m = await orig<typeof import('../src/audio/render')>();
