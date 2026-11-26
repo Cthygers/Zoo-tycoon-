@@ -183,6 +183,8 @@ async function boot() {
   });
   await cloud.init(); // local only (device binding, session restore, housekeeping): no network
   const prompts = createSyncPrompts(uiRoot, cloud);
+  // for debugging and the end-to-end tests (the title menu runs before __game exists)
+  (window as unknown as Record<string, unknown>).__cloud = cloud;
 
   // Paint the foliage atlases in a worker from the start (behind the menu, the
   // sim and the terrain build), so props.prewarm() only has to compose them.
