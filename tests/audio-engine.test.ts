@@ -341,6 +341,21 @@ describe('beds', () => {
     if (addedB) delete RECIPES['bed.wind.b'];
   });
 
+  it('renders urgent requests in request order: beds re-requested every frame do not overtake the current one', () => {
+    const sim = fakeSim();
+    const { audio } = engine(sim);
+    const q = audio as unknown as { queue: string[]; request(id: string, urgent?: boolean): void };
+    expect(q.queue).toContain('bed.birds');
+    // what update() does every frame for the audible beds that are still rendering
+    for (let f = 0; f < 3; f++) for (const id of ['bed.wind', 'bed.birds', 'bed.savanna', 'bed.crowd.b']) q.request(id, true);
+    const order = ['bed.birds', 'bed.wind', 'bed.savanna', 'bed.crowd.b'].map((id) => q.queue.indexOf(id));
+    expect(order.every((x) => x >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // and all of them after the queued UI cues
+    const lastCue = Math.max(...q.queue.map((id, k) => (id.startsWith('cue.') ? k : -1)));
+    expect(order[0]).toBeGreaterThan(lastCue);
+  });
+
   it('plays bed.<id>.b as the right-hand layer when registered', async () => {
     if (!RECIPES['bed.wind.b']) {
       RECIPES['bed.wind.b'] = { ...RECIPES['bed.wind'] };

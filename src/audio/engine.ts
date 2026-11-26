@@ -1259,7 +1259,11 @@ export class ZooAudio implements IAudio {
     }
     try {
       while (this.queue.length && !this.disposed && this._enabled && !this.appSuspended) {
-        if (this.reverbBuild && !this.queue[0].startsWith('cue.')) await this.buildReverb();
+        if (this.reverbBuild && !this.queue[0].startsWith('cue.')) {
+          await this.buildReverb();
+          // re-check: dispose (which empties the queue), the sound switch or an app pause may have come meanwhile
+          continue;
+        }
         const id = this.queue.shift()!;
         this.urgentIds.delete(id);
         try {

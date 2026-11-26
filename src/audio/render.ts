@@ -200,6 +200,15 @@ const SLICE_MS = 3;
  * under the 12 ms slice target.
  */
 const IDLE_SLICE_MAX = 10;
+/**
+ * When the page never idles (frames that wait on the GPU, or use the whole frame
+ * time) the idle callback only runs on its timeout: wait at most IDLE_TIMEOUT ms,
+ * then work TIMEOUT_SLICE_MS. With frames that never leave idle time, 250 ms / 3 ms
+ * (≈1 % of the main thread) took 10.6 s to the current-hour bed and 53 s to the
+ * end of the warm-up; 50 ms / 6 ms takes 2.8 s and 12 s, slices still ≤ 10 ms.
+ */
+const IDLE_TIMEOUT = 50;
+const TIMEOUT_SLICE_MS = 6;
 const CHUNK = 8192;
 let budgetOverride = 0;
 
@@ -222,7 +231,7 @@ export function yieldMain(): Promise<number> {
   return new Promise<number>((res) => {
     const w = globalThis as unknown as IdleWin;
     if (typeof w.requestIdleCallback === 'function')
-      w.requestIdleCallback((d) => res(budgetOverride || (d.didTimeout ? SLICE_MS : Math.max(2, Math.min(IDLE_SLICE_MAX, d.timeRemaining() - 1)))), { timeout: 250 });
+      w.requestIdleCallback((d) => res(budgetOverride || (d.didTimeout ? TIMEOUT_SLICE_MS : Math.max(2, Math.min(IDLE_SLICE_MAX, d.timeRemaining() - 1)))), { timeout: IDLE_TIMEOUT });
     else setTimeout(() => res(budgetOverride || SLICE_MS), 0);
   });
 }
