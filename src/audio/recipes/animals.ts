@@ -166,12 +166,12 @@ function tremolo(d: number, base: readonly Pt[], hz: number, depth: number): Pt[
 }
 
 /**
- * Irregular fast f0 wander of big voices (±cents at ~20 random knots per
+ * Irregular fast f0 wander of big voices (±cents at ~14 random knots per
  * second): the unsteadiness real roars and moans have. Random, not a
  * periodic vibrato.
  */
 function flutter(r: Kit['rng'], d: number, base: readonly Pt[], cents: number): Pt[] {
-  return wobble(r, d, base, cents, Math.max(4, Math.round(d * 20)));
+  return wobble(r, d, base, cents, Math.max(4, Math.round(d * 14)));
 }
 
 /** Pitch contour with random wander: `base` resampled at `knots` points, each moved by ±cents. */
@@ -220,7 +220,7 @@ const lionMoan: SylGen = (k, t, d, v) => {
   voice(k, {
     t,
     dur: d,
-    f0: flutter(r, d, [[0, r.range(56, 66)], [d * r.range(0.4, 0.6), r.range(100, 120)], [d, r.range(74, 86)]], 60),
+    f0: flutter(r, d, [[0, r.range(56, 66)], [d * r.range(0.4, 0.6), r.range(100, 120)], [d, r.range(74, 86)]], 45),
     amp: env(d, d * 0.35, d * 0.3, 0.75),
     oq: 0.4,
     jitter: 0.03,
@@ -241,7 +241,7 @@ const lionRoar: SylGen = (k, t, d, v) => {
   voice(k, {
     t,
     dur: d,
-    f0: flutter(r, d, [[0, r.range(70, 80)], [d * at * 0.4, r.range(110, 125)], [d * at, pk], [d * (at + 0.2), pk * r.range(0.86, 0.94)], [d * 0.8, r.range(105, 125)], [d, r.range(55, 65)]], 55),
+    f0: flutter(r, d, [[0, r.range(70, 80)], [d * at * 0.4, r.range(110, 125)], [d * at, pk], [d * (at + 0.2), pk * r.range(0.86, 0.94)], [d * 0.8, r.range(105, 125)], [d, r.range(55, 65)]], 35),
     amp: [[0, 0], [d * 0.08, 0.75], [d * at, 1], [d * 0.78, 0.85], [d, 0]],
     oq: 0.45,
     jitter: 0.025,
@@ -260,7 +260,7 @@ const lionGrunt: SylGen = (k, t, d, v) => {
   voice(k, {
     t,
     dur: d,
-    f0: flutter(r, d, [[0, 91 * vshift(v + 1)], [d * 0.3, 85 * vshift(v + 1)], [d, r.range(55, 65)]], 60),
+    f0: flutter(r, d, [[0, 91 * vshift(v + 1)], [d * 0.3, 85 * vshift(v + 1)], [d, r.range(55, 65)]], 45),
     amp: [[0, 0], [0.025, 1], [d * r.range(0.3, 0.6), 0.7], [d, 0]],
     oq: 0.4,
     jitter: 0.045,
@@ -324,7 +324,7 @@ const tigerMain: SylGen = (k, t, d, v) => {
   voice(k, {
     t,
     dur: d,
-    f0: flutter(r, d, [[0, r.range(85, 95)], [d * r.range(0.25, 0.35), pk], [d * 0.6, pk * 0.88], [d, r.range(76, 84)]], 60),
+    f0: flutter(r, d, [[0, r.range(85, 95)], [d * r.range(0.25, 0.35), pk], [d * 0.6, pk * 0.88], [d, r.range(76, 84)]], 40),
     amp: [[0, 0], [d * 0.1, 0.85], [d * 0.3, 1], [d * 0.75, 0.8], [d, 0]],
     oq: 0.45,
     jitter: 0.03,
@@ -355,7 +355,7 @@ const tigerGrowl: SylGen = (k, t, d, v) => {
   voice(k, {
     t,
     dur: d,
-    f0: flutter(r, d, [[0, r.range(45, 55)], [d * 0.5, r.range(60, 70)], [d, r.range(40, 46)]], 70),
+    f0: flutter(r, d, [[0, r.range(45, 55)], [d * 0.5, r.range(60, 70)], [d, r.range(40, 46)]], 60),
     amp: env(d, 0.1, d * 0.3, 0.8),
     oq: 0.4,
     jitter: 0.05,
@@ -408,7 +408,7 @@ const elephantTrumpet: SylGen = (k, t, d, v) => {
   voice(k, {
     t,
     dur: d,
-    f0: flutter(r, d, withBreaks([[0, r.range(280, 320)], [d * 0.2, r.range(520, 580)], [d * 0.6, r.range(480, 540)], [d, r.range(330, 370)]], d, breaks), 30),
+    f0: flutter(r, d, withBreaks([[0, r.range(280, 320)], [d * 0.2, r.range(520, 580)], [d * 0.6, r.range(480, 540)], [d, r.range(330, 370)]], d, breaks), 20),
     amp: [[0, 0], [0.04, 0.9], [d * 0.2, 1], [d * 0.8, 0.85], [d, 0]],
     oq: 0.4,
     jitter: 0.04,
@@ -543,9 +543,9 @@ const gorillaBelch: SylGen = (k, t, d, v) => {
   const gap = d * 0.06;
   // nasal murmur with presence bands so the low belch carries on a phone
   const F = vary(k, v, [[300, 80, -4], [700, 120, 0], [1100, 160, -3], [2000, 250, -12]]);
-  voice(k, { t, dur: d1, f0: flutter(r, d1, [[0, f], [d1, f * 1.15]], 50), amp: env(d1, 0.03, d1 * 0.4, 0.8), oq: 0.35, jitter: 0.02, aspiration: 0.1, formants: F, drive: 1.4, lp: 2500 });
+  voice(k, { t, dur: d1, f0: flutter(r, d1, [[0, f], [d1, f * 1.15]], 35), amp: env(d1, 0.03, d1 * 0.4, 0.8), oq: 0.35, jitter: 0.02, aspiration: 0.1, formants: F, drive: 1.4, lp: 2500 });
   const d2 = d - d1 - gap;
-  voice(k, { t: t + d1 + gap, dur: d2, f0: flutter(r, d2, [[0, f * 1.1], [d2, f * 0.82]], 50), amp: env(d2, 0.03, d2 * 0.5, 0.75), oq: 0.35, jitter: 0.02, aspiration: 0.1, formants: F, drive: 1.4, lp: 2500, level: 0.85 });
+  voice(k, { t: t + d1 + gap, dur: d2, f0: flutter(r, d2, [[0, f * 1.1], [d2, f * 0.82]], 35), amp: env(d2, 0.03, d2 * 0.5, 0.75), oq: 0.35, jitter: 0.02, aspiration: 0.1, formants: F, drive: 1.4, lp: 2500, level: 0.85 });
 };
 
 const gorillaPiggrunt: SylGen = (k, t, d, v) => {
@@ -1116,7 +1116,7 @@ const BEAR: Record<string, SylDef> = {
 export const SYLLABLES: Readonly<Record<string, Readonly<Record<string, SylDef>>>> = {
   lion: {
     moan: { n: 2, d: [0.6, 0.9], rate: 16000, gen: lionMoan, hp: 180 },
-    roar: { n: 3, d: [1.3, 1.7], rate: 16000, gen: lionRoar, hp: 200 },
+    roar: { n: 3, d: [1.3, 1.7], rate: 16000, gen: lionRoar, hp: 220 },
     grunt: { n: 5, d: [0.3, 0.45], rate: 16000, gen: lionGrunt, hp: 180 },
     inhale: { n: 2, d: [0.22, 0.32], rate: 16000, gen: lionInhale, hp: 200 },
     huff: { n: 3, d: [0.25, 0.4], rate: 16000, gen: lionHuff, idle: true, hp: 150 },
@@ -1137,7 +1137,7 @@ export const SYLLABLES: Readonly<Record<string, Readonly<Record<string, SylDef>>
     hiss: { n: 1, d: [0.6, 0.6], rate: 22050, gen: bearHiss, hp: 800 },
   },
   elephant: {
-    rumble: { n: 3, d: [2.0, 2.8], rate: 16000, gen: elephantRumble, hp: 80 },
+    rumble: { n: 3, d: [2.0, 2.8], rate: 16000, gen: elephantRumble, hp: 130 },
     trumpet: { n: 3, d: [0.6, 1.4], rate: 22050, gen: elephantTrumpet, hp: 250 },
     snort: { n: 2, d: [0.3, 0.6], rate: 22050, gen: elephantSnort, idle: true, hp: 150 },
     juv: { n: 3, d: [0.3, 0.7], rate: 22050, gen: elephantCalf, hp: 300 },
