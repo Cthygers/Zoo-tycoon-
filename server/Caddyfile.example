@@ -1,0 +1,20 @@
+# Site block for the Wildhaven API. Add it to /etc/caddy/Caddyfile (keep your other sites), then:
+#   sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
+# No `log` block on purpose: without an access log no visitor IP addresses are stored.
+# Caddy in Docker (docker-compose.caddynet.yml): use `reverse_proxy wildhaven-api-1:8080` instead.
+zoo-api.example.com {
+	encode zstd gzip
+	request_body {
+		max_size 2MB
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+	reverse_proxy 127.0.0.1:8787 {
+		health_uri /healthz
+		health_interval 30s
+	}
+}

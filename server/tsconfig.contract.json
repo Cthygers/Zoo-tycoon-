@@ -1,0 +1,13 @@
+{
+  // For the integrator's test/contract.test.ts: client code (src/net/**) is written for Vite's
+  // bundler resolution, so this config uses it. Run: npx tsc --noEmit -p tsconfig.contract.json
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"]
+  },
+  "include": ["test/contract.test.ts"]
+}

@@ -1,0 +1,20 @@
+# Build context = repo root. BuildKit reads this file because it sits next to server/Dockerfile.
+**/node_modules
+**/dist
+**/dist-test
+.git
+android
+src
+harness
+tests
+docs
+scripts
+public
+**/*.jks
+**/*.keystore
+**/*.db
+**/*.db-wal
+**/*.db-shm
+server/.env
+server/data
+server/test

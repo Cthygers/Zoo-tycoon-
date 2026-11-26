@@ -14,5 +14,5 @@
     "types": ["vite/client"],
     "noEmit": true
   },
-  "include": ["src", "harness", "tests"]
+  "include": ["src", "harness", "tests", "shared"]
 }

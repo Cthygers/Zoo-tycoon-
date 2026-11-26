@@ -1,0 +1,12 @@
+# Override for a Caddy that runs in Docker: no host port; the API joins Caddy's network and
+# Caddy proxies to wildhaven-api-1:8080. Set CADDY_NETWORK in .env (docker inspect <caddy> shows it).
+#   docker compose -f docker-compose.yml -f docker-compose.caddynet.yml up -d --build
+# Needs Docker Compose 2.24+ (for !reset).
+services:
+  api:
+    ports: !reset []
+    networks: [caddy]
+networks:
+  caddy:
+    name: ${CADDY_NETWORK:?set CADDY_NETWORK in server/.env to the network your Caddy container uses}
+    external: true

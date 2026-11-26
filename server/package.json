@@ -1,0 +1,31 @@
+{
+  "name": "wildhaven-server",
+  "version": "0.15.0",
+  "private": true,
+  "description": "Wildhaven Zoo API server: Google sign-in, family profiles, cloud saves and Versus matches",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "test": "vitest run",
+    "start": "node --enable-source-maps dist/server/src/main.js",
+    "cli": "node dist/server/src/cli.js",
+    "build:support": "tsc -p tsconfig.support.json",
+    "fake-google": "tsc -p tsconfig.support.json && node dist-test/server/test/support/fakeGoogleMain.js"
+  },
+  "dependencies": {
+    "@fastify/cors": "11.4.3",
+    "@fastify/rate-limit": "11.3.0",
+    "fastify": "5.12.8",
+    "jose": "6.2.18",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.11",
+    "typescript": "5.9.3",
+    "vitest": "5.1.1"
+  }
+}

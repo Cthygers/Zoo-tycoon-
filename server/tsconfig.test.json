@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "../shared/**/*.ts", "test/**/*.ts", "vitest.config.ts"],
+  // contract.test.ts (integrator) imports the game's client modules, which use bundler-style
+  // extensionless imports; it is typechecked with tsconfig.contract.json instead.
+  "exclude": ["test/contract.test.ts"]
+}

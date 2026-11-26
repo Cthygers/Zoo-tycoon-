@@ -1,0 +1,26 @@
+# Wildhaven API with Caddy on the host: the API listens on 127.0.0.1:8787 only.
+#   cd server && cp .env.example .env && nano .env && docker compose up -d --build
+# Caddy in Docker instead: docker compose -f docker-compose.yml -f docker-compose.caddynet.yml up -d --build
+name: wildhaven
+services:
+  api:
+    build: { context: .., dockerfile: server/Dockerfile }
+    image: wildhaven-api:local
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - wildhaven-data:/data
+    ports:
+      - "127.0.0.1:8787:8080"          # only Caddy on this host can reach it
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 384m
+    pids_limit: 200
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+volumes:
+  wildhaven-data: {}
