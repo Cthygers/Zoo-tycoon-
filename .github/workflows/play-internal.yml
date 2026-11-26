@@ -1,0 +1,303 @@
+name: Play internal release
+
+# Builds a signed release bundle (.aab) from the main branch and uploads it to Google Play's
+# INTERNAL testing track. Manual only: Actions → "Play internal release" → Run workflow.
+#
+# It can never release to alpha, beta or production: the track is fixed in
+# scripts/play/publish-internal.mjs, which is taken from this workflow's own commit, not from main.
+#
+# Three jobs on fresh runners, so the npm/Gradle build never shares a machine with a secret:
+#   plan    - Play service account only: picks a version code above everything Play has seen
+#   build   - no secrets: unit tests and the unsigned bundle from main (cloud features off)
+#   publish - no npm: signs with the upload key, checks the bundle, uploads to the internal track
+#
+# Secrets: PLAY_SERVICE_ACCOUNT_JSON and the upload key: WILDHAVEN_UPLOAD_KEYSTORE_BASE64,
+# WILDHAVEN_UPLOAD_STORE_PASSWORD, WILDHAVEN_UPLOAD_KEY_ALIAS, WILDHAVEN_UPLOAD_KEY_PASSWORD.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: "What's new, shown to testers (optional, up to 500 characters)"
+        required: false
+        default: ''
+      version_name:
+        description: 'Version name (optional; default: versionName in android/app/build.gradle on main)'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Build, sign and check only; do not upload to Play'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+# One release at a time, so two runs never pick the same version code.
+concurrency:
+  group: play-internal-release
+  cancel-in-progress: false
+
+env:
+  PACKAGE_NAME: com.wildhaven.zoo
+  # 0.15.0 (code 15) is live on internal testing; every new bundle must be above it.
+  MIN_VERSION_CODE: '16'
+  # SHA-256 of the wildhaven-upload certificate registered with Play (public, not a secret).
+  UPLOAD_CERT_SHA256: '46:9B:8B:96:AC:D2:0D:DB:DD:6B:28:73:7A:CC:E7:4A:5E:CD:2B:01:85:38:76:C6:4F:A1:DC:92:6F:BC:1B:8E'
+  BUNDLETOOL_VERSION: '1.18.1'
+  BUNDLETOOL_SHA256: '675786493983787ffa11550bdb7c0715679a44e1643f3ff980a529e9c822595c'
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      code: ${{ steps.version.outputs.code }}
+      name: ${{ steps.version.outputs.name }}
+      sha: ${{ steps.version.outputs.sha }}
+    steps:
+      - name: Check out the publisher script (this workflow's commit)
+        uses: actions/checkout@v4
+        with:
+          path: release-tools
+          sparse-checkout: scripts/play
+          persist-credentials: false
+
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: app
+          sparse-checkout: android/app
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Publisher script tests
+        run: node --test release-tools/scripts/play/*.test.mjs
+
+      - name: Choose the version
+        id: version
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          INPUT_VERSION_NAME: ${{ inputs.version_name }}
+        run: |
+          gradle=app/android/app/build.gradle
+          gradle_code=$(sed -nE 's/^\s*versionCode\s+([0-9]+)\s*$/\1/p' "$gradle")
+          gradle_name=$(sed -nE 's/^\s*versionName\s+"([^"]+)"\s*$/\1/p' "$gradle")
+          if [ -z "$gradle_code" ] || [ -z "$gradle_name" ]; then
+            echo "::error::Could not read versionCode/versionName from $gradle on main"
+            exit 1
+          fi
+          if [ -z "$PLAY_SERVICE_ACCOUNT_JSON" ]; then
+            echo "::error::The PLAY_SERVICE_ACCOUNT_JSON secret is not set"
+            exit 1
+          fi
+          floor=$(( gradle_code > MIN_VERSION_CODE ? gradle_code : MIN_VERSION_CODE ))
+          # Above every version code Play has seen (any track, any uploaded bundle).
+          code=$(node release-tools/scripts/play/publish-internal.mjs next-version-code --min "$floor")
+          if [[ ! "$code" =~ ^[0-9]+$ ]] || (( code < floor )); then
+            echo "::error::Unexpected version code '$code'"
+            exit 1
+          fi
+          name=${INPUT_VERSION_NAME:-$gradle_name}
+          if [[ ! "$name" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]{0,49}$ ]]; then
+            echo "::error::Version name '$name' must be 1-50 letters, digits, '.', '_', '+' or '-'"
+            exit 1
+          fi
+          if [ "$code" != "$gradle_code" ]; then
+            echo "::notice::main's build.gradle says versionCode $gradle_code; this bundle uses $code (above everything on Play)"
+          fi
+          {
+            echo "code=$code"
+            echo "name=$name"
+            echo "sha=$(git -C app rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+          echo "Version $name (code $code) from main at $(git -C app rev-parse --short HEAD)"
+
+  build:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out main at the planned commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Set the version in build.gradle
+        env:
+          CODE: ${{ needs.plan.outputs.code }}
+          NAME: ${{ needs.plan.outputs.name }}
+        run: |
+          gradle=android/app/build.gradle
+          sed -i -E "s/^(\s*versionCode\s+)[0-9]+\s*$/\1$CODE/; s/^(\s*versionName\s+)\"[^\"]+\"\s*$/\1\"$NAME\"/" "$gradle"
+          grep -Eq "^\s*versionCode\s+$CODE\s*$" "$gradle"
+          grep -Fq "versionName \"$NAME\"" "$gradle"
+          grep -nE 'versionCode|versionName' "$gradle"
+
+      - name: Build the web bundle (cloud features off)
+        run: |
+          if [ "$(env | grep -c '^VITE_' || true)" != 0 ]; then
+            echo "::error::A VITE_* variable is set; this release must be built without cloud settings"
+            exit 1
+          fi
+          if grep -sqE '^\s*VITE_' .env .env.local .env.production .env.production.local; then
+            echo "::error::main has a .env file with VITE_* settings; this release must be built without cloud settings"
+            exit 1
+          fi
+          npm run build
+
+      - name: Sync Capacitor
+        run: |
+          npx cap sync android
+          git diff --exit-code -- android/capacitor.settings.gradle android/app/capacitor.build.gradle
+
+      - name: Build the release bundle (unsigned)
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew bundleRelease --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-aab
+          path: android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CODE: ${{ needs.plan.outputs.code }}
+      NAME: ${{ needs.plan.outputs.name }}
+    steps:
+      - name: Check out the publisher script (this workflow's commit)
+        uses: actions/checkout@v4
+        with:
+          path: release-tools
+          sparse-checkout: scripts/play
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: unsigned-aab
+          path: unsigned
+
+      - name: Sign with the upload key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.WILDHAVEN_UPLOAD_KEYSTORE_BASE64 }}
+          STORE_PASS: ${{ secrets.WILDHAVEN_UPLOAD_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.WILDHAVEN_UPLOAD_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.WILDHAVEN_UPLOAD_KEY_PASSWORD }}
+        run: |
+          for v in KEYSTORE_BASE64 STORE_PASS KEY_ALIAS KEY_PASS; do
+            if [ -z "${!v}" ]; then
+              echo "::error::The upload key secrets are not all set (WILDHAVEN_UPLOAD_KEYSTORE_BASE64, _STORE_PASSWORD, _KEY_ALIAS, _KEY_PASSWORD)"
+              exit 1
+            fi
+          done
+          umask 077
+          keystore="$RUNNER_TEMP/upload.p12"
+          trap 'rm -f "$keystore"' EXIT
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          # The keystore must hold the upload certificate Play knows.
+          keytool -list -v -keystore "$keystore" -storepass:env STORE_PASS -alias "$KEY_ALIAS" > "$RUNNER_TEMP/keystore.txt"
+          fingerprint=$(sed -nE 's/^\s*SHA256:\s*//p' "$RUNNER_TEMP/keystore.txt" | head -1)
+          rm -f "$RUNNER_TEMP/keystore.txt"
+          if [ "$fingerprint" != "$UPLOAD_CERT_SHA256" ]; then
+            echo "::error::The keystore's certificate is not the wildhaven-upload certificate registered with Play"
+            exit 1
+          fi
+          out="$RUNNER_TEMP/wildhaven-zoo-$NAME-$CODE-release.aab"
+          cp unsigned/app-release.aab "$out"
+          jarsigner -sigalg SHA256withRSA -digestalg SHA-256 -keystore "$keystore" -storepass:env STORE_PASS -keypass:env KEY_PASS "$out" "$KEY_ALIAS"
+          echo "AAB=$out" >> "$GITHUB_ENV"
+
+      - name: Check the signed bundle
+        run: |
+          jarsigner -verify "$AAB" > "$RUNNER_TEMP/verify.txt"
+          grep -q 'jar verified' "$RUNNER_TEMP/verify.txt"
+          unzip -p "$AAB" 'META-INF/*.RSA' | keytool -printcert > "$RUNNER_TEMP/signer.txt"
+          signer=$(sed -nE 's/^\s*SHA256:\s*//p' "$RUNNER_TEMP/signer.txt" | head -1)
+          if [ "$signer" != "$UPLOAD_CERT_SHA256" ]; then
+            echo "::error::The bundle is not signed with the wildhaven-upload certificate"
+            exit 1
+          fi
+          jar="$RUNNER_TEMP/bundletool.jar"
+          curl -fsSL -o "$jar" "https://github.com/google/bundletool/releases/download/$BUNDLETOOL_VERSION/bundletool-all-$BUNDLETOOL_VERSION.jar"
+          echo "$BUNDLETOOL_SHA256  $jar" | sha256sum -c -
+          java -jar "$jar" validate --bundle="$AAB" > /dev/null
+          manifest=$(java -jar "$jar" dump manifest --bundle="$AAB")
+          grep -q "package=\"$PACKAGE_NAME\"" <<< "$manifest"
+          grep -q "android:versionCode=\"$CODE\"" <<< "$manifest"
+          grep -qF "android:versionName=\"$NAME\"" <<< "$manifest"
+          echo "Signed by the upload certificate; bundletool validate passed; $PACKAGE_NAME $NAME ($CODE)."
+
+      - name: Keep the signed bundle as a run artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wildhaven-zoo-${{ env.NAME }}-${{ env.CODE }}-release-aab
+          path: ${{ env.AAB }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publisher script tests
+        run: node --test release-tools/scripts/play/*.test.mjs
+
+      - name: Upload to the internal testing track
+        if: ${{ !inputs.dry_run }}
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          notes="$RUNNER_TEMP/release-notes.txt"
+          printf '%s' "$RELEASE_NOTES" > "$notes"
+          node release-tools/scripts/play/publish-internal.mjs upload --aab "$AAB" --version-code "$CODE" --release-name "$CODE ($NAME)" --notes-file "$notes"
+
+      - name: Summary
+        if: ${{ always() }}
+        env:
+          SHA: ${{ needs.plan.outputs.sha }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          {
+            echo "### Play internal release"
+            echo "- main commit: \`$SHA\`"
+            echo "- version: $NAME (code $CODE)"
+            echo "- track: internal"
+            if [ "$DRY_RUN" = "true" ]; then echo "- dry run: built, signed and checked; not uploaded"; fi
+            echo "- result: $OUTCOME"
+          } >> "$GITHUB_STEP_SUMMARY"
