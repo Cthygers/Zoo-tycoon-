@@ -97,17 +97,30 @@ export function signatureBout(sp: SpeciesAudio, m: Member, hour: number, nightne
  */
 export const LANDMARKS: readonly string[] = ['elephant', 'lion', 'gorilla', 'penguin', 'flamingo', 'zebra', 'hippo', 'tiger', 'giraffe'];
 
+/** An elephant's landmark call is its trumpet this often, else its contact rumble (wild elephants mostly rumble). */
+export const TRUMPET_P = 0.3;
+
 /** The landmark bout of a species now, or null (not a landmark voice, or nothing to say at this hour). */
 export function landmarkBout(sp: SpeciesAudio, m: Member, hour: number, nightness: number, rng: Rng): Bout | null {
   switch (sp.voice) {
     case 'elephant':
-      return pickBout(sp, 'call', m.sex, rng);
+      return pickBout(sp, rng.float() < TRUMPET_P ? 'call' : 'contact', m.sex, rng);
     case 'penguin':
       return activityAt(sp, hour) >= ACTIVE_HOURS ? pickBout(sp, 'call', m.sex, rng) : null;
     case 'giraffe':
       return nightness > 0.5 && canNight(sp, m, hour) ? pickBout(sp, 'night', m.sex, rng) : null;
   }
   return LANDMARKS.includes(sp.voice) ? signatureBout(sp, m, hour, nightness, rng) : null;
+}
+
+const CALM: readonly BoutKind[] = ['contact', 'social', 'idle'];
+/** A calm call of a species: its contact call, else a social or idle one (never a rare call: fauna/rare.ts). */
+export function calmBout(sp: SpeciesAudio, m: Member, rng: Rng): Bout | null {
+  for (const kind of CALM) {
+    const b = pickBout(sp, kind, m.sex, rng);
+    if (b) return b;
+  }
+  return null;
 }
 
 /** Herd-mates answer the focus animal's contact calls: the bout kinds that count as one, and the answer. */
@@ -176,13 +189,14 @@ export function spontaneousReach(earDist: number, focusDist: number, camDist: nu
 }
 
 /**
- * Calls carry over distance: in mid and far views, call and display bouts fall
- * off as (refDist / r)^0.75 instead of refDist / r. Returns the reference
- * distance that turns the host's law into that one at `dist` m (the play's own
- * gain stays the caller's level).
+ * Calls carry over distance: in mid and far views, a bout that `carries` (calls,
+ * displays, the presence and landmark directors' bouts) falls off as
+ * (refDist / r)^0.75 instead of refDist / r. Returns the reference distance that
+ * turns the host's law into that one at `dist` m (the play's own gain stays the
+ * caller's level).
  */
-export function carryRefDist(kind: Bout['kind'], dist: number, refDist: number, camDist: number): number {
-  if (camDist <= PRESENCE_CAM || (kind !== 'call' && kind !== 'display')) return refDist;
+export function carryRefDist(carries: boolean, dist: number, refDist: number, camDist: number): number {
+  if (camDist <= PRESENCE_CAM || !carries) return refDist;
   return Math.max(refDist, Math.pow(refDist, 0.75) * Math.pow(dist, 0.25));
 }
 

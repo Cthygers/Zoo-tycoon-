@@ -9,7 +9,7 @@ import { Rng } from '../src/core/rng';
 import { PathType, Terrain, type AnimalState } from '../src/core/types';
 import { individual } from '../src/audio/fauna/bout';
 import { daytimeCall, idleActivity, isRoar, reachFactor, schedRate, spontaneousReach } from '../src/audio/fauna/diel';
-import { CLOSE_STEP_DB, CLOSE_STEP_MASS, FEET_BANK, FOLEY_FAMILY, FOLEY_SPECIES, FoleyLimiter, GENERIC_FOLEY, QUIET_MAX, STEP_DB, foleyBankFor, registeredVariants } from '../src/audio/fauna/foley';
+import { CLOSE_STEP_DB, CLOSE_STEP_MASS, FEET_BANK, FOLEY_FAMILY, FOLEY_SPECIES, FoleyLimiter, GENERIC_FOLEY, QUIET_SPAN, STEP_DB, foleyBankFor, registeredVariants } from '../src/audio/fauna/foley';
 import { ShareLimiter } from '../src/audio/fauna/share';
 import { REPEAT_RATE, RepeatGuard, playColor } from '../src/audio/fauna/variety';
 import { createFauna, FAUNA } from '../src/audio/modules/fauna';
@@ -152,7 +152,7 @@ describe('the focus animal', () => {
         for (let i = 0; i < 4; i++) s.add(animal(sp, 15 + i * 3, 10));
         s.host.followId = a.id;
         s.run(120);
-        expect(longestQuiet(s.host, a.id, 120, true), `${sp} ${action}`).toBeLessThanOrEqual((FOLEY_SPECIES[sp].quietMax ?? QUIET_MAX) + 1.2);
+        expect(longestQuiet(s.host, a.id, 120, true), `${sp} ${action}`).toBeLessThanOrEqual(QUIET_SPAN[1] + 1.2);
       }
     }
   });

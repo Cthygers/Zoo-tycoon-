@@ -68,7 +68,8 @@ export interface PlaySpec {
   /**
    * A landmark / presence call heard from a mid or overview camera: the ambience dips 3 dB
    * (80 ms in) for its length, at least 1 s, then recovers over ~1.2 s. Scaled out as the
-   * focus mix comes in (a focus view has made room already). Replaces `duck`.
+   * focus mix comes in (a focus view has made room already). Replaces `duck`. Refused
+   * (play() returns null) while the tutorial speaks (AudioHost.speech).
    */
   landmark?: boolean;
 }
@@ -125,6 +126,11 @@ export interface AudioHost {
   readonly nightness: number;
   /** Animal followed by the camera (IAudio.follow hint), or −1. */
   readonly followId: number;
+  /**
+   * The tutorial's read-aloud is speaking (ZooAudio.speechDuck): the zoo holds its own calls.
+   * Landmark plays are refused meanwhile. Optional for test hosts; the engine always sets it.
+   */
+  readonly speech?: boolean;
   /** Distance model for a world point. Returns a shared scratch object: copy what you keep. */
   attenuate(x: number, y: number, z: number, refDist?: number, radius?: number): Readonly<Attenuation>;
   /** Recipe rendered and ready to play. */

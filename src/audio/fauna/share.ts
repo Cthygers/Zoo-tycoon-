@@ -1,7 +1,9 @@
 // Species-share limiter: no voice may take more than a set share of the vocal
 // energy over a sliding window (a far pride of lions must not flood the zoo).
-// Energy is measured at a fixed distance from the caller, not where the
-// listener is, so the species the camera is on does not look "loud" for it.
+// Two measures: energy at a fixed distance from the caller (refEnergy: the
+// species the camera is on does not look "loud" for it, 10 minutes), and the
+// energy the player hears (heardEnergy: no loud, carrying species may become a
+// view's monologue, 2 minutes).
 
 /** Default window (s) and share. */
 export const SHARE_WINDOW = 600;
@@ -13,6 +15,15 @@ export const SHARE_REF_DIST = 10;
 export function refEnergy(gain: number, seconds: number, refDist: number): number {
   const g = gain * Math.min(1, refDist / SHARE_REF_DIST);
   return g * g * seconds;
+}
+
+/** Heard energy: window (s) and share. */
+export const HEARD_WINDOW = 120;
+export const HEARD_LIMIT = 0.3;
+
+/** Energy (gain² × s) of one play as heard: `heard` is its gain after distance attenuation. */
+export function heardEnergy(heard: number, seconds: number): number {
+  return heard * heard * seconds;
 }
 
 /** Below this many recent plays the shares say too little to limit anyone. */

@@ -188,13 +188,13 @@ describe('mid and far views', () => {
   it('calls and displays carry: (refDist / r)^0.75 beyond PRESENCE_CAM', () => {
     // the host's law with the carried reference distance
     const law = (r: number) => {
-      const ref = carryRefDist('call', r, 10, 52);
+      const ref = carryRefDist(true, r, 10, 52);
       return ref / Math.max(ref, r);
     };
     expect(law(80)).toBeCloseTo(Math.pow(10 / 80, 0.75));
     expect(law(5)).toBe(1);
-    expect(carryRefDist('call', 80, 10, PRESENCE_CAM)).toBe(10);
-    expect(carryRefDist('idle', 80, 10, 52)).toBe(10);
+    expect(carryRefDist(true, 80, 10, PRESENCE_CAM)).toBe(10);
+    expect(carryRefDist(false, 80, 10, 52)).toBe(10);
   });
 
   it('every habitat in view calls every 12–20 s, and landmark calls sound every 6–10 s with the ambience dip', () => {

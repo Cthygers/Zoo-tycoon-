@@ -5,12 +5,16 @@
 //
 // The focus animal (the one the camera follows, else the selected one in view,
 // else one resting at the screen centre, else the nearest under a hovering
-// camera) is a close-up microphone: its voice a few dB forward, its signature
-// call now and then, quiet body sounds that never leave it silent for long,
-// and a herd that keeps talking and answers it. Mid and far views hear the
-// zoo: every habitat in view calls now and then, landmark calls carry across
-// the view. A species-share limiter keeps a far species from flooding the zoo,
-// and lions roar by count: a dusk chorus, a few roars in the night, a dawn chorus.
+// camera) is a close-up microphone: its voice a few dB forward, its body sounds
+// close-miked, its signature call now and then, a silence drawn afresh after
+// every sound (never long, never a clock), and a herd that keeps talking 6 dB
+// under it and answers it; the zoo's directors stand down around it. Mid and
+// far views hear the zoo: every habitat on screen makes contact calls now and
+// then, landmark calls carry across the view. Rare calls stay rare (a zoo-wide
+// budget per species), no species becomes a view's monologue (shares of the
+// energy heard and of the energy at the caller), lions roar by count (a dusk
+// chorus, a few roars in the night, a dawn chorus; a game started late in the
+// night opens quietly), and the zoo holds its calls while the tutorial speaks.
 
 import { TILE } from '../../core/constants';
 import { SPEED_MULTIPLIERS } from '../../core/contracts';
@@ -41,6 +45,7 @@ import {
   ROAR_ACTIVITY,
   ZOO_RATE,
   activityAt,
+  calmBout,
   carryRefDist,
   colonyLevel,
   daytimeCall,
@@ -56,9 +61,11 @@ import {
   signatureBout,
   spontaneousReach,
 } from '../fauna/diel';
+import { jittered, jitteredIn } from '../fauna/clock';
 import { HoverFocus } from '../fauna/focus';
 import {
   BREATH_RANGE,
+  CHEW_EVERY,
   CLOSE_STEP_DB,
   CLOSE_STEP_MASS,
   FEET_BANK,
@@ -66,8 +73,12 @@ import {
   FoleyLimiter,
   PANT_EVERY,
   PANT_FOR,
-  QUIET_MAX,
+  QUIET,
+  QUIET_SPAN,
   RUSTLE_EVERY,
+  SLEEP_BREATH,
+  SLEEP_BREATH_DB,
+  SLEEP_RUSTLE,
   STEP_DB,
   foleyBankFor,
   guestCadence,
@@ -77,8 +88,9 @@ import {
   type FoleyKind,
   type FoleySpecies,
 } from '../fauna/foley';
+import { FLOCK_BURST, FLOCK_BURST_GAP, RareBudget, isRare, rareHour } from '../fauna/rare';
 import { RoarCount } from '../fauna/roar';
-import { ShareLimiter, refEnergy } from '../fauna/share';
+import { HEARD_LIMIT, HEARD_WINDOW, ShareLimiter, heardEnergy, refEnergy } from '../fauna/share';
 import { RATE_SPREAD, RepeatGuard, playColor, seriesColor } from '../fauna/variety';
 import type { AudioHost, AudioModule, AudioModuleFactory, VoiceHandle } from '../host';
 import { RECIPES, SPECIES_AUDIO, registerRecipes, sylId, voiceIdFor, type Bout, type BoutKind, type SpeciesAudio } from '../recipes';
@@ -110,9 +122,17 @@ export const FAUNA = {
   focusVocalDb: 5,
   /** ... and its foley (steps, breath, chewing) by this much: body sounds stay well under the voice. */
   focusFoleyDb: 0,
-  /** Herd-mates within `mateRadius` m of the focus animal keep their idle rate, `mateDb` under its voice; their foley `mateFoleyDb` under its foley. */
+  /**
+   * Its foley is close-miked: heard as from min(ear distance, foleyRef + closeMic × camera distance) m
+   * (5.3 m at the game's 23.4 m follow framing), so its steps, laps and chews carry to the follow framing.
+   */
+  closeMic: 0.1,
+  /**
+   * Herd-mates within `mateRadius` m of the focus animal keep their idle rate, `mateDb` under its voice
+   * (every syllable, their roars and chorus joins too); their foley `mateFoleyDb` under its foley.
+   */
   mateRadius: 15,
-  mateDb: -3,
+  mateDb: -6,
   mateFoleyDb: -9,
   /**
    * ... and start at most this many bouts a minute between them [colony, herd] (their answers
@@ -141,7 +161,7 @@ export const FAUNA = {
   focusBreath: BREATH_RANGE,
   /** A breath sits at least this far under the animal's idle call as heard (the focus animal's voice is forward), dB. */
   breathUnderIdle: 6,
-  /** A sleeping flamingo grunts now and then (chance per silence filler), dB re a lion roar. */
+  /** A sleeping flamingo grunts softly instead of a rustle now and then (chance per rustle), dB re a lion roar. */
   sleepyGruntP: 0.3,
   sleepyGruntDb: -18,
   /** A selected animal further than this from the camera focus is not the one in view, m. */
@@ -193,16 +213,27 @@ export const FAUNA = {
   /** Foley quieter than this at the ear is not started (twice this for animals out of focus): saves voices and CPU. */
   foleyMin: 0.015,
   /**
-   * Mid and far views (camera over PRESENCE_CAM m from its focus): every habitat in view
-   * with awake animals calls every `presenceEvery` s, and by day a landmark call sounds
-   * somewhere in view every `landmarkEvery` s. In view: within the camera distance of the
-   * focus point, clamped to `viewRadius` m.
+   * Mid and far views (camera over PRESENCE_CAM m from its focus): every habitat on screen
+   * with awake animals makes a contact or idle call about every `presenceEvery` s, and by day
+   * a landmark call (a species' rare call, as its budget allows) sounds somewhere on screen
+   * about every `landmarkEvery` s (intervals drawn around the middle of these ranges). On
+   * screen: within the camera distance of the focus point (clamped to `viewRadius` m), and
+   * ahead of it, where the camera looks, up to `viewAhead` × that and `viewRadius[1]` m.
    */
-  presenceEvery: [12, 20] as const,
-  landmarkEvery: [6, 10] as const,
+  presenceEvery: [14, 30] as const,
+  landmarkEvery: [12, 28] as const,
   /** A landmark voice takes its turn with its activity at this hour relative to its peak, at least this chance. */
   landmarkFloor: 0.3,
   viewRadius: [30, 90] as const,
+  viewAhead: 1.5,
+  /** ... beside the line of sight: the view radius plus this × the distance ahead. */
+  viewWiden: 0.5,
+  /** Focus views: presence and landmark callers within this many m of the camera focus point stand down. */
+  focusClear: 40,
+  /** While the tutorial speaks (host speech duck) and this many s after, the zoo's directors hold their calls. */
+  speechResume: 2,
+  /** Hovering: a sleeping animal counts this many m further from the screen centre (an awake neighbour is heard). */
+  sleepPenalty: 2,
   /** Mid and far views: colony birds further than this from the ear idle only in the murmur loop, m. */
   colonyIdleDist: 25,
   /** Penguin colonies: `colonyMin` birds within `colonyRadius` m in their active hours display every `colonyEvery` s. */
@@ -257,6 +288,10 @@ const NO_GAP: ReadonlySet<Trigger> = new Set<Trigger>(['react', 'force', 'roar',
 const URGENT: ReadonlySet<Trigger> = new Set<Trigger>(['react', 'force', 'roar', 'signature', 'landmark']);
 /** Moments the species-share limiter never holds back. */
 const MOMENTS: ReadonlySet<Trigger> = new Set<Trigger>(['react', 'force', 'roar', 'signature', 'landmark', 'colony', 'answer']);
+/** Starts the heard-energy share never holds back: the player's own moments and the night's counted roars. */
+const HEARD_EXEMPT: ReadonlySet<Trigger> = new Set<Trigger>(['react', 'force', 'roar', 'signature', 'answer', 'focus']);
+/** Starts held back while the tutorial speaks: the zoo's directors, scheduled calls, choruses and signature moments. */
+const HUSHED: ReadonlySet<Trigger> = new Set<Trigger>(['sched', 'sim', 'presence', 'landmark', 'colony', 'signature', 'roar', 'join']);
 
 interface Critter {
   readonly id: number;
@@ -305,6 +340,12 @@ interface Critter {
   mate: boolean;
   /** Last start of one of its sounds other than a footstep (host.time). */
   lastHeard: number;
+  /** Close up and awake: the silence after which it makes a sound, drawn afresh after each filler, s. */
+  quietFor: number;
+  /** Its last interval per clock (breath, rustle, tail, ...): the next one is never the same. */
+  readonly gaps: Map<Clock, number>;
+  /** Asleep (last scan). */
+  asleep: boolean;
   /** Last syllable variant per bank (no variant twice in a row from one animal). */
   readonly lastSyl: Map<string, string>;
   /** Started swimming since the last scan (penguins and polar bears dive). */
@@ -329,7 +370,14 @@ interface RunningBout {
   endAt: number;
   /** Direction (±1) of the bout's colour drift across its series. */
   readonly drift: number;
+  /** A lion's full roaring bout: no syllable of it comes forward. */
+  readonly roar: boolean;
+  /** Carries like a call in mid and far views (calls, displays and the presence and landmark directors' bouts). */
+  readonly carry: boolean;
 }
+
+/** The repeating close-up sounds of an animal, each on its own irregular clock. */
+type Clock = 'breath' | 'rustle' | 'tail' | 'flap' | 'dust' | 'chew' | 'quiet';
 
 interface Pending {
   at: number;
@@ -347,6 +395,8 @@ const CHORUS: ReadonlySet<BoutKind> = new Set<BoutKind>(['call', 'contact', 'dis
 /** Idle chatter (not calls): it recedes in mid and far views, to CHATTER_TRIM at the overview. */
 const CHATTER: ReadonlySet<BoutKind> = new Set<BoutKind>(['idle', 'eat', 'social', 'juvenile']);
 const CHATTER_TRIM = 0.3;
+/** A species whose activity at this hour is under this is asleep by its rhythm: no presence calls (a gorilla at night). */
+const PRESENCE_ASLEEP = 0.05;
 /** Water foley capped per habitat when out of focus. */
 const WATER: ReadonlySet<string> = new Set(['fx.splash.small', 'fx.splash.big']);
 /** Lions joining the dusk and dawn roaring choruses (the lion's roars outweigh every other voice of the zoo). */
@@ -366,7 +416,10 @@ class Fauna implements AudioModule {
   private readonly water = new Map<number, FoleyLimiter>();
   private readonly repeats = new RepeatGuard();
   private readonly share = new ShareLimiter();
-  private readonly roars = new RoarCount();
+  /** The energy the player hears per species (no view becomes one species' monologue). */
+  private readonly heard = new ShareLimiter(HEARD_WINDOW, HEARD_LIMIT);
+  private readonly rare = new RareBudget();
+  private readonly roars: RoarCount;
   private readonly hover = new HoverFocus();
   /** Family foley banks resolved per kind and voice, with their variant counts. */
   private readonly familyBanks = new Map<string, string>();
@@ -394,6 +447,15 @@ class Fauna implements AudioModule {
   private readonly presenceLast = new Map<number, string>();
   private landmarkAt = 0;
   private landmarkNext = 0;
+  /** Last presence and landmark intervals (never the same twice). */
+  private presenceGap = 0;
+  private landmarkGap = 0;
+  /** Flamingo flocks out of focus: last honking burst per habitat (host.time). */
+  private readonly flockBurstAt = new Map<number, number>();
+  /** The zoo's directors hold their calls until this time (the tutorial speaks). */
+  private hushUntil = -1e9;
+  /** On screen in mid and far views (schedule tick): camera focus point, line of sight on the ground, view radius. */
+  private readonly view = { fx: 0, fz: 0, ux: 0, uz: 0, r: 30 };
   /** Penguin colonies: next display per group key. */
   private readonly colonyAt = new Map<string, number>();
   private nextGroup = GROUP_BASE;
@@ -434,6 +496,7 @@ class Fauna implements AudioModule {
     seed: number,
   ) {
     this.rng = new Rng(seed);
+    this.roars = new RoarCount(this.rng.float());
     const ev = host.events;
     this.unsub.push(
       ev.on('animalAdded', (e) => {
@@ -491,6 +554,7 @@ class Fauna implements AudioModule {
   update(dt: number): void {
     if (!this.host.active) return;
     const running = this.host.sim.speed > 0;
+    if (this.speaking()) this.hushUntil = this.host.time + FAUNA.speechResume;
     this.runBouts(dt);
     if (running) this.runPending();
     // periodic work gets the time since its last run (frames vary; tests step coarsely)
@@ -615,6 +679,9 @@ class Fauna implements AudioModule {
         herd: false,
         mate: false,
         lastHeard: t,
+        quietFor: QUIET,
+        gaps: new Map(),
+        asleep: a.action === 'sleep',
         lastSyl: new Map(),
         dived: false,
       };
@@ -644,6 +711,11 @@ class Fauna implements AudioModule {
     return Number.isFinite(p) && p > 1 ? p : 1;
   }
 
+  /** The tutorial's read-aloud is speaking: the host's speech duck (`speech`, read structurally: optional on AudioHost). */
+  private speaking(): boolean {
+    return (this.host as { readonly speech?: boolean }).speech === true;
+  }
+
   /** A random draw that keeps 1 in `pace` sim-driven sounds. */
   private paced(): boolean {
     return this.rng.float() * this.pace() < 1;
@@ -669,6 +741,7 @@ class Fauna implements AudioModule {
     for (const a of h.sim.animals.values()) {
       const c = this.critter(a);
       c.dived = false;
+      c.asleep = a.action === 'sleep';
       const att = h.attenuate(a.x, a.y + 1, a.z, c.sp.refDist, c.sp.radius);
       c.gain = att.gain;
       c.dist = att.dist;
@@ -718,8 +791,11 @@ class Fauna implements AudioModule {
     const hover = id < 0 && hovering;
     if (!hover) this.hover.reset();
     else {
-      const n = this.near[0];
-      id = this.hover.update(dt, n ? n.id : -1, n ? n.focusDist : Infinity, this.critters.get(this.hover.current)?.focusDist ?? Infinity);
+      // the animal at the screen centre; a sleeping one counts a little further (its awake neighbour is heard)
+      let n: Critter | null = null;
+      for (const x of this.near) if (!n || this.centreDist(x) < this.centreDist(n)) n = x;
+      const cur = this.critters.get(this.hover.current);
+      id = this.hover.update(dt, n ? n.id : -1, n ? this.centreDist(n) : Infinity, cur ? this.centreDist(cur) : Infinity);
     }
     if (id !== this.focusId) {
       // a handover within a herd keeps its signature schedule and call ration
@@ -736,6 +812,11 @@ class Fauna implements AudioModule {
       if (h.followId >= 0) this.greet(h.followId);
     }
     return hover && id >= 0;
+  }
+
+  /** Hovering: an animal's distance from the screen centre, a sleeping one's FAUNA.sleepPenalty further. */
+  private centreDist(c: Critter): number {
+    return c.focusDist + (c.asleep ? FAUNA.sleepPenalty : 0);
   }
 
   /** Flags of the last scan: the focus, its habitat, herd and mates; animals under a hovering camera; sim edges. */
@@ -869,24 +950,21 @@ class Fauna implements AudioModule {
   }
 
   /**
-   * Never-silent rule: a focus animal unheard (steps aside) for its quietMax makes a
-   * sound from a mixed pool: a call (as the minute's ration allows), a breath when
-   * one is nearly due, a tail swish, an ear flap, a cud chew or a weight shift;
-   * birds ruffle their feathers. Asleep it breathes (a bird rustles, a flamingo
-   * grunts now and then); swimming, it calls.
+   * Never silent for long: an awake focus animal unheard (steps aside) for its
+   * current silence (drawn afresh after every filler around its body's typical
+   * one: no clock) makes a sound from a mixed pool: a call (as the minute's ration
+   * allows), a breath when one is nearly due, a tail swish, an ear flap, a cud
+   * chew or a weight shift; birds ruffle their feathers. Swimming, it calls.
+   * Asleep it is quiet: its slow breaths and rare rustles keep their own clocks.
    */
   private fillSilence(c: Critter, a: AnimalState, wet: boolean, size: number): void {
     const h = this.host;
     const body = c.body;
-    if (c.bout || h.time - c.lastHeard < (body.quietMax ?? QUIET_MAX)) return;
+    if (c.bout || c.asleep || h.time - c.lastHeard < c.quietFor) return;
+    c.quietFor = this.interval(c, 'quiet', [body.quiet ?? QUIET, body.quiet ?? QUIET], QUIET_SPAN);
     const bird = !body.breathEvery;
     if (a.action === 'swim') {
       if (!this.focusCall(c, a)) c.lastHeard = h.time; // nothing to say now: look again later
-      return;
-    }
-    if (!this.awake(a)) {
-      if (!bird) this.breathe(c, a, size);
-      else if (!(c.voice === 'flamingo' && this.rng.float() < FAUNA.sleepyGruntP && this.start(c, a, SLEEPY_GRUNT, 'focus', FAUNA.sleepyGruntDb))) this.rustle(c, a);
       return;
     }
     const pool: [string, number][] = [
@@ -997,10 +1075,15 @@ class Fauna implements AudioModule {
    * Diel scheduler (1 Hz): per species group in range, scheduled bouts by daily
    * activity and reach (or the zoo-wide presence floor); a pride roars as the
    * night's roar count allows; penguin colonies display; mid and far views get
-   * presence and landmark calls.
+   * presence and landmark calls. While the tutorial speaks every clock waits (its
+   * calls are deferred, not queued into a burst for afterwards).
    */
   private schedule(dt: number): void {
     const h = this.host;
+    if (h.time < this.hushUntil) {
+      this.defer(dt);
+      return;
+    }
     const hour = ((h.hour % 24) + 24) % 24;
     const camDist = h.listener.camDist;
     const slot = activityAt(SPECIES_AUDIO.lion, hour) >= ROAR_ACTIVITY ? this.roars.slot(hour, h.time) : null;
@@ -1035,9 +1118,17 @@ class Fauna implements AudioModule {
     }
     this.colonyDisplays(groups);
     if (camDist > PRESENCE_CAM) {
+      this.updateView();
       this.presence();
       if (h.nightness <= 0.5) this.landmark();
     } else this.presenceAt.clear();
+  }
+
+  /** The directors' clocks wait `dt` s (the tutorial speaks). */
+  private defer(dt: number): void {
+    for (const [k, t] of this.presenceAt) this.presenceAt.set(k, t + dt);
+    for (const [k, t] of this.colonyAt) this.colonyAt.set(k, t + dt);
+    this.landmarkAt += dt;
   }
 
   /** Mid and far views: the radius around the camera focus point that counts as in view, m. */
@@ -1045,18 +1136,58 @@ class Fauna implements AudioModule {
     return Math.min(FAUNA.viewRadius[1], Math.max(FAUNA.viewRadius[0], this.host.listener.camDist));
   }
 
+  /** What is on screen this tick: the camera focus point, the line of sight on the ground (ear → focus) and the view radius. */
+  private updateView(): void {
+    const l = this.host.listener;
+    const v = this.view;
+    const ux = l.fx - l.x;
+    const uz = l.fz - l.z;
+    const n = Math.hypot(ux, uz);
+    v.fx = l.fx;
+    v.fz = l.fz;
+    v.ux = n > 1e-3 ? ux / n : 0;
+    v.uz = n > 1e-3 ? uz / n : 0;
+    v.r = this.viewRadius();
+  }
+
   /**
-   * Presence director: every habitat in view with awake animals makes a call or
-   * display bout every 12–20 s, its species taking turns weighted by their activity
-   * at this hour (and calling only as often as that activity says).
+   * Mid and far views: whether an animal is on screen: within the view radius of the
+   * camera focus point, or ahead of it where the camera looks (up to `viewAhead` × the
+   * radius, widening sideways), never beyond viewRadius[1] m. A focus view's directors
+   * stand down around the focus point.
+   */
+  private onScreen(c: Critter): boolean {
+    if (this.focusId >= 0 && c.focusDist <= FAUNA.focusClear) return false;
+    if (c.focusDist <= this.view.r) return true;
+    if (c.focusDist > FAUNA.viewRadius[1]) return false;
+    const a = this.host.sim.animals.get(c.id);
+    if (!a) return false;
+    const v = this.view;
+    const dx = a.x - v.fx;
+    const dz = a.z - v.fz;
+    const ahead = dx * v.ux + dz * v.uz;
+    return ahead > 0 && ahead <= FAUNA.viewAhead * v.r && Math.abs(dx * v.uz - dz * v.ux) <= v.r + FAUNA.viewWiden * ahead;
+  }
+
+  /** A species is over its share of the energy heard recently (with another species audible): its turn goes to another. */
+  private heardOver(voice: string): boolean {
+    return this.othersInRange(voice) && this.heard.over(voice, this.host.time);
+  }
+
+  /**
+   * Presence director: every habitat on screen with awake animals makes a contact
+   * or idle call about every `presenceEvery` s, its species taking turns weighted
+   * by their activity at this hour (and calling only as often as that activity
+   * says); a species over its heard share rarely gets the turn, and species asleep
+   * by their rhythm (a gorilla at night, a giraffe at night) none.
    */
   private presence(): void {
     const h = this.host;
-    const view = this.viewRadius();
+    const night = h.nightness > 0.5;
     const habitats = new Map<number, Critter[]>();
     for (const c of this.inRange) {
       const a = h.sim.animals.get(c.id);
-      if (!a || a.habitatId === null || c.focusDist > view || !this.awake(a)) continue;
+      if (!a || a.habitatId === null || c.asleep || (night && c.voice === 'giraffe') || !this.onScreen(c)) continue;
       const list = habitats.get(a.habitatId);
       if (list) list.push(c);
       else habitats.set(a.habitatId, [c]);
@@ -1067,44 +1198,50 @@ class Fauna implements AudioModule {
       // a habitat coming into view starts at a random point of its cycle
       if (due === undefined) this.presenceAt.set(hab, h.time + this.rng.range(0, FAUNA.presenceEvery[1]));
       if (due === undefined || h.time < due) continue;
-      this.presenceAt.set(hab, h.time + this.rng.range(FAUNA.presenceEvery[0], FAUNA.presenceEvery[1]));
+      this.presenceAt.set(hab, h.time + (this.presenceGap = jitteredIn(FAUNA.presenceEvery, this.rng, this.presenceGap)));
       const last = this.presenceLast.get(hab);
       const voices = [...new Set(list.map((c) => c.voice))];
-      const voice = pickWeighted(voices, (v) => idleActivity(SPECIES_AUDIO[v], h.hour) * (v === last ? 0.3 : 1), this.rng);
+      const weight = (v: string) => (activityAt(SPECIES_AUDIO[v], h.hour) < PRESENCE_ASLEEP ? 0 : idleActivity(SPECIES_AUDIO[v], h.hour) * (v === last ? 0.3 : 1) * (this.heardOver(v) ? 0.1 : 1));
+      const voice = pickWeighted(voices, weight, this.rng);
       if (!voice || this.rng.float() >= idleActivity(SPECIES_AUDIO[voice], h.hour)) continue;
       let c: Critter | null = null;
       for (const x of list) if (x.voice === voice && !x.bout && (!c || x.focusDist < c.focusDist)) c = x;
       const a = c && h.sim.animals.get(c.id);
       if (!c || !a) continue;
-      const b = this.youngBout(c, a) ?? pickKind(c.sp, h.nightness, a, this.rng, h.hour);
+      const b = this.youngBout(c, a) ?? (nightCaller(c.sp, a, h.hour, h.nightness) ? pickBout(c.sp, 'night', a.sex, this.rng) : calmBout(c.sp, a, this.rng));
       if (b && this.start(c, a, b, 'presence')) this.presenceLast.set(hab, voice);
     }
   }
 
-  /** Landmark calls (by day): every 6–10 s the next landmark voice in view (as its rhythm allows) calls, its member nearest the camera focus. */
+  /**
+   * Landmark calls (by day): about every `landmarkEvery` s the next landmark voice on
+   * screen whose rare-call budget allows (and whose daily rhythm says so) makes its
+   * signature call, its member nearest the camera focus; none when no voice may.
+   */
   private landmark(): void {
     const h = this.host;
     if (h.time < this.landmarkAt) return;
-    this.landmarkAt = h.time + this.rng.range(FAUNA.landmarkEvery[0], FAUNA.landmarkEvery[1]);
-    const view = this.viewRadius();
+    this.landmarkAt = h.time + (this.landmarkGap = jitteredIn(FAUNA.landmarkEvery, this.rng, this.landmarkGap));
     for (let k = 0; k < LANDMARKS.length; k++) {
       const i = (this.landmarkNext + k) % LANDMARKS.length;
-      if (!this.speciesFree(LANDMARKS[i])) continue;
+      const voice = LANDMARKS[i];
+      if (!this.speciesFree(voice) || this.heardOver(voice)) continue;
       let c: Critter | null = null;
-      for (const x of this.inRange) if (x.voice === LANDMARKS[i] && !x.bout && x.focusDist <= view && (!c || x.focusDist < c.focusDist)) c = x;
+      for (const x of this.inRange) if (x.voice === voice && !x.bout && (!c || x.focusDist < c.focusDist) && this.onScreen(x)) c = x;
       const a = c && h.sim.animals.get(c.id);
-      if (!c || !a || (!this.awake(a) && !c.sp.callsWhileAsleep)) continue;
+      if (!c || !a || (c.asleep && !c.sp.callsWhileAsleep)) continue;
       // a species takes its turn as often as its daily rhythm says (a lion by day now and then)
       if (this.rng.float() >= Math.max(FAUNA.landmarkFloor, idleActivity(c.sp, h.hour))) continue;
       const b = landmarkBout(c.sp, a, h.hour, h.nightness, this.rng);
-      if (b && this.start(c, a, b, 'landmark')) {
+      if (!b || (isRare(voice, b) && !this.rareFree(c, a))) continue;
+      if (this.start(c, a, b, 'landmark')) {
         this.landmarkNext = i + 1;
         return;
       }
     }
   }
 
-  /** Penguin colonies of `colonyMin` birds within `colonyRadius` m display every 30–60 s in their active hours. */
+  /** Penguin colonies of `colonyMin` birds within `colonyRadius` m display about every 30–60 s in their active hours (as their budget allows). */
   private colonyDisplays(groups: ReadonlyMap<string, Critter[]>): void {
     const h = this.host;
     for (const [key, g] of groups) {
@@ -1121,16 +1258,16 @@ class Fauna implements AudioModule {
       const r2 = FAUNA.colonyRadius ** 2;
       const caller = g.find((c) => {
         const a = h.sim.animals.get(c.id);
-        if (!a || c.bout || !this.awake(a)) return false;
+        if (!a || c.bout || c.asleep) return false;
         let n = 0;
         for (const o of birds) if ((o.x - a.x) ** 2 + (o.z - a.z) ** 2 <= r2) n++;
         return n >= FAUNA.colonyMin;
       });
       const a = caller && h.sim.animals.get(caller.id);
-      const b = a && pickBout(sp, 'call', a.sex, this.rng);
+      const b = a && caller && this.rareFree(caller, a) ? pickBout(sp, 'call', a.sex, this.rng) : null;
       const ok = !!caller && !!a && !!b && this.start(caller, a, b, 'colony');
-      // no colony together now (or busy): look again in a few seconds
-      this.colonyAt.set(key, h.time + (ok ? this.rng.range(FAUNA.colonyEvery[0], FAUNA.colonyEvery[1]) : 5));
+      // no colony together now (busy, or its budget spent): look again in a few seconds
+      this.colonyAt.set(key, h.time + (ok ? jitteredIn(FAUNA.colonyEvery, this.rng) : 5));
     }
   }
 
@@ -1141,13 +1278,18 @@ class Fauna implements AudioModule {
    * 1.5 s (reactions, choruses, the focus animal and its herd's answers skip it);
    * far animals in a close view one at a time, about one syllable per `farGap` s;
    * spontaneous bouts of species out of view held back while over their share of
-   * the zoo's vocal energy; at most 3 at once (2 on lowSpec): a louder newcomer
-   * (or an urgent one) replaces the quietest running bout. A lion's full roar
-   * needs a slot of the night's roar count; otherwise its call is moans and grunts.
+   * the zoo's vocal energy, and any species' while over its share of the energy
+   * heard; at most 3 at once (2 on lowSpec): a louder newcomer (or an urgent one)
+   * replaces the quietest running bout. A lion's full roar needs a slot of the
+   * night's roar count; otherwise its call is moans and grunts. A rare call needs
+   * its species' budget (the focus animal's species: only the focus animal), else
+   * the species calls calmly; a flamingo flock out of focus bursts with a few honks
+   * at most every FLOCK_BURST_GAP s. The zoo's directors wait while the tutorial speaks.
    */
   private start(c: Critter, a: AnimalState, bout: Bout, trigger: Trigger, levelDb?: number): boolean {
     const h = this.host;
     if (h.sim.speed === 0 && trigger !== 'force') return false;
+    if (HUSHED.has(trigger) && h.time < this.hushUntil) return false;
     if (!NO_GAP.has(trigger) && !this.speciesFree(c.voice)) return false;
     if (c.bout || (trigger !== 'react' && trigger !== 'force' && h.time - c.lastStart < FAUNA.animalGap)) return false;
     if (c.mate && !MOMENTS.has(trigger) && this.matesBusy(c)) return false;
@@ -1164,6 +1306,19 @@ class Fauna implements AudioModule {
     // without a slot a lion calls softly, alone (its daytime call does not set off a chorus)
     const soft = counted && !slot;
     if (soft) bout = daytimeCall(sp, bout);
+    const roar = isRoar(sp, bout);
+    // rare calls stay rare (the night's roars are on their own count)
+    let rareKey: string | null = null;
+    if (trigger !== 'force' && !roar && isRare(c.voice, bout)) {
+      if (this.rareFree(c, a)) rareKey = this.rareKey(c, a);
+      else {
+        const calm = calmBout(sp, a, this.rng);
+        if (!calm) return false;
+        bout = calm;
+      }
+    }
+    const flock = c.voice === 'flamingo' && bout.kind === 'call' && !c.focus && !c.mate ? (a.habitatId ?? -1) : null;
+    if (flock !== null && h.time - (this.flockBurstAt.get(flock) ?? -1e9) < FLOCK_BURST_GAP) return false;
     const juvenile = a.growth < JUVENILE_GROWTH;
     const gainDb = (levelDb ?? sp.levels[bout.kind] ?? sp.levels.idle ?? -12) + c.ind.db + (juvenile ? JUVENILE_DB : 0);
     const refDist = bout.refDist ?? sp.refDist;
@@ -1184,12 +1339,24 @@ class Fauna implements AudioModule {
       this.abort(weakest);
     }
     const items = planBout(sp, bout, this.rng, (syl) => this.sylDur(c.voice, syl));
+    if (flock !== null) items.length = Math.min(items.length, this.rng.int(FLOCK_BURST[0], FLOCK_BURST[1]));
     if (!items.length) return false;
+    const carry = bout.kind === 'call' || bout.kind === 'display' || trigger === 'presence' || trigger === 'landmark';
     // spontaneous bouts of species out of view wait while they have had their share
     if (!MOMENTS.has(trigger) && !this.shareExempt(c) && this.othersInRange(c.voice)) {
       let energy = 0;
       for (const it of items) energy += refEnergy(db2lin(gainDb + it.db), this.sylDur(c.voice, it.syl) / it.rate, refDist);
       if (this.share.over(c.voice, h.time, energy)) {
+        this.shareHeld++;
+        return false;
+      }
+    }
+    // ... and any species but the focus herd while it has had its share of what the player hears
+    if (!HEARD_EXEMPT.has(trigger) && !c.herd && !c.focus && this.othersInRange(c.voice)) {
+      const att = h.attenuate(a.x, a.y + 1, a.z, this.carryRef(carry, c.dist, refDist), radius).gain * this.chatterTrim(bout.kind, trigger);
+      let energy = 0;
+      for (const it of items) energy += heardEnergy(db2lin(gainDb + it.db) * att, this.sylDur(c.voice, it.syl) / it.rate);
+      if (this.heard.over(c.voice, h.time, energy)) {
         this.shareHeld++;
         return false;
       }
@@ -1211,6 +1378,8 @@ class Fauna implements AudioModule {
       quiet: 0,
       endAt: 0,
       drift: this.rng.float() < 0.5 ? -1 : 1,
+      roar,
+      carry,
     };
     this.bouts.push(rb);
     c.bout = rb;
@@ -1219,16 +1388,35 @@ class Fauna implements AudioModule {
     // one far bout at a time, and on average at most one far syllable per farGap s
     if (!urgent && !c.focus && this.far(c)) this.farUntil = h.time + Math.max(FAUNA.farGap * items.length, boutSpan(items, (syl) => this.sylDur(c.voice, syl)));
     if (slot) this.roars.take(slot, h.time);
-    if (isRoar(sp, bout)) this.roaring++;
+    if (rareKey) this.rare.take(rareKey, c.voice, h.time, this.rng);
+    if (flock !== null) this.flockBurstAt.set(flock, h.time);
+    if (roar) this.roaring++;
     this.started[trigger]++;
     this.lastBout = { voice: c.voice, kind: bout.kind, trigger, animal: c.id, items: items.length, span: +items[items.length - 1].t.toFixed(2) };
     // presence and landmark calls are single voices of the view: they do not set off choruses
     // a roar in the night is one lion's, the dusk and dawn choruses a pair's; other choruses draw up to MAX_JOINERS
     const joiners = !slot ? MAX_JOINERS : slot === 'extra' ? 0 : CHORUS_ROAR_JOINERS;
-    if (trigger !== 'join' && trigger !== 'presence' && trigger !== 'landmark' && !soft && CHORUS.has(bout.kind)) this.spread(c, a, bout.kind, isRoar(sp, bout), joiners);
+    if (trigger !== 'join' && trigger !== 'presence' && trigger !== 'landmark' && !soft && CHORUS.has(bout.kind)) this.spread(c, a, bout.kind, roar, joiners);
     if (c.focus && trigger !== 'answer') this.answer(c, bout.kind);
     if (c.mate) this.mateCalls.push(h.time);
     return true;
+  }
+
+  /** The rare-call budget key: a penguin colony's own, else the species'. */
+  private rareKey(c: Critter, a: AnimalState): string {
+    return c.voice === 'penguin' ? `penguin:${a.habitatId ?? -1}` : c.voice;
+  }
+
+  /**
+   * Whether an animal may make a rare call now: at this hour at all (no chest-beating at
+   * night), within its species' budget, and, while the camera is on an animal of its
+   * species, only that animal (signatures belong to the focus moments).
+   */
+  private rareFree(c: Critter, a: AnimalState): boolean {
+    if (!rareHour(c.voice, this.host.hour)) return false;
+    const f = this.focusId >= 0 && !c.focus ? this.critters.get(this.focusId) : undefined;
+    if (f && f.voice === c.voice) return false;
+    return this.rare.free(this.rareKey(c, a), this.host.time);
   }
 
   /** The focus animal's herd-mates have had their bouts for this minute. */
@@ -1326,8 +1514,8 @@ class Fauna implements AudioModule {
    * One syllable: a variant this animal did not just play and that did not sound
    * at nearly this rate in the last 10 s anywhere in the zoo (else the rate is
    * nudged), a ±4 % rate spread and a per-play colour. The focus animal is a few
-   * dB forward (not its roars and displays), its herd-mates just under it; far
-   * voices in a close view a few dB back; in mid and far views calls carry and
+   * dB forward (not a roaring bout or a display), its herd-mates 6 dB under it;
+   * far voices in a close view a few dB back; in mid and far views calls carry and
    * idle chatter recedes; a landmark call has the ambience make room for it.
    */
   private playItem(b: RunningBout, it: BoutItem, now: number): void {
@@ -1354,8 +1542,8 @@ class Fauna implements AudioModule {
     this.repeats.note(id, rate, when);
     c.lastSyl.set(base, id);
     const db = b.gainDb + it.db + this.rng.range(-1.5, 1.5);
-    const forward = c.focus ? (b.kind === 'display' || it.syl === 'roar' ? 0 : FAUNA.focusVocalDb) : c.mate ? FAUNA.focusVocalDb + FAUNA.mateDb : 0;
-    const gain = db2lin(db + forward + (this.far(c) ? FAUNA.farDb : 0)) * this.chatterTrim(b.kind);
+    const gain = db2lin(db + this.forward(b) + (this.far(c) ? FAUNA.farDb : 0)) * this.chatterTrim(b.kind, b.trigger);
+    const refDist = this.carryRef(b.carry, c.dist, b.refDist);
     const handle = h.play({
       id,
       track: c.id,
@@ -1366,7 +1554,7 @@ class Fauna implements AudioModule {
       group: b.group,
       color: seriesColor(playColor(c.ind, this.rng), b.next - 1, b.items.length, b.drift),
       // calls carry in mid and far views
-      refDist: carryRefDist(b.kind, c.dist, b.refDist, h.listener.camDist),
+      refDist,
       radius: b.radius,
       prio: c.focus ? gain * FAUNA.boost : undefined,
       landmark: b.trigger === 'landmark' || undefined,
@@ -1375,14 +1563,29 @@ class Fauna implements AudioModule {
     b.handles.push(handle);
     b.endAt = Math.max(b.endAt, handle.endAt);
     c.lastHeard = h.time;
-    // the species' share (the focus animal's own plays aside), measured at the reference distance
-    if (!c.focus) this.share.add(c.voice, refEnergy(db2lin(db), h.duration(id) / rate, b.refDist), h.time);
+    // the species' shares (the focus animal's own plays aside): at the reference distance and as heard (its herd's aside too)
+    const seconds = h.duration(id) / rate;
+    if (!c.focus) this.share.add(c.voice, refEnergy(db2lin(db), seconds, b.refDist), h.time);
+    const a = h.sim.animals.get(c.id);
+    if (a && !c.focus && !c.mate) this.heard.add(c.voice, heardEnergy(gain * h.attenuate(a.x, a.y + 1, a.z, refDist, b.radius).gain, seconds), h.time);
   }
 
-  /** Mid and far views: idle chatter (not calls) recedes with the camera's height, to CHATTER_TRIM (−10 dB) at the overview. */
-  private chatterTrim(kind: BoutKind): number {
+  /** How far a bout's syllables come forward, dB: the focus animal's voice (not a roaring bout or a display), its herd-mates `mateDb` under that. */
+  private forward(b: RunningBout): number {
+    const own = b.roar || b.kind === 'display' ? 0 : FAUNA.focusVocalDb;
+    return b.c.focus ? own : b.c.mate ? own + FAUNA.mateDb : 0;
+  }
+
+  /** The reference distance a bout plays at: carried in mid and far views (carryRefDist). */
+  private carryRef(carry: boolean, dist: number, refDist: number): number {
+    return carryRefDist(carry, dist, refDist, this.host.listener.camDist);
+  }
+
+  /** Mid and far views: idle chatter (not calls, nor the directors' calls) recedes with the camera's height, to CHATTER_TRIM (−10 dB) at the overview. */
+  private chatterTrim(kind: BoutKind, trigger: Trigger): number {
     const l = this.host.listener;
-    return CHATTER.has(kind) && l.camDist > PRESENCE_CAM ? CHATTER_TRIM + (1 - CHATTER_TRIM) * l.zoomNear : 1;
+    const directed = trigger === 'presence' || trigger === 'landmark';
+    return CHATTER.has(kind) && !directed && l.camDist > PRESENCE_CAM ? CHATTER_TRIM + (1 - CHATTER_TRIM) * l.zoomNear : 1;
   }
 
   /** A far animal while the camera is close (its vocal starts are rationed and quieter). */
@@ -1528,45 +1731,63 @@ class Fauna implements AudioModule {
     // close-up body sounds of the animal the player looks at
     if (!focus) return;
     if (a.action === 'eat' && t >= c.nextChew) {
-      c.nextChew = t + 1.2;
+      c.nextChew = t + this.interval(c, 'chew', CHEW_EVERY);
       this.playFoley(c, a, this.familyBank('chew', c.voice), FOLEY_GAIN.chew * size, body.rateScale, 0);
     }
     if (a.action !== 'swim') {
       if (body.breathEvery && t >= c.nextBreath) this.breathe(c, a, size);
       else if (!body.breathEvery && t >= c.nextRustle) this.rustle(c, a);
     }
+    // asleep: only its slow breaths and rare rustles
+    if (c.asleep) return;
     if (c.voice === 'elephant' && t >= c.nextFlap) {
-      c.nextFlap = t + this.rng.range(6, 20);
+      c.nextFlap = t + this.interval(c, 'flap', [6, 20]);
       this.playFoley(c, a, 'fx.flap', FOLEY_GAIN.flap * size, this.rng.range(0.9, 1.1), 0);
     }
     if (body.tail && t >= c.nextTail) {
-      c.nextTail = t + this.rng.range(5, 15);
-      if (a.action !== 'swim' && a.action !== 'sleep') this.playFoley(c, a, 'fx.tail', FOLEY_GAIN.tail, this.rng.range(0.9, 1.15), 0);
+      c.nextTail = t + this.interval(c, 'tail', [5, 15]);
+      if (a.action !== 'swim') this.playFoley(c, a, 'fx.tail', FOLEY_GAIN.tail, this.rng.range(0.9, 1.15), 0);
     }
     if (c.voice === 'elephant' && t >= c.nextDust) {
-      c.nextDust = t + this.rng.range(30, 90);
+      c.nextDust = t + this.interval(c, 'dust', [30, 90]);
       if (a.action === 'idle' && (terrain === Terrain.Dirt || terrain === Terrain.Sand)) this.playFoley(c, a, 'fx.dust', FOLEY_GAIN.dust, 1, 0);
     }
     this.fillSilence(c, a, wet, size);
   }
 
   /**
-   * One close-up breath, at the family's resting rhythm (big cats pant for a few
-   * seconds after a run), breathUnderIdle dB under its idle call as heard close up.
+   * The next interval of one of an animal's clocks: drawn around the middle of
+   * `range` s (jitteredIn; × `scale`), never the same as its last, within `span` s when given.
+   */
+  private interval(c: Critter, clock: Clock, range: readonly [number, number], span?: readonly [number, number], scale = 1): number {
+    const prev = c.gaps.get(clock) ?? 0;
+    const g = span
+      ? jittered(((range[0] + range[1]) / 2) * scale, this.rng, prev, span[0], span[1])
+      : jitteredIn([range[0] * scale, range[1] * scale], this.rng, prev);
+    c.gaps.set(clock, g);
+    return g;
+  }
+
+  /**
+   * One close-up breath, at the family's resting rhythm drawn afresh each time
+   * (asleep slower and softer; big cats pant for a few seconds after a run),
+   * breathUnderIdle dB under its idle call as heard close up.
    */
   private breathe(c: Critter, a: AnimalState, size: number): void {
     const h = this.host;
     const body = c.body;
-    const panting = !!body.pants && h.time - c.ranAt < PANT_FOR;
-    const every = panting ? PANT_EVERY : (body.breathEvery ?? BREATH_RANGE);
-    c.nextBreath = h.time + this.rng.range(every[0], every[1]);
-    const level = db2lin((c.sp.levels.idle ?? -12) + FAUNA.focusVocalDb - FAUNA.breathUnderIdle) * Math.min(1, body.breath) * size;
+    const panting = !!body.pants && !c.asleep && h.time - c.ranAt < PANT_FOR;
+    // panting is a steady rhythm; resting and sleeping breaths are not
+    c.nextBreath = h.time + (panting ? this.rng.range(PANT_EVERY[0], PANT_EVERY[1]) : this.interval(c, 'breath', body.breathEvery ?? BREATH_RANGE, undefined, c.asleep ? SLEEP_BREATH : 1));
+    const db = (c.sp.levels.idle ?? -12) + FAUNA.focusVocalDb - FAUNA.breathUnderIdle + (c.asleep ? SLEEP_BREATH_DB : 0);
+    const level = db2lin(db) * Math.min(1, body.breath) * size;
     this.playFoley(c, a, this.familyBank('breath', c.voice), level, body.rateScale * this.rng.range(0.95, 1.05) * (panting ? 1.15 : 1), 0);
   }
 
-  /** A bird ruffles its feathers (no audible breath). */
+  /** A bird ruffles its feathers (no audible breath); asleep rarely, and a sleeping flamingo grunts softly instead now and then. */
   private rustle(c: Critter, a: AnimalState): void {
-    c.nextRustle = this.host.time + this.rng.range(RUSTLE_EVERY[0], RUSTLE_EVERY[1]);
+    c.nextRustle = this.host.time + this.interval(c, 'rustle', c.asleep ? SLEEP_RUSTLE : RUSTLE_EVERY);
+    if (c.asleep && c.voice === 'flamingo' && this.rng.float() < FAUNA.sleepyGruntP && this.start(c, a, SLEEPY_GRUNT, 'focus', FAUNA.sleepyGruntDb)) return;
     this.playFoley(c, a, this.familyBank('rustle', c.voice), FOLEY_GAIN.rustle, 1.25 * c.body.rateScale * this.rng.range(0.9, 1.1), 0);
   }
 

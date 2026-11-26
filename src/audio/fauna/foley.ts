@@ -23,8 +23,8 @@ export interface FoleySpecies {
   pants?: boolean;
   /** Close-up step trim, dB: heavy pad-footed giants walk almost silently. */
   stepDb?: number;
-  /** Close up, the longest silence (steps aside) before something of the animal is heard, s (default QUIET_MAX). */
-  quietMax?: number;
+  /** Close up, the typical silence (steps aside) before something of the awake animal is heard, s (default QUIET): drawn per gap within QUIET_SPAN. */
+  quiet?: number;
   /** Close-up tail swishes. */
   tail?: boolean;
   /** Laps when drinking (cats, bears); others splash or lap by context. */
@@ -35,15 +35,15 @@ export interface FoleySpecies {
   cud?: boolean;
 }
 
-/** Big herbivores breathe slowly and stand quietly: up to this long between close-up sounds, s. */
-const BIG_QUIET = 5;
+/** Big herbivores breathe slowly and stand quietly: a longer typical silence between close-up sounds, s. */
+const BIG_QUIET = 3.6;
 
 export const FOLEY_SPECIES: Readonly<Record<string, FoleySpecies>> = {
-  elephant: { stride: 2.0, mass: 1.0, feet: 'scuff', rateScale: 0.7, breath: 1, breathEvery: [9, 13], stepDb: -8, quietMax: BIG_QUIET, tail: true, grazer: true },
-  hippo: { stride: 1.0, mass: 0.9, feet: 'scuff', rateScale: 0.75, breath: 0.9, breathEvery: [6, 10], stepDb: -8, quietMax: BIG_QUIET, grazer: true },
-  rhino: { stride: 1.2, mass: 0.9, feet: 'scuff', rateScale: 0.75, breath: 0.9, breathEvery: [6, 10], stepDb: -8, quietMax: BIG_QUIET, tail: true, grazer: true },
-  giraffe: { stride: 2.2, mass: 0.6, feet: 'hoofHard', rateScale: 0.85, breath: 0.6, breathEvery: [6, 9], quietMax: BIG_QUIET, tail: true, cud: true },
-  camel: { stride: 1.6, mass: 0.6, feet: 'pad', rateScale: 0.85, breath: 0.6, breathEvery: [6, 9], quietMax: BIG_QUIET, tail: true, grazer: true, cud: true },
+  elephant: { stride: 2.0, mass: 1.0, feet: 'scuff', rateScale: 0.7, breath: 1, breathEvery: [9, 13], stepDb: -8, quiet: BIG_QUIET, tail: true, grazer: true },
+  hippo: { stride: 1.0, mass: 0.9, feet: 'scuff', rateScale: 0.75, breath: 0.9, breathEvery: [6, 10], stepDb: -8, quiet: BIG_QUIET, grazer: true },
+  rhino: { stride: 1.2, mass: 0.9, feet: 'scuff', rateScale: 0.75, breath: 0.9, breathEvery: [6, 10], stepDb: -8, quiet: BIG_QUIET, tail: true, grazer: true },
+  giraffe: { stride: 2.2, mass: 0.6, feet: 'hoofHard', rateScale: 0.85, breath: 0.6, breathEvery: [6, 9], quiet: BIG_QUIET, tail: true, cud: true },
+  camel: { stride: 1.6, mass: 0.6, feet: 'pad', rateScale: 0.85, breath: 0.6, breathEvery: [6, 9], quiet: BIG_QUIET, tail: true, grazer: true, cud: true },
   zebra: { stride: 1.1, mass: 0.45, feet: 'hoofHard', rateScale: 1, breath: 0.45, breathEvery: [4, 7], tail: true, grazer: true },
   gazelle: { stride: 0.8, mass: 0.3, feet: 'hoofHard', rateScale: 1.1, breath: 0.3, breathEvery: [4, 7], tail: true, grazer: true, cud: true },
   lion: { stride: 1.0, mass: 0.12, feet: 'pad', rateScale: 1, breath: 0.9, breathEvery: [4, 6], pants: true, tail: true, laps: true },
@@ -55,13 +55,22 @@ export const FOLEY_SPECIES: Readonly<Record<string, FoleySpecies>> = {
   flamingo: { stride: 0.5, mass: 0.2, feet: 'bird', rateScale: 1.1, breath: 0 },
 };
 
-/** Close up, the longest silence (steps aside) of an animal without its own quietMax, s. */
-export const QUIET_MAX = 2.5;
+/** Close up, the typical silence (steps aside) of an awake animal without its own `quiet`, s ... */
+export const QUIET = 3;
+/** ... each gap drawn within these bounds, s (the looked-at animal is never silent much longer than 5 s). */
+export const QUIET_SPAN: readonly [number, number] = [1.8, 4.6];
 /** Panting after a run: interval [min, max] s, for this long after the run ends, s. */
 export const PANT_EVERY: readonly [number, number] = [1, 1.5];
 export const PANT_FOR = 8;
-/** Birds do not breathe audibly: a soft feather rustle every [min, max] s close up. */
+/** Birds do not breathe audibly: a soft feather rustle every [min, max] s close up ... */
 export const RUSTLE_EVERY: readonly [number, number] = [8, 20];
+/** ... and a sleeping bird is near-silent: a rustle every [min, max] s. */
+export const SLEEP_RUSTLE: readonly [number, number] = [15, 40];
+/** A sleeping animal breathes this much slower than its resting rhythm, and this many dB softer. */
+export const SLEEP_BREATH = 1.4;
+export const SLEEP_BREATH_DB = -3;
+/** Chewing while eating, close up: one chew every [min, max] s. */
+export const CHEW_EVERY: readonly [number, number] = [0.9, 1.6];
 
 /** Shortest and longest resting breath interval over the body families, s. */
 export const BREATH_RANGE: readonly [number, number] = (() => {
