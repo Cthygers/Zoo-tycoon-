@@ -1,10 +1,13 @@
 name: Play internal release
 
 # Builds a signed release bundle (.aab) from the main branch and uploads it to Google Play's
-# INTERNAL testing track. Manual only: Actions → "Play internal release" → Run workflow.
+# INTERNAL testing track. Manual only: Actions → "Play internal release" → Run workflow, started
+# from the repository's default branch (the run refuses any other branch).
 #
-# It can never release to alpha, beta or production: the track is fixed in
-# scripts/play/publish-internal.mjs, which is taken from this workflow's own commit, not from main.
+# The track is fixed to internal in scripts/play/publish-internal.mjs, taken from the default
+# branch's commit (not from main). The service account may also release to closed and open
+# testing, so the secrets belong in the "play-internal" environment, restricted to the default
+# branch (docs/RELEASING.md): then no other branch's code can use them.
 #
 # Three jobs on fresh runners, so the npm/Gradle build never shares a machine with a secret:
 #   plan    - Play service account only: picks a version code above everything Play has seen
@@ -22,7 +25,11 @@ on:
         required: false
         default: ''
       version_name:
-        description: 'Version name (optional; default: versionName in android/app/build.gradle on main)'
+        description: 'Version name, e.g. 0.15.1 (optional; default: versionName in android/app/build.gradle on main)'
+        required: false
+        default: ''
+      min_version_code:
+        description: 'Lowest version code to use (optional; only if Play says a code is already used)'
         required: false
         default: ''
       dry_run:
@@ -52,11 +59,21 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: play-internal
     outputs:
       code: ${{ steps.version.outputs.code }}
       name: ${{ steps.version.outputs.name }}
       sha: ${{ steps.version.outputs.sha }}
     steps:
+      - name: Only from the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "::error::Start this workflow from the default branch ($DEFAULT_BRANCH), not $GITHUB_REF"
+            exit 1
+          fi
+
       - name: Check out the publisher script (this workflow's commit)
         uses: actions/checkout@v4
         with:
@@ -84,6 +101,8 @@ jobs:
         env:
           PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
           INPUT_VERSION_NAME: ${{ inputs.version_name }}
+          INPUT_MIN_VERSION_CODE: ${{ inputs.min_version_code }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
         run: |
           gradle=app/android/app/build.gradle
           gradle_code=$(sed -nE 's/^\s*versionCode\s+([0-9]+)\s*$/\1/p' "$gradle")
@@ -92,11 +111,28 @@ jobs:
             echo "::error::Could not read versionCode/versionName from $gradle on main"
             exit 1
           fi
+          # A name left to default must not go backwards: main has to be ahead of what Play has.
+          if [ -z "$INPUT_VERSION_NAME" ] && (( gradle_code < MIN_VERSION_CODE )); then
+            echo "::error::main's build.gradle is behind Play (versionCode $gradle_code, versionName $gradle_name). Type a version name (e.g. 0.15.1) or bump build.gradle on main"
+            exit 1
+          fi
+          notes_len=$(node -e 'process.stdout.write(String((process.env.RELEASE_NOTES || "").trim().length))')
+          if (( notes_len > 500 )); then
+            echo "::error::The release notes are $notes_len characters; Play allows 500"
+            exit 1
+          fi
+          floor=$(( gradle_code > MIN_VERSION_CODE ? gradle_code : MIN_VERSION_CODE ))
+          if [ -n "$INPUT_MIN_VERSION_CODE" ]; then
+            if [[ ! "$INPUT_MIN_VERSION_CODE" =~ ^[0-9]{1,10}$ ]]; then
+              echo "::error::min_version_code must be a whole number"
+              exit 1
+            fi
+            floor=$(( INPUT_MIN_VERSION_CODE > floor ? INPUT_MIN_VERSION_CODE : floor ))
+          fi
           if [ -z "$PLAY_SERVICE_ACCOUNT_JSON" ]; then
             echo "::error::The PLAY_SERVICE_ACCOUNT_JSON secret is not set"
             exit 1
           fi
-          floor=$(( gradle_code > MIN_VERSION_CODE ? gradle_code : MIN_VERSION_CODE ))
           # Above every version code Play has seen (any track, any uploaded bundle).
           code=$(node release-tools/scripts/play/publish-internal.mjs next-version-code --min "$floor")
           if [[ ! "$code" =~ ^[0-9]+$ ]] || (( code < floor )); then
@@ -122,12 +158,28 @@ jobs:
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      SHA: ${{ needs.plan.outputs.sha }}
+      CODE: ${{ needs.plan.outputs.code }}
+      NAME: ${{ needs.plan.outputs.name }}
     steps:
+      - name: Check the plan
+        run: |
+          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ || ! "$CODE" =~ ^[0-9]+$ || -z "$NAME" ]]; then
+            echo "::error::The plan job's outputs are missing"
+            exit 1
+          fi
+
       - name: Check out main at the planned commit
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
+
+      - name: Confirm the commit
+        run: test "$(git rev-parse HEAD)" = "$SHA"
+
+      - uses: gradle/actions/wrapper-validation@v4
 
       - uses: actions/setup-node@v4
         with:
@@ -146,9 +198,6 @@ jobs:
         run: npm test
 
       - name: Set the version in build.gradle
-        env:
-          CODE: ${{ needs.plan.outputs.code }}
-          NAME: ${{ needs.plan.outputs.name }}
         run: |
           gradle=android/app/build.gradle
           sed -i -E "s/^(\s*versionCode\s+)[0-9]+\s*$/\1$CODE/; s/^(\s*versionName\s+)\"[^\"]+\"\s*$/\1\"$NAME\"/" "$gradle"
@@ -158,14 +207,16 @@ jobs:
 
       - name: Build the web bundle (cloud features off)
         run: |
-          if [ "$(env | grep -c '^VITE_' || true)" != 0 ]; then
-            echo "::error::A VITE_* variable is set; this release must be built without cloud settings"
-            exit 1
-          fi
-          if grep -sqE '^\s*VITE_' .env .env.local .env.production .env.production.local; then
-            echo "::error::main has a .env file with VITE_* settings; this release must be built without cloud settings"
-            exit 1
-          fi
+          # Ask Vite itself (main's config, every .env file it would read, the process env).
+          node --input-type=module -e "
+            import { resolveConfig } from 'vite';
+            const config = await resolveConfig({ logLevel: 'silent' }, 'build', 'production');
+            const found = Object.keys(config.env).filter((k) => k.startsWith('VITE_'));
+            if (found.length) {
+              console.log('::error::This release must be built without cloud settings; found ' + found.join(', '));
+              process.exit(1);
+            }
+          "
           npm run build
 
       - name: Sync Capacitor
@@ -190,6 +241,7 @@ jobs:
     needs: [plan, build]
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    environment: play-internal
     env:
       CODE: ${{ needs.plan.outputs.code }}
       NAME: ${{ needs.plan.outputs.name }}
@@ -228,6 +280,11 @@ jobs:
               exit 1
             fi
           done
+          # The build must hand over an unsigned bundle: the upload key is to be its only signer.
+          if unzip -Z1 unsigned/app-release.aab | grep -qE '^META-INF/([^/]+\.(SF|RSA|DSA|EC)|SIG-.*)$'; then
+            echo "::error::The bundle from the build job is already signed"
+            exit 1
+          fi
           umask 077
           keystore="$RUNNER_TEMP/upload.p12"
           trap 'rm -f "$keystore"' EXIT
@@ -249,6 +306,11 @@ jobs:
         run: |
           jarsigner -verify "$AAB" > "$RUNNER_TEMP/verify.txt"
           grep -q 'jar verified' "$RUNNER_TEMP/verify.txt"
+          blocks=$(unzip -Z1 "$AAB" | grep -cE '^META-INF/[^/]+\.(RSA|DSA|EC)$' || true)
+          if [ "$blocks" != 1 ]; then
+            echo "::error::The bundle has $blocks signature blocks; it must have exactly one (the upload key)"
+            exit 1
+          fi
           unzip -p "$AAB" 'META-INF/*.RSA' | keytool -printcert > "$RUNNER_TEMP/signer.txt"
           signer=$(sed -nE 's/^\s*SHA256:\s*//p' "$RUNNER_TEMP/signer.txt" | head -1)
           if [ "$signer" != "$UPLOAD_CERT_SHA256" ]; then
@@ -263,7 +325,7 @@ jobs:
           grep -q "package=\"$PACKAGE_NAME\"" <<< "$manifest"
           grep -q "android:versionCode=\"$CODE\"" <<< "$manifest"
           grep -qF "android:versionName=\"$NAME\"" <<< "$manifest"
-          echo "Signed by the upload certificate; bundletool validate passed; $PACKAGE_NAME $NAME ($CODE)."
+          echo "Signed only by the upload certificate; bundletool validate passed; $PACKAGE_NAME $NAME ($CODE)."
 
       - name: Keep the signed bundle as a run artifact
         uses: actions/upload-artifact@v4

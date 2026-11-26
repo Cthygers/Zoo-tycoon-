@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createVerify, generateKeyPairSync } from 'node:crypto';
-import { PlayEdits, TRACK, getAccessToken, internalRelease, nextVersionCode, parseServiceAccount, publishInternal } from './publish-internal.mjs';
+import { COMMIT_QUERY, PlayEdits, TRACK, getAccessToken, internalRelease, nextVersionCode, parseServiceAccount, publishInternal } from './publish-internal.mjs';
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const SA_JSON = JSON.stringify({ type: 'service_account', client_email: 'publisher@example.iam.gserviceaccount.com', private_key: privateKey.export({ type: 'pkcs8', format: 'pem' }) });
@@ -11,6 +11,7 @@ const API = 'https://androidpublisher.googleapis.com';
 /** A fake Play: records every call and answers like the v3 API. */
 function fakePlay({ trackCodes = ['15'], bundleCodes = [12, 13, 14, 15], readCode, fail = {} } = {}) {
   const calls = [];
+  const commits = [];
   const edits = new Set();
   let nextEdit = 1;
   const fetchImpl = async (url, init = {}) => {
@@ -36,14 +37,17 @@ function fakePlay({ trackCodes = ['15'], bundleCodes = [12, 13, 14, 15], readCod
       return json(200, { versionCode: readCode, sha1: 'a', sha256: 'b' });
     }
     if (method === 'PUT' && rest === `/tracks/${TRACK}`) return json(200, JSON.parse(init.body));
-    if (method === 'POST' && rest === ':commit') return json(200, { id: m[1] });
+    if (method === 'POST' && rest === ':commit') {
+      commits.push(u.search);
+      return json(200, { id: m[1] });
+    }
     if (method === 'DELETE' && rest === '') {
       edits.delete(m[1]);
       return new Response(null, { status: 204 });
     }
     return json(404, { error: { message: `no route ${key}` } });
   };
-  return { fetchImpl, calls, edits };
+  return { fetchImpl, calls, edits, commits };
 }
 
 test('the token request is a JWT signed with the service account key, for the publisher scope only', async () => {
@@ -103,6 +107,18 @@ test('publish uploads, puts the bundle on the internal track only, commits once'
   assert.ok(p.calls.filter((c) => c.key.includes('/tracks/')).every((c) => c.key.endsWith('/tracks/internal')), 'no other track is ever written');
   assert.equal(p.calls.find((c) => c.key.startsWith('POST /upload')).init.headers['content-type'], 'application/octet-stream');
   assert.ok(p.calls.every((c) => c.init.headers?.authorization === 'Bearer ya29.secret-token'));
+  assert.deepEqual(p.commits, ['?changesInReviewBehavior=ERROR_IF_IN_REVIEW'], 'never cancels another submission in review');
+  assert.equal(COMMIT_QUERY, 'changesInReviewBehavior=ERROR_IF_IN_REVIEW');
+});
+
+test('a commit that times out says the release may have gone through', async () => {
+  const p = fakePlay({ readCode: 16 });
+  const slowCommit = async (url, init = {}) => {
+    if (url.includes(':commit')) throw Object.assign(new Error('aborted'), { name: 'TimeoutError' });
+    return p.fetchImpl(url, init);
+  };
+  const play = new PlayEdits('t', { fetchImpl: slowCommit, apiRoot: API });
+  await assert.rejects(publishInternal(play, { aab: Buffer.from('x'), versionCode: 16, releaseName: '16' }), /timed out; the release may have gone through/);
 });
 
 test('the release body is internal-only and omits empty notes', () => {

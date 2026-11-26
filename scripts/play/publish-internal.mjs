@@ -9,7 +9,8 @@
 //       Prints max(n, highest version code Play has seen + 1) on stdout.
 //   upload --aab <file> --version-code <n> --release-name <text> [--notes-file <file>]
 //       One edit: refuses a version code that is not above Play's highest, uploads the bundle,
-//       sets it as the internal track's only release (status completed) and commits.
+//       sets it as the internal track's only release (status completed) and commits. The commit
+//       never cancels another submission that is in review (it fails instead).
 //
 // The service account key and the access token are never printed. Progress goes to stderr.
 import { createSign } from 'node:crypto';
@@ -23,6 +24,10 @@ const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const API_ROOT = 'https://androidpublisher.googleapis.com';
 /** Play's limit for a release note per language. */
 export const MAX_NOTES = 500;
+/** Commit without touching anything else in review (Play's default cancels and resubmits it). */
+export const COMMIT_QUERY = 'changesInReviewBehavior=ERROR_IF_IN_REVIEW';
+/** Writes Play may take a while to apply; fastlane uses 300 s for every call. */
+const SLOW_WRITE_MS = 300_000;
 
 const log = (msg) => process.stderr.write(`[play] ${msg}\n`);
 
@@ -127,10 +132,16 @@ export class PlayEdits {
     return this.request('POST', `${this.uploadBase}/${editId}/bundles?uploadType=media`, { bytes, timeoutMs: 600_000 });
   }
   setTrack(editId, release) {
-    return this.request('PUT', `${this.base}/${editId}/tracks/${TRACK}`, { json: { track: TRACK, releases: [release] } });
+    return this.request('PUT', `${this.base}/${editId}/tracks/${TRACK}`, { json: { track: TRACK, releases: [release] }, timeoutMs: SLOW_WRITE_MS });
   }
-  commit(editId) {
-    return this.request('POST', `${this.base}/${editId}:commit`);
+  async commit(editId) {
+    try {
+      return await this.request('POST', `${this.base}/${editId}:commit?${COMMIT_QUERY}`, { timeoutMs: SLOW_WRITE_MS });
+    } catch (e) {
+      // A timed-out commit may still have been applied by Play.
+      if (/timed out/.test(e.message)) e.message += '; the release may have gone through, so check Play Console before running again';
+      throw e;
+    }
   }
   async discard(editId) {
     try {
