@@ -123,8 +123,8 @@ const SKIN_DELTA_E = 15;
  * a brown tee on brown skin reads as a bare torso, its rib as a collar), a
  * woman's bottom (worn as a skirt over bare legs: with a top of its colour a
  * dress, one garment from collar to knee, and a coral dress on brown skin reads
- * as one clay-coloured figure, so a woman's garments also keep out of the
- * skin's hue family) and hair (dark red hair on brown skin: a blank head).
+ * as one clay-coloured figure, so tops and a woman's bottoms also keep out of
+ * the skin's hue family) and hair (dark red hair on brown skin: a blank head).
  */
 const DRESS_DELTA_E = 25;
 /**
@@ -237,7 +237,7 @@ function darkerFrom(list: readonly number[], from: number, ok: (c: number) => bo
  * skin, the top differs in lightness from the bottom, a woman with grey or
  * blonde hair never gets a white / cream top (some wear it as a dress: a
  * statue), every top and a woman's bottom stand well apart from the skin
- * (DRESS_DELTA_E; a woman's outside its hue family too), and so does the hair
+ * (DRESS_DELTA_E) and outside its hue family, and so does the hair
  * (re-dyed to the nearest darker shade that does).
  * Only colours drawn from the guest palettes are changed, each to a suitable
  * palette colour chosen by its own index, so it uses no random draws and can run again after
@@ -248,18 +248,20 @@ export function fitOutfit(app: HumanAppearance): void {
   const hi = hairs.indexOf(app.hair);
   if (hi >= 0) app.hair = darkerFrom(hairs, hi, (c) => hairReads(c, app.skin));
   const notSkin = (c: number) => !looksLikeSkin(c, app.skin);
-  const apart = (c: number) => notSkin(c) && deltaE(c, app.skin) >= DRESS_DELTA_E;
-  // a woman's garments may meet as a dress: outside the skin's hue family too
-  const dressApart = (c: number) => apart(c) && !skinHued(c, app.skin);
+  // well apart from the skin and outside its hue family: a woman's garments
+  // may meet as a dress, and any top meets the face and the bare arms (a tan
+  // tee on dark brown skin reads as a bare torso, at night most of all, when
+  // the lightness gap collapses)
+  const apart = (c: number) => notSkin(c) && deltaE(c, app.skin) >= DRESS_DELTA_E && !skinHued(c, app.skin);
   const pi = PANTS.indexOf(app.pants);
-  if (pi >= 0) app.pants = pickFrom(PANTS, pi, app.female ? dressApart : notSkin);
+  if (pi >= 0) app.pants = pickFrom(PANTS, pi, app.female ? apart : notSkin);
   const si = SHIRT.indexOf(app.shirt);
   if (si < 0) return;
   const pantsL = hexToLab(app.pants)[0];
   const paleHair = app.female && hexToLab(app.hair)[0] > PALE_HAIR_L;
   app.shirt = pickFrom(SHIRT, si, (c) => {
     const L = hexToLab(c)[0];
-    return (app.female ? dressApart(c) : apart(c)) && Math.abs(L - pantsL) >= TOP_BOTTOM_L && !(paleHair && L > PALE_TOP_L);
+    return apart(c) && Math.abs(L - pantsL) >= TOP_BOTTOM_L && !(paleHair && L > PALE_TOP_L);
   });
 }
 

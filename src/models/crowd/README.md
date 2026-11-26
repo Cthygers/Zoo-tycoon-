@@ -110,7 +110,10 @@ it comes back into view.
   ground's does, instead of the blue sky fill, and they are marked for the
   night grade (`FIGURE_NIGHT.mark`): the larger of that mark and the lamp
   field's, applied as tone mapping runs (a `toneMapping` wrapper) or to the
-  HDR alpha on the post-FX tier. No lift, so figures don't glow.
+  HDR alpha on the post-FX tier. No lift, so figures don't glow; only the
+  human material lifts the albedo of the darkest skins with the night level
+  (`NIGHT_SKIN_LIFT`, humans/material.ts), which reflect a thirtieth of a
+  white shirt's light.
 * **Lamp light**: animal and human materials call `applyLampField(shader)`
   (props/lights/lampField.ts) last in onBeforeCompile: an R8 field fetch per
   vertex (`vLampLight`, read a little way out along the normal, further up
@@ -122,8 +125,9 @@ it comes back into view.
   HDR alpha on the post-FX tier). On every tier it also gives moonlit figures a highlight
   shoulder (a white coat under the moon reads like a pale wall, not a glow) and
   a toe lift (dark coats such as giraffe patches are not black holes; a
-  material that defines `LF_SKIN` as a 0…1 mask gets a stronger skin toe, so
-  dark faces keep ≈ 1/6 of a white shirt under the moon) by
+  material that defines `LF_SKIN` as a 0…1 mask gets a stronger skin toe, at
+  night in lamp pools too, so dark faces are not black voids beside a white
+  shirt) by
   scaling `gl_FragColor.rgb` just before `<tonemapping_fragment>`, against the
   view's exposure (`toneMappingExposure`, or `viewExposure` from
   render/grade.ts on the post-FX tier, where the gradual mark goes into the

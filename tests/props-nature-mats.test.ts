@@ -152,7 +152,7 @@ describe('wood, paint and stone under the moon', () => {
     const wood = weatheredWoodMaterial();
     expect(wood.userData.nightGround).toBe(STRUCTURE_NIGHT_GROUND);
     expect(woodMaterial().userData.nightGround).toBe(STRUCTURE_NIGHT_GROUND);
-    expect(stoneMaterial().userData.nightGround).toBe(STRUCTURE_NIGHT_GROUND);
+    expect(stoneMaterial().userData.nightGround).toBe(1);
     const m = wood.clone();
     const key = m.customProgramCacheKey();
     applyNightLook(m);

@@ -138,8 +138,11 @@ export function humanDesign(key: HumanBodyKey): HumanDesign {
     ...symmetric([ellipsoid('chest', [0.075 * shW, 1.442, -0.03], [0.085 * shW, 0.03, 0.05], { rot: [0, 0, -0.32], blend: 0.05, part: 'torso' })]),
     // shoulder blades: the back is not a smooth tube
     ...symmetric([ellipsoid('chest', [0.07 * shW, 1.33, -0.075], [0.055 * shW, 0.07, 0.03], { rot: [0, 0, 0.2], blend: 0.05, part: 'torso' })]),
-    // neck
-    cone('neck', [0, 1.44, -0.02], [0, 1.56, -0.005], 0.055, 0.047, { blend: 0.04, part: 'neck' }),
+    // neck, on its own finer grid (on the coarse body grid it was a thin
+    // faceted post), widening at the back of its base into the trapezius so
+    // it joins head and shoulders instead of standing on them
+    cone('neck', [0, 1.44, -0.02], [0, 1.56, -0.005], 0.056, 0.047, { blend: 0.04, part: 'neck', region: 'neck' }),
+    ellipsoid('neck', [0, 1.465, -0.048], [0.062 * shW, 0.045, 0.038], { blend: 0.035, part: 'neck', region: 'neck' }),
   ];
   if (f) {
     torso.push(...symmetric([ellipsoid('chest', [0.055, 1.27, 0.07], [0.058, 0.055, 0.045], { blend: 0.05, part: 'torso' })]));

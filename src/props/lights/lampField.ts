@@ -91,9 +91,10 @@ const MOON_KNEE = 0.08;
 const MOON_TOE = 0.03;
 const MOON_TOE_LIFT = 1.0;
 /**
- * Moonlit toe of dark skin (materials that define LF_SKIN as their dark-skin
+ * Night toe of dark skin (materials that define LF_SKIN as their dark-skin
  * mask 0…1, humans/material.ts): ACES's toe turns a dark face under the moon
- * into a black void above a moonlit shirt (1/15 of a white one). Up to
+ * into a black void above a moonlit shirt (1/15 of a white one), and in a lamp
+ * pool too, where the lamps add little to a dark albedo. Up to
  * 1 + SKIN_TOE_LIFT times its light, easing off over ≈ SKIN_TOE displayed (an
  * exponential, so the curve stays monotonic and a face keeps its lit and
  * shaded side): a dark face keeps ≈ 1/6 of a white shirt. Pale and mid skins
@@ -245,12 +246,17 @@ const FRAGMENT_MARK = /* glsl */ `
   float lfX = min(lfD / ${MOON_KNEE.toFixed(3)}, 12.0);
   float lfX2 = lfX * lfX;
   float lfToe = 1.0 + ${MOON_TOE_LIFT.toFixed(2)} * (1.0 - smoothstep(0.0, ${MOON_TOE.toFixed(3)}, lfD));
+  float lfLit = 1.0;
   #ifdef LF_SKIN
-  // the larger of two monotonic curves is monotonic too
-  lfToe = max(lfToe, 1.0 + ${SKIN_TOE_LIFT.toFixed(2)} * (LF_SKIN) * exp(-lfD / ${SKIN_TOE.toFixed(3)}));
+  // the larger of two monotonic curves is monotonic too; dark skin keeps its
+  // toe in lamp light (lamps add little to a dark albedo, so ACES's toe would
+  // still crush the face), and a blend of monotonic curves stays monotonic
+  float lfSkin = 1.0 + ${SKIN_TOE_LIFT.toFixed(2)} * (LF_SKIN) * exp(-lfD / ${SKIN_TOE.toFixed(3)});
+  lfToe = max(lfToe, lfSkin);
+  lfLit = mix(1.0, lfSkin, uLampMark);
   #endif
   float lfTone = pow(1.0 + lfX2 * lfX2, -0.125) * lfToe;
-  gl_FragColor.rgb *= mix(1.0, lfTone, uLampMark - lfShare * uLampMark);
+  gl_FragColor.rgb *= mix(lfLit, lfTone, uLampMark - lfShare * uLampMark);
 }`;
 
 // The real point lights on the lamps nearest the camera (high tier,

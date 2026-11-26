@@ -922,6 +922,9 @@ export class AnimalSystem {
   // ============================================================= behaviour
   private updateBehaviour(a: AnimalSim, sp: SpeciesDef, dt: number) {
     const n = a.needs;
+    // nobody but a wader beds down in water: a sleeper in a pond (a swimmer
+    // sent to sleep mid-swim) swims or wades ashore first, keeping its goal
+    if (!a.moving && a.goal === 'sleep' && !this.canBedDown(sp, a.x, a.z) && !this.headAshore(a, sp)) this.setGoal(a, 'idle', 2);
     // activity effects while stationary at the goal
     if (!a.moving) {
       switch (a.goal) {
@@ -1124,7 +1127,7 @@ export class AnimalSystem {
     if (r < lazy) {
       if (n.energy < 0.6 && rng.chance(0.5) && this.chooseSleep(a, sp, hid)) return;
       // nobody sits down in a pond: stand and rest instead
-      this.setGoal(a, this.inWater(a, sp) ? 'idle' : 'rest', rng.range(12, 35));
+      this.setGoal(a, this.inWater(a) ? 'idle' : 'rest', rng.range(12, 35));
       return;
     }
     if (r < lazy + 0.15) {
@@ -1258,7 +1261,7 @@ export class AnimalSystem {
       return true;
     }
     if (rng.chance(0.3)) {
-      this.setGoal(a, this.inWater(a, sp) ? 'idle' : 'rest', rng.range(6, 20));
+      this.setGoal(a, this.inWater(a) ? 'idle' : 'rest', rng.range(6, 20));
       return true;
     }
     this.setCtx(a, sp);
@@ -1375,14 +1378,27 @@ export class AnimalSystem {
     return false;
   }
 
-  /** A non-swimmer standing in water (more than ankle deep). */
-  private inWater(a: AnimalSim, sp: SpeciesDef): boolean {
-    return !sp.swims && WATER_LEVEL - this.sim.world.heightAt(a.x, a.z) > WET_DEPTH;
+  /** An animal standing or swimming in water (more than ankle deep). */
+  private inWater(a: AnimalSim): boolean {
+    return this.depthAt(a.x, a.z) > WET_DEPTH;
   }
 
-  /** Can the animal sleep at (x, z)? Not in water, except waders: they sleep standing on one leg. */
+  /**
+   * Can the animal sleep at (x, z)? Not in water, swimmers included (a bear
+   * or hippo lying flat on the pool), except waders: they sleep standing on
+   * one leg.
+   */
   private canBedDown(sp: SpeciesDef, x: number, z: number): boolean {
-    return sp.swims || sp.rig === 'bird' || WATER_LEVEL - this.sim.world.heightAt(x, z) <= WET_DEPTH;
+    return (sp.rig === 'bird' && !sp.swims) || this.depthAt(x, z) <= WET_DEPTH;
+  }
+
+  /** Head for the nearest tile of dry land on the animal's own ground (the search keeps to it), keeping its goal (false: none within reach). */
+  private headAshore(a: AnimalSim, sp: SpeciesDef): boolean {
+    this.setCtx(a, sp);
+    const dry = this.sim.search.nearest(this.tileOf(a.x, a.z), this.pass, (t) => this.depth[t] <= 0, 600);
+    if (dry < 0) return false;
+    this.tileCentre(dry, this.tc);
+    return this.goTo(a, sp, this.tc.x, this.tc.z);
   }
 
   private stopMoving(a: AnimalSim) {
@@ -2276,8 +2292,8 @@ export class AnimalSystem {
     else if (a.moving && a.speed > 0.05) act = a.speed > sp.walkSpeed * 1.45 ? 'run' : 'walk';
     else if (a.moving) act = 'idle';
     else act = ANIMAL_ACTION_FOR_GOAL[a.goal];
-    // never sit (nor, except waders, sleep) in water: stand instead
-    if ((act === 'sit' || (act === 'sleep' && sp.rig !== 'bird')) && !sp.swims && WATER_LEVEL - a.y > WET_DEPTH) act = 'idle';
+    // never sit (nor, except waders, sleep) in water, swimmers in the shallows included: stand instead
+    if ((act === 'sit' || (act === 'sleep' && sp.rig !== 'bird')) && WATER_LEVEL - a.y > WET_DEPTH) act = 'idle';
     if (act !== a.action) {
       a.action = act;
       a.actionTime = 0;

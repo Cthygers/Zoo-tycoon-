@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import type { QualitySettings } from '../src/core/contracts';
 import { PROP_SPECS } from '../src/props/registry';
 import '../src/props/nature';
-import { applyFade, applyOccluderCut, BIG_TRUNK_R, casterDepthMaterial, fadeModeOf, updateFade, fadeUniforms, FOLLOW_CARD_R, FOLLOW_CARD_R_MAX, FOLLOW_CUT_D, OCCLUDER_BELOW, OCCLUDER_D, OCCLUDER_FADE_S, OCCLUDER_OFF_D, OCCLUDER_R, OCCLUDER_SHARE, OCCLUDER_SIDE, setFollowCut, setOcclTop, TREE_GONE, TREE_KEEP_R, TREE_SHADOW_R } from '../src/props/lod/fade';
+import { applyFade, applyOccluderCut, BIG_TRUNK_R, casterDepthMaterial, fadeModeOf, updateFade, fadeUniforms, FOLLOW_CARD_R, FOLLOW_CARD_R_MAX, FOLLOW_CUT_D, OCCLUDER_AIM, OCCLUDER_BELOW, OCCLUDER_D, OCCLUDER_FADE_S, OCCLUDER_OFF_D, OCCLUDER_R, OCCLUDER_SHARE, OCCLUDER_SIDE, setFollowCut, setOcclTop, TREE_GONE, TREE_KEEP_R, TREE_SHADOW_R } from '../src/props/lod/fade';
 import { windDepthMaterial } from '../src/props/wind';
 import { addCrownFade, barkRanks, connectedPieces, trunkRadius } from '../src/props/nature/geo';
 import { buildAcacia, buildBamboo, buildBaobab } from '../src/props/nature/trees';
@@ -425,16 +425,17 @@ describe('follow-mode occluder cut (fences, small structures)', () => {
     expect(sh.vertexShader).toContain('#define PROP_FADE_ON uFadeOccl > 0.0');
     // one value per instance, from its origin: within OCCLUDER_R of the camera, OCCLUDER_SIDE of the line, in front of the subject
     expect(sh.vertexShader).toContain(`float nearR = max( ${OCCLUDER_R.toFixed(2)}, ${OCCLUDER_SHARE.toFixed(2)} * len ) + PROP_OCCL_REACH;`);
-    expect(sh.vertexShader).toContain('float near = anywhere ? 1.0 : 1.0 - smoothstep( nearR - 0.25, nearR, length( co ) );');
+    // every test in or out: no spatial band a still camera could rest in, half dithered
+    expect(sh.vertexShader).toContain('float near = anywhere ? 1.0 : step( length( co ), nearR );');
     expect(sh.vertexShader).toContain('#define PROP_OCCL_REACH 0.00');
-    expect(sh.vertexShader).toContain(`float sideR = ${OCCLUDER_SIDE.toFixed(2)} + PROP_OCCL_REACH;`);
-    expect(sh.vertexShader).toContain('( 1.0 - smoothstep( sideR - 0.15, sideR, side ) )');
-    // at least a metre in front of the subject
-    expect(sh.vertexShader).toContain('( 1.0 - smoothstep( len - front - 0.3, len - front, t ) )');
+    // within OCCLUDER_SIDE of the line (+ reach), at least `front` (a metre) in front of the subject
+    expect(sh.vertexShader).toContain(`float onLine = near * step( side, ${OCCLUDER_SIDE.toFixed(2)} + PROP_OCCL_REACH ) * step( 0.0, t ) * step( t, len - front );`);
     expect(sh.vertexShader).toContain('return propOccluderAt( o, top, 1.0, false );');
-    // only a piece reaching up to the line's height over it (less OCCLUDER_BELOW); without height data, any piece
-    expect(sh.vertexShader).toContain('float lineY = mix( uFadeCam.y, uFadeFocus.y, clamp( t / len, 0.0, 1.0 ) );');
-    expect(sh.vertexShader).toContain(`float tall = smoothstep( lineY - ${(OCCLUDER_BELOW + 0.2).toFixed(2)}, lineY - ${OCCLUDER_BELOW.toFixed(2)}, top );`);
+    // only a piece reaching up to the line to the subject's lower body (OCCLUDER_AIM over its feet; the
+    // focus is 1.1 m up) less OCCLUDER_BELOW; without height data, any piece
+    expect(sh.vertexShader).toContain(`float lineY = mix( uFadeCam.y, uFadeFocus.y - ${(1.1 - OCCLUDER_AIM).toFixed(2)}, clamp( t / len, 0.0, 1.0 ) );`);
+    expect(sh.vertexShader).toContain(`return onLine * step( lineY - ${OCCLUDER_BELOW.toFixed(2)}, top ) * uFadeOccl;`);
+    expect(sh.vertexShader).not.toMatch(/smoothstep\( (nearR|sideR|len - front|-0\.3)/);
     expect(sh.vertexShader).toContain('return o.y + 1e4;');
     expect(sh.vertexShader).not.toContain('#define PROP_OCCL_TOP');
     // a screen-space threshold, not the rank: the whole piece dissolves evenly
@@ -575,7 +576,7 @@ describe('follow-mode occluder cut: never parked half dissolved, only what hides
     applyOccluderCut(den);
     const dv = compile(den).vertexShader;
     // a den the subject stands in goes whole, whichever side of its origin the subject is
-    expect(dv).toContain('onLine = max( onLine, 1.0 - smoothstep( PROP_OCCL_REACH, PROP_OCCL_REACH + 0.4, length( o.xz - uFadeFocus.xz ) ) );');
+    expect(dv).toContain('onLine = max( onLine, step( length( o.xz - uFadeFocus.xz ), PROP_OCCL_REACH + 0.2 ) );');
     expect(dv).not.toContain('#define PROP_OCCL_TOP');
     expect(compile(rock).vertexShader).not.toContain('#define PROP_OCCL_SHELL');
 

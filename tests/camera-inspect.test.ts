@@ -108,9 +108,17 @@ describe('CameraController inspect zoom', () => {
 
   it('frames tall subjects from farther, and small ones at followMinDistance', () => {
     const framing = (id: string) => followFraming(SPECIES_BY_ID[id].height, SPECIES_BY_ID[id].length);
-    expect(framing('giraffe').minDistance).toBeCloseTo(11, 1);
+    expect(framing('giraffe').minDistance).toBeCloseTo(12, 1);
     expect(framing('elephant').minDistance).toBeGreaterThan(6.2);
     expect(framing('elephant').minDistance).toBeLessThan(7.2);
+    // the extra margin only applies to the tallest subjects, and the closest zoom never shrinks as a subject grows
+    expect(followFraming(4, 1).minDistance).toBeCloseTo(8.8, 6);
+    let prev = 0;
+    for (let h = 0.2; h <= 6; h += 0.05) {
+      const d = followFraming(h, 1).minDistance;
+      expect(d).toBeGreaterThanOrEqual(prev);
+      prev = d;
+    }
     for (const id of ['zebra', 'lion', 'penguin', 'gazelle', 'gorilla', 'hippo', 'rhino', 'camel', 'flamingo'])
       expect(framing(id).minDistance).toBeLessThanOrEqual(DEFAULT_LIMITS.followMinDistance);
     // a giraffe is looked at just under its middle (it stands clear of the dock), a zebra at its chest
@@ -119,23 +127,29 @@ describe('CameraController inspect zoom', () => {
   });
 
   it('stops a pinch at a tall subject’s closest zoom, with its head and hooves in frame', () => {
-    const { cam, c } = rig();
-    const g = SPECIES_BY_ID.giraffe;
-    const f = followFraming(g.height, g.length);
-    c.follow(() => ({ x: 70, z: 70, ...f }));
-    for (let i = 0; i < 30; i++) {
-      c.zoomRotateAround(0.8, 0, 0, 0, 0, 0);
-      c.update(1 / 30);
+    // 915×412 and 800×360 phones (the render context caps the horizontal FOV at 68°)
+    for (const [w, h] of [[915, 412], [800, 360]]) {
+      const { cam, c } = rig();
+      cam.aspect = w / h;
+      cam.fov = (2 * Math.atan(Math.tan(34 * (Math.PI / 180)) / cam.aspect)) / (Math.PI / 180);
+      cam.updateProjectionMatrix();
+      const g = SPECIES_BY_ID.giraffe;
+      const f = followFraming(g.height, g.length);
+      c.follow(() => ({ x: 70, z: 70, ...f }));
+      for (let i = 0; i < 30; i++) {
+        c.zoomRotateAround(0.8, 0, 0, 0, 0, 0);
+        c.update(1 / 30);
+      }
+      for (let i = 0; i < 120; i++) c.update(1 / 30);
+      expect(c.distance).toBeCloseTo(f.minDistance, 5);
+      const head = new THREE.Vector3(70, ground + g.height, 70).project(cam).y;
+      const feet = new THREE.Vector3(70, ground, 70).project(cam).y;
+      // the top bar covers the top ~13 % of the height (NDC y > 0.74) and the dock the bottom
+      // ~18 % (y < -0.64): head and hooves stay clear of both with ~20 px to spare
+      expect(head).toBeLessThan(0.64);
+      expect(feet).toBeGreaterThan(-0.55);
+      expect(head).toBeGreaterThan(0.5); // the head is not left far below the top of the frame
     }
-    for (let i = 0; i < 120; i++) c.update(1 / 30);
-    expect(c.distance).toBeCloseTo(f.minDistance, 5);
-    const head = new THREE.Vector3(70, ground + g.height, 70).project(cam).y;
-    const feet = new THREE.Vector3(70, ground, 70).project(cam).y;
-    // on a 20:9 phone the top bar covers the top ~13 % of the height and the dock the bottom ~18 %:
-    // the head stays below the one, the hooves above the other
-    expect(head).toBeLessThan(0.7);
-    expect(feet).toBeGreaterThan(-0.6);
-    expect(head).toBeGreaterThan(0.55); // the head is not left far below the top of the frame
   });
 
   it('eases out to a taller subject’s closest zoom when switching from a person, without a jump', () => {
@@ -148,10 +162,17 @@ describe('CameraController inspect zoom', () => {
     const f = followFraming(SPECIES_BY_ID.giraffe.height, SPECIES_BY_ID.giraffe.length);
     c.follow(() => ({ x: 72, z: 70, ...f }));
     let prev = c.distance;
+    let prevStep = 0;
     for (let i = 0; i < 90; i++) {
       c.update(1 / 30);
-      expect(c.distance).toBeGreaterThanOrEqual(prev - 1e-9);
-      expect(c.distance / prev).toBeLessThan(1.15); // no snap: under 15 % a frame, easing out
+      const step = c.distance / prev - 1;
+      expect(step).toBeGreaterThanOrEqual(-1e-9);
+      expect(step).toBeLessThan(0.09); // no snap: under 9 % a frame
+      // it gathers speed from rest (no lurch at the start) and never overshoots
+      if (i === 0) expect(step).toBeLessThan(0.03);
+      expect(step - prevStep).toBeLessThan(0.04);
+      expect(c.distance).toBeLessThanOrEqual(f.minDistance + 1e-9);
+      prevStep = step;
       prev = c.distance;
     }
     expect(c.distance).toBeCloseTo(f.minDistance, 3);

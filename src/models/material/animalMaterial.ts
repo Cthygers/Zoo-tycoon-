@@ -8,8 +8,8 @@
 //   * albedo mottling (streaked along the hair flow on fur) and a clumpy
 //     roughness spread,
 //   * long hair (manes, shaggy bears) with darker partings between the locks
-//     and a raised fur shell of lock tips (build/furShell.ts) that breaks up
-//     the silhouette, up close only,
+//     (shorter and fainter on pale coats) and a raised fur shell of lock tips
+//     (build/furShell.ts) that breaks up the silhouette, up close only,
 //   * optional hair shine on dark long-haired coats (look.shine, gorilla): a
 //     soft Kajiya–Kay band of the key light and the sky across the hair flow,
 //     broken into locks up close, so a near-black coat still shows its form,
@@ -319,13 +319,15 @@ float crWC = 1.0 - smoothstep(0.25, 0.7, crPix / (crGrain * CR_CLUMP));
   const bool crShell = false;
   #endif
   if (crLong > 0.001 || crShell) {
-    float lock = cr_clump(vRestPos / lockW, crFlow, 0.9);
+    // pale coats (polar bear): shorter locks and fainter partings; long thin
+    // partings on a bright coat read as wavy wood-grain bands
+    float pale = smoothstep(0.55, 0.85, sqrt(dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722))));
+    float lock = cr_clump(vRestPos / lockW, crFlow, mix(0.9, 0.6, pale));
     #if CR_SHELL == 1
     // shell: about half the lock tips stay; fewer toward its border on shorter hair
     if (crShell && lock < 1.02 - 0.55 * crNear * smoothstep(1.6, 2.1, vPattern.w)) discard;
     #endif
-    float pale = smoothstep(0.55, 0.85, sqrt(dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722))));
-    diffuseColor.rgb *= 1.0 + crLong * mix(0.9, 0.35, pale) * (lock - 0.5);
+    diffuseColor.rgb *= 1.0 + crLong * mix(0.9, 0.2, pale) * (lock - 0.5);
   }
 }
 #endif
@@ -537,7 +539,10 @@ if (crFade > 0.001 && crGloss < 0.5) {
   float crSkyE = dot(irradiance + iblIrradiance, vec3(0.2126, 0.7152, 0.0722));
   vec3 crShine = vec3(crSkyE * 0.5 * cr_hairShine(crT, nonPerturbedNormal, crSky, geometryViewDir, crShift));
   #if NUM_DIR_LIGHTS > 0
-  crShine += directLight.color * saturate(dot(nonPerturbedNormal, directLight.direction)) * cr_hairShine(crT, nonPerturbedNormal, directLight.direction, geometryViewDir, crShift);
+  // the key light's band at under half strength: in full sun the diffuse
+  // light already models the body, and a full band turned a sunlit back
+  // into a broad pale sheen
+  crShine += 0.45 * directLight.color * saturate(dot(nonPerturbedNormal, directLight.direction)) * cr_hairShine(crT, nonPerturbedNormal, directLight.direction, geometryViewDir, crShift);
   #endif
   // dark hair only: bare face, chest, palms and soles bake fur ≈ 1, and pale
   // hair (a silverback's saddle) already shows its form, where the band read

@@ -17,7 +17,7 @@
 
 import * as THREE from 'three';
 import { hash3, mulberry32 } from '../core/rng';
-import { STRUCTURE_NIGHT_GROUND } from './nature/mats';
+import { STONE_NIGHT_GROUND, STRUCTURE_NIGHT_GROUND } from './nature/mats';
 
 // ---------------------------------------------------------------------------
 // Tileable noise
@@ -651,9 +651,9 @@ function cached<T extends THREE.Material>(key: string, make: () => T): T {
   return m;
 }
 
-/** Wood, paint and natural stone under the moon: part of the moonlit ground's look (nature/mats.ts applyNightLook, applied by the props layer and fences). */
-export function withNightLook<T extends THREE.Material>(m: T): T {
-  m.userData.nightGround = STRUCTURE_NIGHT_GROUND;
+/** Wood, paint and natural stone under the moon: `share` of the moonlit ground's look (nature/mats.ts applyNightLook, applied by the props layer and fences). */
+export function withNightLook<T extends THREE.Material>(m: T, share = STRUCTURE_NIGHT_GROUND): T {
+  m.userData.nightGround = share;
   return m;
 }
 
@@ -680,7 +680,7 @@ export function paintedMetalMaterial(color: THREE.ColorRepresentation): THREE.Me
 
 /** Natural weathered rock (tile 1.5 m). */
 export function stoneMaterial(): THREE.MeshStandardMaterial {
-  return cached('stone', () => withNightLook(standard('stone', { metalness: 0 })));
+  return cached('stone', () => withNightLook(standard('stone', { metalness: 0 }), STONE_NIGHT_GROUND));
 }
 
 /** Cast concrete (tile 2 m). */
@@ -690,7 +690,7 @@ export function concreteMaterial(): THREE.MeshStandardMaterial {
 
 /** Dry-stone wall face: stacked field stones (tile 2 m × 2 m, courses along U). */
 export function drystoneMaterial(): THREE.MeshStandardMaterial {
-  return cached('drystone', () => withNightLook(standard('drystone', { metalness: 0 }, 1.3)));
+  return cached('drystone', () => withNightLook(standard('drystone', { metalness: 0 }, 1.3), STONE_NIGHT_GROUND));
 }
 
 /** Galvanised chain-link mesh, alpha-blended (tile 0.42 m). Double sided, casts no useful shadow. */

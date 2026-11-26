@@ -7,12 +7,12 @@ import { Capacitor } from '@capacitor/core';
 import { createAudio } from './audio';
 import { CLOSE_HOUR, OPEN_HOUR, QUALITY_KEY, SAVE_KEY, SOUND_KEY } from './core/constants';
 import type { QualityLevel } from './core/contracts';
-import type { AnimalState } from './core/types';
 import { EventBus } from './core/events';
 import { Vector3 } from 'three';
-import { createCreatureFactory, setCreatureFollowCut } from './models';
+import { createCreatureFactory, setCreatureFollowCut, setFigureNightGround } from './models';
 import { createPropsLayer, followBlockers, paintAtlasesOffThread, setFollowCut, setNatureNightGround } from './props';
-import { createRenderContext, detectQuality, nightGroundLevel } from './render';
+import { createRenderContext, detectQuality, nightGroundLevel, type Swimmer } from './render';
+import { SPECIES_BY_ID } from './data/species';
 import { NEW_ZOO_START_MINUTE, createSimulation } from './sim';
 import { createGameUI, showLoadingScreen, showMainMenu } from './ui';
 import { createEntityViews } from './views';
@@ -204,8 +204,12 @@ async function boot() {
   events.on('litterRemoved', () => (litterDirty = true));
   events.on('worldReset', () => (litterDirty = true));
 
-  // moonlit ground plants (grass clumps, ferns, reeds, bushes) take the moonlit ground's look
-  const natureNightGround = () => nightGroundLevel(Math.asin(ctx.sunDirection.y) * (180 / Math.PI));
+  // moonlit ground plants (grass clumps, ferns, reeds, bushes), animals and people take the moonlit ground's look
+  const setNightGround = () => {
+    const level = nightGroundLevel(Math.asin(ctx.sunDirection.y) * (180 / Math.PI));
+    setNatureNightGround(level);
+    setFigureNightGround(level);
+  };
 
   // Compile and first-draw every shader program behind the loading screen, a
   // few materials per frame (see loader.ts): props, creatures, night lights and
@@ -215,7 +219,7 @@ async function boot() {
     ctx.setTimeOfDay(minute, sim.day);
     ctx.settle();
     creatures.update(ctx.camera);
-    setNatureNightGround(natureNightGround());
+    setNightGround();
     props.update(0, ctx.nightFactor, ctx.camera);
     ctx.update(0);
   };
@@ -266,8 +270,23 @@ async function boot() {
     return 1000 / (ctx.quality.level === 'low' ? 30 : 60);
   };
   let nextRender = 0;
-  // this frame's swimming animals, for their ripples on the water (one list, refilled per frame)
-  const swimmers: AnimalState[] = [];
+  // this frame's swimming animals, for their ripples on the water (one list of reused records, refilled per frame)
+  const swimmers: Swimmer[] = [];
+  const collectSwimmers = () => {
+    let n = 0;
+    for (const a of sim.animals.values()) {
+      if (a.action !== 'swim') continue;
+      const s = swimmers[n] ?? (swimmers[n] = { x: 0, z: 0, heading: 0, speed: 0, length: 0 });
+      s.x = a.x;
+      s.z = a.z;
+      s.heading = a.heading;
+      s.speed = a.speed;
+      // juveniles are drawn at 0.4 → 1 of the adult size as they grow
+      s.length = (SPECIES_BY_ID[a.speciesId]?.length ?? 1) * (0.4 + 0.6 * a.growth);
+      n++;
+    }
+    swimmers.length = n;
+  };
 
   // the followed subject as drawn, refreshed each frame without allocating
   const followPos = new Vector3();
@@ -300,10 +319,9 @@ async function boot() {
         litterDirty = false;
         props.setLitter(sim.litter.values());
       }
-      setNatureNightGround(natureNightGround());
+      setNightGround();
       props.update(dt, ctx.nightFactor, ctx.camera);
-      swimmers.length = 0;
-      for (const a of sim.animals.values()) if (a.action === 'swim') swimmers.push(a);
+      collectSwimmers();
       ctx.setWakes(swimmers);
       audio.update(dt, ctx.camera, ui.focus);
       ctx.update(dt);

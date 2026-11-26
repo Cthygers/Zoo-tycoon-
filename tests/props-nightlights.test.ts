@@ -273,7 +273,13 @@ describe('lamp light on creatures', () => {
     applyLampField(shader);
     const fs = shader.fragmentShader;
     expect(fs).toContain('#ifdef LF_SKIN');
-    expect(fs).toContain('lfToe = max(lfToe, 1.0 + 6.50 * (LF_SKIN) * exp(-lfD / 0.018));');
+    expect(fs).toContain('float lfSkin = 1.0 + 6.50 * (LF_SKIN) * exp(-lfD / 0.018);');
+    expect(fs).toContain('lfToe = max(lfToe, lfSkin);');
     expect(fs).toContain('float lfTone = pow(1.0 + lfX2 * lfX2, -0.125) * lfToe;');
+    // in a lamp pool dark skin keeps its toe (at night only); everything else is untouched there
+    expect(fs).toContain('float lfLit = 1.0;');
+    expect(fs).toContain('lfLit = mix(1.0, lfSkin, uLampMark);');
+    expect(fs).toContain('gl_FragColor.rgb *= mix(lfLit, lfTone, uLampMark - lfShare * uLampMark);');
+    expect(fs.indexOf('lfLit = mix(')).toBeLessThan(fs.indexOf('#endif', fs.indexOf('#ifdef LF_SKIN')));
   });
 });

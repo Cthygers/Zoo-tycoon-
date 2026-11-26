@@ -475,7 +475,7 @@ export class PropsLayer implements IPropsLayer {
       // above, so colour variants still merge; their merged copy is registered here too)
       const sm = m as THREE.MeshStandardMaterial;
       if (sm.isMeshStandardMaterial && sm.envMapIntensity !== 1) useEnvMapIntensity(sm);
-      // wood and paint: moonlit like the ground at night (after the plain check: colour variants still merge)
+      // wood, paint and stone: moonlit like the ground at night (after the plain check: colour variants still merge)
       applyNightLook(m);
     }
     if (hasSway(m)) applyWind(m);

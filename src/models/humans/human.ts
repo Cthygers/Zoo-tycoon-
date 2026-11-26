@@ -113,6 +113,7 @@ function buildHumanAsset(key: HumanBodyKey, detail: 0 | 1 | 2): HumanAsset {
       baseAniso: [1, 1.4, 1],
       regions: {
         head: { scale: 0.52 },
+        neck: { scale: 0.55 },
         brim: { scale: 0.3, aniso: [2, 1, 2] },
         armL: { scale: 0.45, aniso: [1, 2, 1] },
         armR: { scale: 0.45, aniso: [1, 2, 1] },
@@ -164,43 +165,61 @@ function buildHumanAsset(key: HumanBodyKey, detail: 0 | 1 | 2): HumanAsset {
     human: hd,
     detail,
   };
-  asset.lod = new HumanLodChain(built.geometry, sphere, built.triangles, fineTriangles(built.geometry, hd));
+  asset.lod = new HumanLodChain(built.geometry, sphere, built.triangles, lodBudgetTriangles(built.geometry, hd));
   return asset;
 }
 
-/** Triangles of the hands and shoes (rest pose: the hands hang beyond the wrists, the shoes sit below the ankles). */
-function fineTriangles(geo: THREE.BufferGeometry, d: HumanDesign): number {
-  const pos = geo.getAttribute('position');
-  const index = geo.getIndex();
-  if (!index) return 0;
-  const [wx, wy] = d.marks.wristL;
-  const handX = wx - 0.04 * d.marks.bodyScale;
-  const ankleY = d.marks.ankleL[1];
-  let n = 0;
-  for (let i = 0; i < index.count; i += 3) {
-    const v = index.getX(i);
-    const x = Math.abs(pos.getX(v)), y = pos.getY(v);
-    if ((x > handX && y < wy) || y < ankleY) n++;
-  }
-  return n;
-}
+/**
+ * Share of each close-up part's triangles on the full mesh that the simplified
+ * levels budget for: about what the body's coarser round-11 grids gave them
+ * (fingers, the heel and toe spring, the shaped knees and calves and the ear
+ * plates are close-up detail of the full mesh only), so the far crowd, which
+ * the overview draws in the hundreds, keeps its triangle budget. The neck's
+ * finer grid counts at half.
+ */
+const LOD_SHARE = { handsShoes: 0.15, legs: 0.45, ears: 0, neck: 0.5 } as const;
 
 /**
- * Share of the hands' and shoes' triangles that the simplified levels budget
- * for (about what the coarse grid gave them before they had their own fine
- * grids), so levels ≥ 1 keep the body's triangle counts: the fingers, the
- * heel and the toe spring are a close-up detail of the full mesh only.
+ * Triangles the simplified levels scale their ratios from: the full mesh's,
+ * with the close-up parts counted at their LOD_SHARE. Parts are told apart in
+ * the rest pose by the baked zone (arm / leg distance) and the landmarks: the
+ * hands hang beyond the wrists, the shoes sit below the ankles, the ears stand
+ * off the sides of the head, the neck rises between the collar and the jaw.
  */
-const FINE_PARTS_LOD_SHARE = 0.2;
+function lodBudgetTriangles(geo: THREE.BufferGeometry, d: HumanDesign): number {
+  const pos = geo.getAttribute('position');
+  const zone = geo.getAttribute('zone');
+  const index = geo.getIndex();
+  if (!index) return pos.count / 3;
+  const m = d.marks;
+  const bs = m.bodyScale, hs = m.headS;
+  const [wx, wy] = m.wristL;
+  const handX = wx - 0.04 * bs;
+  const ankleY = m.ankleL[1];
+  const earY = m.headC[1] - 0.013 * hs, earZ = m.headC[2] - 0.008 * hs;
+  const neckY0 = m.collarY - 0.03 * bs, neckY1 = m.collarY + 0.08 * bs;
+  let budget = 0;
+  for (let i = 0; i < index.count; i += 3) {
+    const v = index.getX(i);
+    const x = Math.abs(pos.getX(v)), y = pos.getY(v), z = pos.getZ(v);
+    const onLeg = zone.getY(v) >= 0;
+    if ((zone.getX(v) >= 0 && x > handX && y < wy) || (onLeg && y < ankleY)) budget += LOD_SHARE.handsShoes;
+    else if (onLeg) budget += LOD_SHARE.legs;
+    else if (x > 0.068 * hs && Math.abs(y - earY) < 0.032 * hs && Math.abs(z - earZ) < 0.024 * hs) budget += LOD_SHARE.ears;
+    else if (x < 0.07 * bs && y > neckY0 && y < neckY1) budget += LOD_SHARE.neck;
+    else budget++;
+  }
+  return budget;
+}
 
-/** A body's LOD chain: like LodChain, with the simplified levels' targets taken without most of the fine parts. */
+/** A body's LOD chain: like LodChain, with the simplified levels' targets scaled to the body's LOD budget (lodBudgetTriangles). */
 class HumanLodChain extends LodChain {
   private readonly ratioScale: number;
   private readonly humanJobs: (SimplifyJob | null)[] = LOD_RATIOS.map(() => null);
 
-  constructor(base: THREE.BufferGeometry, sphere: THREE.Sphere, triangles: number, fine: number) {
+  constructor(base: THREE.BufferGeometry, sphere: THREE.Sphere, triangles: number, budget: number) {
     super(base, sphere, triangles);
-    this.ratioScale = triangles > 0 ? (triangles - fine * (1 - FINE_PARTS_LOD_SHARE)) / triangles : 1;
+    this.ratioScale = triangles > 0 ? Math.min(1, budget / triangles) : 1;
   }
 
   step(level: number): boolean {
@@ -239,7 +258,7 @@ function hairKind(app: HumanAppearance, role: 'guest' | StaffRole): HairKind {
 
 function marksOf(d: HumanDesign): HumanMarks {
   const m = d.marks;
-  return { collarY: m.collarY, waistY: m.waistY, shoeTop: m.shoeTop, eyeL: [...m.eyeL], mouth: [...m.mouth] };
+  return { collarY: m.collarY, waistY: m.waistY, shoeTop: m.shoeTop, eyeL: [...m.eyeL], mouth: [...m.mouth], wristL: [...m.wristL] };
 }
 
 const _tone = new THREE.Color();
@@ -353,6 +372,7 @@ export class HumanModel extends RiggedModel implements BatchedModel {
     }
     this.colors = colors;
     this.cut = cut;
+    this.ctx.girth = cut.inflate;
     this.body = bodyIndex(app.female, app.child);
     this.handIdx = asset.roles.arms.R?.hand ?? -1;
     const hp = asset.rig.rest;

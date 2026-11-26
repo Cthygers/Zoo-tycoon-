@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { Noise, Rng } from '../../core/rng';
 import { projectBoxUVs, withNightLook } from '../materials';
+import { STONE_NIGHT_GROUND } from '../nature/mats';
 import { registerProp } from '../registry';
 import { tiered } from './tiers';
 import { box, cyl, displace, gablePlanes, Kit, kitLod, roof, rod, segs, segScale, skillionPlane, V, wall } from './kit';
@@ -187,7 +188,7 @@ function caveMaterial(): THREE.MeshStandardMaterial {
     });
     caveMat.normalScale.set(1.3, 1.3);
     caveMat.name = 'struct/caveRock';
-    withNightLook(caveMat);
+    withNightLook(caveMat, STONE_NIGHT_GROUND);
     // a 4 m den: the follow-mode occluder cut (lod/fade.ts) tests its centre, so let it reach about its half width;
     // a subject inside it is hidden from every side, so then it goes whole
     caveMat.userData.occluderReach = 1.6;
@@ -345,7 +346,7 @@ function buildDen(v: number): THREE.Object3D {
   const fpos = floor.getAttribute('position') as THREE.BufferAttribute;
   const fuv = floor.getAttribute('uv') as THREE.BufferAttribute;
   for (let i = 0; i < fpos.count; i++) fuv.setXY(i, fpos.getX(i) / tile, fpos.getZ(i) / tile);
-  // near black on the rock texture (the old void material's 0x050403)
+  // near black on the rock texture (≈ sRGB 0x050403)
   floor.setAttribute('color', new THREE.BufferAttribute(new Float32Array(fpos.count * 3).fill(DEN_FLOOR), 3));
   const den = mergeGeometries([g, floor]);
   g.dispose();

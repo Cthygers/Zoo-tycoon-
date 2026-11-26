@@ -76,16 +76,17 @@ describe('human body at close range', () => {
     const lod = a.lod!;
     lod.build(1);
     lod.build(2);
-    // level 0 grew by the fine parts; levels 1-2 stay near half / a quarter of the body without them
+    // level 0 grew by the fine parts (hands, shoes, ears, shaped legs); levels 1-2 stay near half /
+    // a quarter of the body's coarse budget, where those parts count at their round-11 share
     expect(lod.triangles[0]).toBeGreaterThan(3500);
-    expect(lod.triangles[1]).toBeLessThan(0.42 * lod.triangles[0]);
-    expect(lod.triangles[1]).toBeGreaterThan(0.25 * lod.triangles[0]);
+    expect(lod.triangles[1]).toBeLessThan(0.3 * lod.triangles[0]);
+    expect(lod.triangles[1]).toBeGreaterThan(0.2 * lod.triangles[0]);
     expect(lod.triangles[2]).toBeLessThan(0.6 * lod.triangles[1]);
     // every level keeps the attribute set of level 0 (one batch)
     for (const l of [1, 2]) expect(Object.keys(lod.levels[l]!.attributes).sort()).toEqual(Object.keys(a.geometry.attributes).sort());
   });
 
-  it('rests folded forearms on a heavy belly, not in it', () => {
+  it('rests folded forearms on the belly whatever the build: touching it, neither in it nor floating', () => {
     // first seed whose resting arms are folded (anim/human.ts restArms row 1)
     let seed = 0;
     while (hash1(seed, 41) < 0.34 || hash1(seed, 41) >= 0.6) seed++;
@@ -109,7 +110,7 @@ describe('human body at close range', () => {
       const girth = g.getAttribute('girth'), zone = g.getAttribute('zone');
       const inflate = (build - 1) * 0.09;
       const p = new THREE.Vector3(), n = new THREE.Vector3(), q = new THREE.Vector3();
-      let deepest = 0;
+      let deepest = -Infinity;
       for (let v = 0; v < pos.count; v++) {
         // the front of the trunk between the hips and the chest
         if (zone.getX(v) >= 0 || zone.getY(v) >= 0 || pos.getY(v) < 0.9 || pos.getY(v) > 1.35 || pos.getZ(v) < 0.02) continue;
@@ -138,9 +139,11 @@ describe('human body at close range', () => {
       return deepest;
     };
     for (const female of [false, true]) {
-      expect(sink(1, female)).toBeLessThanOrEqual(0);
-      // a heavy build's belly may touch the back of the forearm, never cut through to its front
-      expect(sink(1.2, female)).toBeLessThan(0.016);
+      for (const build of [0.85, 1, 1.2]) {
+        const s = sink(build, female);
+        expect(s, `build ${build}`).toBeLessThanOrEqual(0.003);
+        expect(s, `build ${build}`).toBeGreaterThan(-0.006);
+      }
     }
   });
 });

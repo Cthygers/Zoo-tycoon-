@@ -3,12 +3,12 @@
 
 import * as THREE from 'three';
 import { Noise, Rng } from '../../core/rng';
+import { setOcclTop } from '../lod/fade';
 import { atlas, cellUV, hedgeTextures, leafMaterial, soilTextures } from './atlases';
 import { barkMat } from './barks';
 import { addCrownFade, addRibbon, addTube, CardSet, type Ellipsoid, ellipsoidNormal, groupOf, MeshData, v3, type V3 } from './geo';
 import { barkMaterial, cachedMaterial, detail, GROUND_PLANT_OCCLUDER, natureQuality } from './mats';
 import { graniteMaterial } from './rocks';
-import { setOcclTop } from '../lod/fade';
 import { sstep } from './tex';
 import { crownOf, growTree, leafAO, meshBark, placeLeaves, type TreeSpec } from './treegen';
 

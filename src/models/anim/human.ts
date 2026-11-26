@@ -180,16 +180,26 @@ const REST_ARMS: readonly (readonly [ArmPose | null, ArmPose | null])[] = [
   [null, [-0.55, 0.9, 1.37, -1.53]],
 ];
 
+/**
+ * Folded arms follow the build: REST_ARMS row 1 rests the forearms on a belly
+ * of girth FOLD_FIT_GIRTH (m, AnimCtx.girth; a woman's fuller chest meets
+ * them at a slimmer build), and each metre of girth less draws the upper arms
+ * back by FOLD_GIRTH_LEAN rad (more forward for a heavier build), so a slim
+ * build's forearms lie on its belly instead of floating in front of it.
+ */
+const FOLD_FIT_GIRTH = { M: 0.011, F: 0.004 } as const;
+const FOLD_GIRTH_LEAN = 3.7;
+
 /** This person's standing arm pose (REST_ARMS row; 0 = hanging). */
 function restArms(ctx: AnimCtx): number {
   const h = hash1(ctx.seed, 41);
   return h < 0.34 ? 0 : h < 0.6 ? 1 : h < 0.8 ? 2 : 3;
 }
 
-/** `arm` with its (untwisted) walking pose eased toward the resting pose `rest` by k. */
-function armToward(ctx: AnimCtx, pose: Pose, side: Side, forward: number, out: number, elbow: number, rest: ArmPose | null, k: number): void {
+/** `arm` with its (untwisted) walking pose eased toward the resting pose `rest` (its forward swing offset by `lean`) by k. */
+function armToward(ctx: AnimCtx, pose: Pose, side: Side, forward: number, out: number, elbow: number, rest: ArmPose | null, k: number, lean = 0): void {
   if (!rest) return arm(ctx, pose, side, forward, out, elbow);
-  arm(ctx, pose, side, forward + (rest[0] - forward) * k, out + (rest[1] - out) * k, elbow + (rest[2] - elbow) * k, rest[3] * k);
+  arm(ctx, pose, side, forward + (rest[0] + lean - forward) * k, out + (rest[1] - out) * k, elbow + (rest[2] - elbow) * k, rest[3] * k);
 }
 
 /**
@@ -206,16 +216,19 @@ function arms(ctx: AnimCtx, st: HumanState, pose: Pose): void {
   const sway = 0.03 * Math.sin(ctx.time * 0.9 + ctx.seed);
   const hold = ctx.holding;
   const carry = hold === 'food' || hold === 'drink' || hold === 'icecream';
-  const [restL, restR] = REST_ARMS[hold === 'none' ? restArms(ctx) : 0];
+  const row = hold === 'none' ? restArms(ctx) : 0;
+  const [restL, restR] = REST_ARMS[row];
+  const fit = FOLD_FIT_GIRTH[ctx.sex];
+  const lean = row === 1 ? FOLD_GIRTH_LEAN * ((ctx.girth ?? fit) - fit) : 0;
   const still = smooth(0.15, 0, st.amp);
   // each arm is furthest forward as the opposite heel strikes
   const fwd = Math.cos(ph);
-  armToward(ctx, pose, 'L', -swing * fwd + sway, ARM_HANG_OUT, bend + 0.25 * st.amp * Math.max(0, -fwd), restL, still);
+  armToward(ctx, pose, 'L', -swing * fwd + sway, ARM_HANG_OUT, bend + 0.25 * st.amp * Math.max(0, -fwd), restL, still, lean);
   shoulder(ctx, pose, 'L', -fwd * st.amp);
   if (carry) arm(ctx, pose, 'R', 0.18 + 0.05 * fwd * st.amp, -0.12, 1.35, 0.25);
   else if (hold === 'balloon') arm(ctx, pose, 'R', 0.35, 0.05, 0.6);
   else {
-    armToward(ctx, pose, 'R', swing * fwd * (hold === 'gift' ? 0.4 : 1) - sway, ARM_HANG_OUT, bend + 0.25 * st.amp * Math.max(0, fwd), restR, still);
+    armToward(ctx, pose, 'R', swing * fwd * (hold === 'gift' ? 0.4 : 1) - sway, ARM_HANG_OUT, bend + 0.25 * st.amp * Math.max(0, fwd), restR, still, lean);
     shoulder(ctx, pose, 'R', fwd * st.amp);
   }
 }

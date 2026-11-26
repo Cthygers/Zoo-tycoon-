@@ -136,8 +136,16 @@ export const OCCLUDER_D = 11;
 export const OCCLUDER_OFF_D = 13;
 /** Seconds the occluder cut takes to cross-fade on or off (time, not zoom: nothing rests half dissolved). */
 export const OCCLUDER_FADE_S = 0.3;
-/** A piece is cut only if its top reaches within this distance (m) under the camera → subject line above it. */
-export const OCCLUDER_BELOW = 0.3;
+/** Height (m) above the subject's feet of the point the cuts aim at (its body, not its feet). */
+const FOCUS_UP = 1.1;
+/**
+ * A piece is cut only if its top reaches the line from the camera to this
+ * height (m) above the subject's feet (its lower legs: a piece below that
+ * line hides at most its hooves, even of a sitting or lying animal) …
+ */
+export const OCCLUDER_AIM = 0.3;
+/** … less this margin (m). */
+export const OCCLUDER_BELOW = 0.1;
 /** Horizontal camera → piece distance (m) within which a fence piece or small structure on the line is cut… */
 export const OCCLUDER_R = 4;
 /** … or within this share of the horizontal camera → subject distance, if farther (a feeder in front of a giraffe followed from 8 m). */
@@ -196,7 +204,7 @@ float propTreeF( mat4 M, vec3 lineEnd, float grow ) {
   vec3 a = transpose( R ) * ( uFadeCam - M[ 3 ].xyz ) / s2;
   vec3 b = transpose( R ) * ( lineEnd - M[ 3 ].xyz ) / s2;
   vec3 c = aCrown.xyz * 0.01;
-  vec2 cr = aCrownR * 0.01;
+  vec2 cr = aCrownR.xy * 0.01;
   float g = grow * inversesqrt( s2 );
   // crown, scaled to a unit sphere
   vec3 inv = 1.0 / ( vec3( cr.x, cr.y, cr.x ) + g );
@@ -266,22 +274,21 @@ float propOccluderAt( vec3 o, float top, float front, bool anywhere ) {
   vec2 dir = cs / len;
   float t = dot( co, dir );
   float side = abs( co.x * dir.y - co.y * dir.x );
-  // narrow bands: a piece is in or out; the dither only softens the switch
-  // a bulky piece (PROP_OCCL_REACH: its half width) counts from farther out
+  // every test is in or out (no band a still camera could rest in, half
+  // dithered): only the cut's own short time cross-fade (uFadeOccl)
+  // dissolves a piece; a bulky piece (PROP_OCCL_REACH: its half width)
+  // counts from farther out
   float nearR = max( ${OCCLUDER_R.toFixed(2)}, ${OCCLUDER_SHARE.toFixed(2)} * len ) + PROP_OCCL_REACH;
-  float near = anywhere ? 1.0 : 1.0 - smoothstep( nearR - 0.25, nearR, length( co ) );
-  float sideR = ${OCCLUDER_SIDE.toFixed(2)} + PROP_OCCL_REACH;
-  float onLine = near * ( 1.0 - smoothstep( sideR - 0.15, sideR, side ) )
-               * smoothstep( -0.3, 0.0, t ) * ( 1.0 - smoothstep( len - front - 0.3, len - front, t ) );
+  float near = anywhere ? 1.0 : step( length( co ), nearR );
+  float onLine = near * step( side, ${OCCLUDER_SIDE.toFixed(2)} + PROP_OCCL_REACH ) * step( 0.0, t ) * step( t, len - front );
 #ifdef PROP_OCCL_SHELL
   // a den the subject stands in hides it from every side: it goes whole
-  onLine = max( onLine, 1.0 - smoothstep( PROP_OCCL_REACH, PROP_OCCL_REACH + 0.4, length( o.xz - uFadeFocus.xz ) ) );
+  onLine = max( onLine, step( length( o.xz - uFadeFocus.xz ), PROP_OCCL_REACH + 0.2 ) );
 #endif
-  // only a piece reaching up to the line hides the subject: a low stone,
-  // kerb, tuft or a rock in the foreground under the view stays
-  float lineY = mix( uFadeCam.y, uFadeFocus.y, clamp( t / len, 0.0, 1.0 ) );
-  float tall = smoothstep( lineY - ${(OCCLUDER_BELOW + 0.2).toFixed(2)}, lineY - ${OCCLUDER_BELOW.toFixed(2)}, top );
-  return onLine * tall * uFadeOccl;
+  // only a piece reaching up to the line to the subject's lower legs hides
+  // it: a low stone, kerb, tuft or a rock in the foreground under the view stays
+  float lineY = mix( uFadeCam.y, uFadeFocus.y - ${(FOCUS_UP - OCCLUDER_AIM).toFixed(2)}, clamp( t / len, 0.0, 1.0 ) );
+  return onLine * step( lineY - ${OCCLUDER_BELOW.toFixed(2)}, top ) * uFadeOccl;
 }
 #ifdef PROP_FADE_CARDS
 // leaf card centre (model space, cm; nature/geo.ts addCrownFade)
@@ -447,9 +454,10 @@ if ( vPropFade > vPropRank ) discard;
 `;
 
 // occluders: an instance-wide value against a screen-space threshold
-// (interleaved gradient noise), so a piece dissolves evenly as a whole; the
-// threshold spans only the middle of the range, so a piece that is nearly in
-// or out is whole or gone, never a sprinkle of specks
+// (interleaved gradient noise), so a piece dissolves evenly as a whole during
+// the cut's time cross-fade; the threshold spans only the middle of the
+// range, so a piece that is nearly in or out is whole or gone, never a
+// sprinkle of specks
 const OCCLUDER_THRESHOLD = '0.3 + 0.4 * fract( 52.9829189 * fract( dot( gl_FragCoord.xy, vec2( 0.06711056, 0.00583715 ) ) ) )';
 const OCCLUDER_DISCARD = /* glsl */ `
 if ( vPropFade > ${OCCLUDER_THRESHOLD} ) discard;
@@ -715,7 +723,7 @@ export function updateFade(camPos: THREE.Vector3, focus: THREE.Vector3, enabled:
   u.uFadeCam.value.copy(camPos);
   // aim at the subject's body, not its feet
   _dir.copy(aim);
-  _dir.y += 1.1;
+  _dir.y += FOCUS_UP;
   u.uFadeFocus.value.copy(_dir);
   u.uFadeParams.value.x = THREE.MathUtils.clamp(d * 0.3, 2.2, 5.5);
   u.uFadeMargin.value.y = THREE.MathUtils.clamp(d * 0.12, 1.0, 2.2);

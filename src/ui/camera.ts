@@ -48,13 +48,21 @@ const LIFT_FROM = 12;
 
 /**
  * Closest follow distance per metre of a subject's height and of its body
- * length: on a 20:9 phone (915×412 down to 800×360) a 5 m giraffe stands
- * whole between the top bar and the dock, head to hooves, at 11 m, and a
- * 3.2 m high, 6 m long elephant shows whole beside the info sheet from 7 m.
- * Smaller subjects stay at followMinDistance.
+ * length: on a 20:9 phone (915×412 down to 800×360) a 3.2 m high, 6 m long
+ * elephant shows whole beside the info sheet from 7 m. Smaller subjects stay
+ * at followMinDistance.
  */
 const FIT_PER_HEIGHT = 2.2;
 const FIT_PER_LENGTH = 1.1;
+/**
+ * Extra distance per metre of height above FIT_TALL_FROM: the look point of
+ * a tall subject sits under its middle, and a giraffe's head and hooves need
+ * a margin for the top bar, the dock and the ±20 px the follow ease sways
+ * the frame by, so a 5 m giraffe is framed from 12 m (not 11) while the
+ * elephant's closest zoom stays as it was.
+ */
+const FIT_TALL_PER_HEIGHT = 1;
+const FIT_TALL_FROM = 4;
 /** Look-point height as a share of the subject's height: the chest or middle of most subjects… */
 const LOOK_SHARE = 0.55;
 /**
@@ -72,8 +80,12 @@ const TALL_FULL = 5;
  */
 export function followFraming(height: number, length: number): { lookHeight: number; minDistance: number } {
   const share = LOOK_SHARE + (LOOK_SHARE_TALL - LOOK_SHARE) * THREE.MathUtils.clamp((height - TALL_FROM) / (TALL_FULL - TALL_FROM), 0, 1);
-  return { lookHeight: share * height, minDistance: Math.max(FIT_PER_HEIGHT * height, FIT_PER_LENGTH * length) };
+  const fitHeight = FIT_PER_HEIGHT * height + FIT_TALL_PER_HEIGHT * Math.max(0, height - FIT_TALL_FROM);
+  return { lookHeight: share * height, minDistance: Math.max(fitHeight, FIT_PER_LENGTH * length) };
 }
+
+/** Angular rate (1/s) of the critically damped closest-zoom ease: 95 % of the way in ≈ 0.8 s. */
+const FLOOR_EASE = 6;
 
 /**
  * Follow yaw swing around a large rock that hides the followed subject (an
@@ -107,8 +119,13 @@ export interface FollowBlockerHit {
   side: number;
 }
 
-/** Fills `out` with the rocks between the camera and the subject, nearest the camera first; returns their number. */
-export type FollowBlockerQuery = (cam: THREE.Vector3, subject: THREE.Vector3, out: FollowBlockerHit[]) => number;
+/**
+ * Fills `out` with the rocks between the camera and the subject, nearest the
+ * camera first; returns their number. `subject` is a point in its body;
+ * `topY` (world height) its top, so a rock that hides the body or the head
+ * counts (props followBlockers).
+ */
+export type FollowBlockerQuery = (cam: THREE.Vector3, subject: THREE.Vector3, out: FollowBlockerHit[], topY?: number) => number;
 
 const _ray = new THREE.Ray();
 const _v = new THREE.Vector3();
@@ -116,6 +133,7 @@ const _anchor = new THREE.Vector3();
 const _hit = new THREE.Vector3();
 const _look = new THREE.Vector3();
 const _subject = new THREE.Vector3();
+const _probe = new THREE.Vector3();
 
 function easeInOut(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
@@ -139,6 +157,8 @@ export class CameraController {
    * up, or a taller subject is picked) eases out, carrying the view with it.
    */
   private floor: number;
+  /** Rate (m/s) of a rising floor (FLOOR_EASE). */
+  private floorVel = 0;
   /** Closest zoom for the followed subject (followMinDistance or more, see followFraming). */
   private followFloor: number;
   /** Height (m) of the look point above the ground target (rises when close to a followed entity). */
@@ -167,6 +187,8 @@ export class CameraController {
   private followFn: FollowFn | null = null;
   private keys = new Set<string>();
   private readonly blockerHits: FollowBlockerHit[] = [];
+  /** Scratch hits of dodgeSide's look-ahead queries (blockerHits keeps this frame's). */
+  private readonly probeHits: FollowBlockerHit[] = [];
   /** Net yaw (rad) swung around rocks since following began or the player last turned the view. */
   private dodged = 0;
   /** Current swing rate (rad/s) and the direction (±1, 0 = none) of the swing around the rock in the way. */
@@ -210,6 +232,7 @@ export class CameraController {
     if (!this.followFn) {
       // a jump, not a glide: drop what is left of an ended follow's close-up framing
       this.floor = this.limits.minDistance;
+      this.floorVel = 0;
       this.lift = 0;
       this.focusOff.set(0, 0);
     }
@@ -402,16 +425,32 @@ export class CameraController {
 
   /**
    * Move the closest zoom to `want`: lowering it is immediate; raising it (after
-   * following, or for a taller subject) eases, carrying a closer view smoothly out.
+   * following, or for a taller subject) eases, carrying a closer view smoothly
+   * out. The ease is a critically damped spring (FLOOR_EASE) that starts from
+   * rest, so the zoom-out gathers speed instead of lurching at its start.
    */
   private easeFloor(want: number, dt: number): void {
     if (this.floor >= want) {
       this.floor = want;
+      this.floorVel = 0;
       return;
     }
-    this.floor = Math.max(this.floor, Math.min(this.distance, want));
-    this.floor += (want - this.floor) * (1 - Math.exp(-dt * 4));
-    if (want - this.floor < 0.01) this.floor = want;
+    // a view already farther out than the floor is not carried: the floor starts from it, at rest
+    const from = Math.min(this.distance, want);
+    if (from > this.floor) {
+      this.floor = from;
+      this.floorVel = 0;
+    }
+    // exact step of x'' = -w²(x - want) - 2w x'
+    const gap = this.floor - want;
+    const k = (this.floorVel + FLOOR_EASE * gap) * dt;
+    const decay = Math.exp(-FLOOR_EASE * dt);
+    this.floor = want + (gap + k) * decay;
+    this.floorVel = (this.floorVel - FLOOR_EASE * k) * decay;
+    if (want - this.floor < 0.01) {
+      this.floor = want;
+      this.floorVel = 0;
+    }
     if (this.distance < this.floor) this.distance = this.floor;
   }
 
@@ -424,8 +463,12 @@ export class CameraController {
   private dodgeRocks(p: NonNullable<ReturnType<FollowFn>>, dt: number): void {
     let want = 0;
     if (this.blockerQuery && this.distance <= DODGE_RANGE) {
-      _subject.set(p.x, this.groundHeight(p.x, p.z) + Math.max(DODGE_AIM_MIN, p.lookHeight ?? 0), p.z);
-      const blocked = this.blockerQuery(this.camera.position, _subject, this.blockerHits) > 0;
+      // the segments to the subject's body and to its top (the look height is about its middle)
+      const gy = this.groundHeight(p.x, p.z);
+      const aim = Math.max(DODGE_AIM_MIN, p.lookHeight ?? 0);
+      _subject.set(p.x, gy + aim, p.z);
+      const topY = gy + 2 * aim;
+      const blocked = this.blockerQuery(this.camera.position, _subject, this.blockerHits, topY) > 0;
       const touching = this.interacting > 0 || this.velYaw !== 0 || this.keys.size > 0;
       if (touching && this.gestureTurn > TURN_INTENT) {
         // the player chose this yaw: the budget starts over from it
@@ -437,9 +480,8 @@ export class CameraController {
         this.blockKept = false;
         this.dodgeDir = 0;
       } else if (!touching && !this.blockKept) {
-        // orbit away from the rock's side (a larger yaw moves the camera screen-right), and
-        // keep that direction while this rock is in the way
-        if (this.dodgeDir === 0) this.dodgeDir = -this.blockerHits[0].side;
+        // keep one direction while this rock is in the way
+        if (this.dodgeDir === 0) this.dodgeDir = this.dodgeSide(topY);
         const left = DODGE_MAX - this.dodgeDir * this.dodged;
         want = this.dodgeDir * DODGE_RATE * THREE.MathUtils.clamp(left / DODGE_SLOW, 0, 1);
       }
@@ -457,6 +499,27 @@ export class CameraController {
     this.yaw += step;
     this.dodged += step;
     this.clampOrbit();
+  }
+
+  /**
+   * Direction (±1; a larger yaw moves the camera screen-right) to swing in:
+   * away from the nearest rock's side, unless only the other side's full
+   * swing (DODGE_MAX) ends with the subject in view. Two queries, once per
+   * rock in the way. Expects _subject and blockerHits from this frame's query.
+   */
+  private dodgeSide(topY: number): number {
+    const away = -this.blockerHits[0].side;
+    const query = this.blockerQuery;
+    if (!query) return away;
+    const clearAfter = (dir: number): boolean => {
+      // the camera orbited about the subject by dir · DODGE_MAX
+      const a = dir * DODGE_MAX;
+      const rx = this.camera.position.x - _subject.x;
+      const rz = this.camera.position.z - _subject.z;
+      _probe.set(_subject.x + rx * Math.cos(a) + rz * Math.sin(a), this.camera.position.y, _subject.z - rx * Math.sin(a) + rz * Math.cos(a));
+      return query(_probe, _subject, this.probeHits, topY) === 0;
+    };
+    return !clearAfter(away) && clearAfter(-away) ? -away : away;
   }
 
   // ------------------------------------------------------------ keyboard (desktop)

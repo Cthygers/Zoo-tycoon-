@@ -11,12 +11,16 @@
 //                                are per-instance texels of the batch data
 //                                texture (HUMAN_LOOK_TEXELS, see writeHumanLook)
 //                                passed to the fragment shader as flat varyings.
-// Both get warm light from the night lamps a person stands under
-// (props/lights/lampField.ts, applied last in onBeforeCompile), and the same
-// surface model: skin with a warm subsurface wrap, matte fabric (drape folds,
-// a sheen in its own colour, no white grazing reflection), hair with volume
-// (a lit crown, shaded under-layers, locks, a wavering hairline), the body's
-// creases baked per vertex (between the fingers, the armpits), and a face
+// Both take the moonlit night look of every figure (material/figureNight.ts:
+// neutral moonlight in the albedo's own hue, so dark faces stay brown and pale
+// shirts grey, not slate blue), warm light from the night lamps a person
+// stands under (props/lights/lampField.ts, applied last in onBeforeCompile),
+// and the same surface model: skin with a warm subsurface wrap, matte fabric
+// (drape folds, soft creases at the joints shaded as a bump, a sheen in its
+// own colour, no white grazing reflection), hair with volume (a lit crown,
+// shaded under-layers, locks, a wavering hairline), the body's creases baked
+// per vertex (between the fingers, the armpits) and painted where the mesh is
+// too coarse (the grooves between the fingers), and a face
 // painted where the coarse mesh cannot model it (eye sockets, the shade beside
 // and under the nose, the mouth line, the chin's and the hair's shadows): marks
 // that keep their darkness at a distance instead of sparkling.
@@ -26,6 +30,7 @@ import { HIGHLIGHT_FN_GLSL, NOISE_GLSL } from '../material/shaderChunks';
 import { crowdDepthMaterial, type BatchMaterials } from '../crowd/materials';
 import { crowdUniforms, patchCrowdVertex } from '../crowd/skinning';
 import { applyLampField } from '../../props/lights/lampField';
+import { applyFigureNight } from '../material/figureNight';
 
 export interface HumanColors {
   skin: number;
@@ -75,7 +80,12 @@ export interface HumanMarks {
   shoeTop: number;
   eyeL: [number, number, number];
   mouth: [number, number, number];
+  /** Left wrist joint (rest), the origin of the hand frame for the finger grooves (default: the adult man's). */
+  wristL?: [number, number, number];
 }
+
+/** The adult man's left wrist (rest, humans/design.ts). */
+const ADULT_WRIST: [number, number, number] = [0.4, 0.906, -0.01];
 
 export type HumanMaterial = THREE.MeshStandardMaterial & { userData: { human: HumanUniforms } };
 
@@ -90,6 +100,7 @@ interface HumanUniforms {
   uMarks: { value: THREE.Vector3 };
   uEye: { value: THREE.Vector3 };
   uMouth: { value: THREE.Vector3 };
+  uWrist: { value: THREE.Vector3 };
   uMicro: { value: number };
   /** humanStyle bits. */
   uStyle: { value: number };
@@ -110,6 +121,8 @@ interface ColorExpr {
   marks: string;
   eye: string;
   mouth: string;
+  /** left wrist (rest) */
+  wrist: string;
   /** humanStyle bits (float) */
   style: string;
 }
@@ -131,6 +144,23 @@ float hm_stripe(float x, float w) {
   vec2 a = vec2(x - 0.5 * w, x + 0.5 * w);
   vec2 i = floor(a) * 0.5 + max(fract(a) - 0.5, 0.0);
   return (i.y - i.x) / w;
+}
+// Lines of half-width hw (periods) centred on the integers, box-filtered the
+// same way: their exact coverage of a footprint w periods wide.
+float hm_lines(float x, float hw, float w) {
+  w = max(w, 1e-4);
+  vec2 a = vec2(x + hw - 0.5 * w, x + hw + 0.5 * w);
+  vec2 i = floor(a) * 2.0 * hw + min(fract(a), 2.0 * hw);
+  return (i.y - i.x) / w;
+}
+// A height field h (m) on the surface shaded as a bump (three's
+// perturbNormalArb on the screen-space derivatives; fragment stage only).
+vec3 hm_bump(vec3 n, float h, float faceDir) {
+  vec3 px = dFdx(-vViewPosition), py = dFdy(-vViewPosition);
+  vec3 r1 = cross(py, n), r2 = cross(n, px);
+  float det = dot(px, r1) * faceDir;
+  vec3 grad = sign(det) * (dFdx(h) * r1 + dFdy(h) * r2);
+  return normalize(abs(det) * n - grad);
 }`;
 
 // Detail that is not geometry (fabric drape, hair locks, face marks) is sized
@@ -140,6 +170,9 @@ float hm_stripe(float x, float w) {
 // into soft smudges of the same total darkness instead of vanishing, so a face
 // keeps its eyes and brows at 4–8 m.
 
+/** Albedo lift of the darkest skins in deep night (× the figures' night level). */
+const NIGHT_SKIN_LIFT = 0.8;
+
 /** Clothing / skin / face colouring (replaces <color_fragment>); sets hmCol, hmRough and the skin / fabric / hair masks. */
 function humanColorGLSL(e: ColorExpr): string {
   return `#include <color_fragment>
@@ -148,6 +181,7 @@ float hmRough = 0.6;
 float hmSkin = 1.0;
 float hmCloth = 0.0;
 float hmHair = 0.0;
+float hmFold = 0.0; // cloth fold height (m), shaded at <normal_fragment_maps>
 {
   vec4 hmCut = ${e.cut};
   vec3 hmMarks = ${e.marks};
@@ -250,6 +284,48 @@ float hmHair = 0.0;
   hmCol *= 1.0 - 0.18 * openingShade * (1.0 - max(shirtM, pantsM));
   float clothM = max(shirtM, pantsM);
   hmRough = mix(hmRough, 0.93 - drape * 0.1, clothM);
+  // cloth folds: soft rings where a sleeve bends at the elbow and bunches at
+  // a long sleeve's cuff, a top gathering above the waistband and pulling
+  // from the armpits onto the chest, trousers creasing at the knee and
+  // breaking over the shoe. 3.5-4.5 cm apart (rest space follows the
+  // skinning, so they move with the cloth), broken up by noise, a little
+  // darker in their valleys, and gone before they shrink under ~5 px (no
+  // shimmer). Every window fades out before a garment's edge: a fold cut off
+  // there would shade as a hard line.
+  {
+    float jit = 2.5 * cr_vnoise(vRestPos * vec3(26.0, 5.0, 26.0) + 2.7);
+    float elbowW = 1.0 - smoothstep(0.03, 0.09, abs(armT - 0.29 * hmBs) / hmBs);
+    float cuffW = smoothstep(sleeveT - 0.1 * hmBs, sleeveT - 0.035 * hmBs, armT) * step(0.4 * hmBs, sleeveT);
+    float sleeveEnd = 1.0 - smoothstep(sleeveT - 0.035 * hmBs, sleeveT - 0.008 * hmBs, armT);
+    float armF = sleeve * (elbowW + 0.7 * cuffW) * sleeveEnd * sin(armT / (0.04 * hmBs) * 6.2832 + jit);
+    float aboveWaist = (y - hmMarks.y) / hmBs;
+    float waistF = upper * smoothstep(0.003, 0.02, aboveWaist) * (1.0 - smoothstep(0.03, 0.1, aboveWaist)) * sin(y / (0.035 * hmBs) * 6.2832 + jit);
+    // the armpit's pulls only on the chest side, clear of the sleeve's seam
+    vec2 pit = vec2(abs(vRestPos.x) - 0.145 * hmBs, y - 1.33 * hmBs) / hmBs;
+    float pitR = length(pit);
+    float pitF = smoothstep(0.02, 0.05, -pit.x) * smoothstep(0.03, 0.05, pitR) * (1.0 - smoothstep(0.08, 0.12, pitR)) * sin(atan(pit.y, -pit.x) * 7.0 + jit);
+    float kneeW = 1.0 - smoothstep(0.03, 0.09, abs(legT - 0.4 * hmBs) / hmBs);
+    float aboveShoe = (y - hmMarks.z) / hmBs;
+    float breakW = step(0.9, hmCut.y) * smoothstep(0.003, 0.02, aboveShoe) * (1.0 - smoothstep(0.04, 0.09, aboveShoe));
+    float hemEnd = 1.0 - smoothstep(hmCut.y - 0.04 * hmBs, hmCut.y - 0.01 * hmBs, legT);
+    float legF = pantsLeg * (kneeW + breakW) * hemEnd * sin(legT / (0.04 * hmBs) * 6.2832 + jit);
+    float folds = (armF + waistF + 0.8 * pitF + legF) * (1.0 - smoothstep(0.01, 0.018, hmPix));
+    hmFold = 0.0035 * hmBs * folds;
+    hmCol *= 1.0 + 0.1 * folds;
+  }
+  // fingers: the grooves between them (at the middle and ±1.8 cm across the
+  // hand, from the knuckles to the tips; hand frame of humans/design.ts),
+  // box-filtered lines that settle into an even shade of the same darkness
+  // as they shrink toward the pixel size
+  {
+    vec3 hq = vec3(abs(vRestPos.x), vRestPos.yz) - ${e.wrist};
+    float hu = dot(hq.xy, vec2(0.3894, -0.9211)) / hmBs;
+    float hv = hq.z / hmBs;
+    float onFingers = onArm * smoothstep(0.083, 0.097, hu) * (1.0 - smoothstep(0.024, 0.03, abs(hv)));
+    float gw = hmPix / (0.018 * hmBs);
+    float groove = mix(0.28, hm_lines(hv / 0.018, 0.14, gw), 1.0 - smoothstep(0.7, 1.4, gw));
+    hmCol *= 1.0 - 0.5 * groove * onFingers;
+  }
   float shoe = onLeg * (1.0 - hm_step(hmMarks.z, y));
   // a sole (pale rubber on trainers) under a darker welt line
   float sole = 1.0 - hm_step(0.022 * hmBs, y);
@@ -341,9 +417,12 @@ float hmHair = 0.0;
   hmCol = mix(hmCol, ${e.skin} * vec3(0.4, 0.27, 0.25), mouthLine * face * 0.85);
   hmCol = mix(hmCol, vec3(0.03, 0.022, 0.018), eye * face);
 }
-// dark skin, for the moonlit skin toe (props/lights/lampField.ts LF_SKIN)
+// dark skin, for the night skin toe (props/lights/lampField.ts LF_SKIN) and
+// a night lift of its albedo (uFigureNight, material/figureNight.ts): the
+// darkest skins reflect a thirtieth of a white shirt's light, a featureless
+// head at night even after the toe
 float hmSkinDark = 1.0 - smoothstep(0.04, 0.2, dot(${e.skin}, vec3(0.2126, 0.7152, 0.0722)));
-diffuseColor.rgb *= hmCol * (1.0 - 0.25 * vOccl);`;
+diffuseColor.rgb *= hmCol * (1.0 - 0.25 * vOccl) * (1.0 + ${NIGHT_SKIN_LIFT.toFixed(2)} * uFigureNight * hmSkin * hmSkinDark);`;
 }
 
 /**
@@ -370,6 +449,10 @@ const SKIN_TOE_DEFINE = '#define LF_SKIN (hmSkin * hmSkinDark)';
 
 const ROUGHNESS_GLSL = `#include <roughnessmap_fragment>
 roughnessFactor = hmRough;`;
+
+/** Cloth folds (hmFold, set by humanColorGLSL) shaded as a bump of the surface normal. */
+const FOLD_NORMAL_GLSL = `#include <normal_fragment_maps>
+normal = hm_bump(normal, hmFold, faceDirection);`;
 
 /**
  * Matte fabric and soft skin (after <lights_physical_fragment>): cloth gets no
@@ -411,6 +494,7 @@ export function createHumanMaterial(colors: HumanColors, cut: HumanCut, marks: H
     uMarks: { value: new THREE.Vector3(marks.collarY, marks.waistY, marks.shoeTop) },
     uEye: { value: new THREE.Vector3(...marks.eyeL) },
     uMouth: { value: new THREE.Vector3(...marks.mouth) },
+    uWrist: { value: new THREE.Vector3(...(marks.wristL ?? ADULT_WRIST)) },
     uMicro: { value: detail > 0 ? 1 : 0 },
     uStyle: { value: cut.style ?? 0 },
     uHighlight: { value: 0 },
@@ -449,6 +533,7 @@ uniform vec4 uCut;
 uniform vec3 uMarks;
 uniform vec3 uEye;
 uniform vec3 uMouth;
+uniform vec3 uWrist;
 uniform float uMicro;
 uniform float uStyle;
 uniform float uHighlight;
@@ -472,13 +557,16 @@ ${HIGHLIGHT_FN_GLSL}`,
           marks: 'uMarks',
           eye: 'uEye',
           mouth: 'uMouth',
+          wrist: 'uWrist',
           style: 'uStyle',
         }),
       )
       .replace('#include <roughnessmap_fragment>', ROUGHNESS_GLSL)
+      .replace('#include <normal_fragment_maps>', FOLD_NORMAL_GLSL)
       .replace('#include <aomap_fragment>', OCCLUSION_GLSL)
       .replace('#include <lights_physical_fragment>', SPECULAR_GLSL)
       .replace('#include <opaque_fragment>', `${SKIN_CLOTH_LIGHT_GLSL}\noutgoingLight = crHighlightOf(outgoingLight, uHighlight);\n#include <opaque_fragment>`);
+    applyFigureNight(shader);
     applyLampField(shader);
   };
   mat.customProgramCacheKey = () => 'creature-human-v6';
@@ -539,10 +627,12 @@ export function createHumanBatchMaterial(detail: 0 | 1 | 2, bodies: HumanMarks[]
   const marks = bodies.map((m) => new THREE.Vector3(m.collarY, m.waistY, m.shoeTop));
   const eyes = bodies.map((m) => new THREE.Vector3(...m.eyeL));
   const mouths = bodies.map((m) => new THREE.Vector3(...m.mouth));
+  const wrists = bodies.map((m) => new THREE.Vector3(...(m.wristL ?? ADULT_WRIST)));
   const hu = {
     uHmMarks: { value: marks },
     uHmEye: { value: eyes },
     uHmMouth: { value: mouths },
+    uHmWrist: { value: wrists },
     uMicro: { value: detail > 0 ? 1 : 0 },
   };
   const n = bodies.length;
@@ -585,6 +675,7 @@ ${HAIR_TOUSLE_GLSL}`,
 uniform vec3 uHmMarks[${n}];
 uniform vec3 uHmEye[${n}];
 uniform vec3 uHmMouth[${n}];
+uniform vec3 uHmWrist[${n}];
 uniform float uMicro;
 varying vec4 vZone;
 varying vec3 vRestPos;
@@ -614,13 +705,16 @@ ${humanColorGLSL({
   marks: 'uHmMarks[hmBody]',
   eye: 'uHmEye[hmBody]',
   mouth: 'uHmMouth[hmBody]',
+  wrist: 'uHmWrist[hmBody]',
   style: `floor(hmPacked / ${HUMAN_BODIES.toFixed(1)})`,
 })}`,
       )
       .replace('#include <roughnessmap_fragment>', ROUGHNESS_GLSL)
+      .replace('#include <normal_fragment_maps>', FOLD_NORMAL_GLSL)
       .replace('#include <aomap_fragment>', OCCLUSION_GLSL)
       .replace('#include <lights_physical_fragment>', SPECULAR_GLSL)
       .replace('#include <opaque_fragment>', `${SKIN_CLOTH_LIGHT_GLSL}\noutgoingLight = crHighlightOf(outgoingLight, vHm5.w);\n#include <opaque_fragment>`);
+    applyFigureNight(shader);
     applyLampField(shader);
   };
   mat.customProgramCacheKey = () => `creature-human-batch-v6-${n}`;

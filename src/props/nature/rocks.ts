@@ -7,10 +7,10 @@
 import * as THREE from 'three';
 import { mergeVertices, toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { hashFloat as hashF, Noise, Rng } from '../../core/rng';
+import { setOcclTop } from '../lod/fade';
 import { barkMat, barkTextures } from './barks';
 import { addCrownFade, addTube, groupOf, MeshData, v3, type V3 } from './geo';
 import { barkMaterial, cachedTexture, natureQuality, rockMaterial, type RockMaterial } from './mats';
-import { setOcclTop } from '../lod/fade';
 import { albedoHeightTexture, Img, lin, mix, pfbm, pworley, sat, sstep } from './tex';
 
 // ---------------------------------------------------------------------------

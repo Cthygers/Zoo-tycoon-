@@ -17,6 +17,7 @@ import { RenderContext } from './context';
 
 export { detectQuality, qualitySettings } from './quality';
 export { RenderContext, nightGroundLevel } from './context';
+export type { Swimmer } from './water';
 export { useEnvMapIntensity } from './envIntensity';
 /** Re-exported for compatibility; the source of truth is core/constants. */
 export { DECK_Y } from '../core/constants';

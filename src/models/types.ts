@@ -242,6 +242,8 @@ export interface AnimCtx {
   role: string;
   /** The action currently requested (after alias resolution). */
   action: string;
+  /** Humans: the build's girth inflation (m, HumanCut.inflate; absent = mean build), so poses that rest on the body follow it. */
+  girth?: number;
 }
 
 /** Bone indices resolved from RigRoles (-1 = missing). */

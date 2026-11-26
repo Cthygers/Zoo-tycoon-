@@ -49,9 +49,9 @@ describe('guest outfits', () => {
       const [L1, a1, b1] = hexToLab(a.shirt);
       const [L2, a2, b2] = hexToLab(a.skin);
       expect(dE(a.shirt, a.skin)).toBeGreaterThanOrEqual(25);
-      // a woman's top (maybe half of a dress) also keeps out of the skin's hue family at a similar lightness
+      // every top (a woman's maybe half of a dress) also keeps out of the skin's hue family at a similar lightness
       const hue = Math.abs(Math.atan2(b1, a1) - Math.atan2(b2, a2)) * (180 / Math.PI);
-      if (a.female && Math.hypot(a1, b1) >= 15 && Math.min(hue, 360 - hue) < 30) expect(Math.abs(L1 - L2)).toBeGreaterThanOrEqual(30);
+      if (Math.hypot(a1, b1) >= 15 && Math.min(hue, 360 - hue) < 30) expect(Math.abs(L1 - L2)).toBeGreaterThanOrEqual(30);
       tops.add(a.shirt);
       n++;
     }
@@ -63,6 +63,10 @@ describe('guest outfits', () => {
     fitOutfit(man);
     expect(man.shirt).not.toBe(0x9b6b43);
     expect(dE(man.shirt, man.skin)).toBeGreaterThanOrEqual(25);
+    // and a man's tan tee on the darkest skin: ΔE 33 passes on lightness alone, but it is the skin's hue a little lighter
+    const dark = { ...man, skin: 0x45291a };
+    fitOutfit(dark);
+    expect(dark.shirt).not.toBe(0x9b6b43);
   });
 
   it('re-dyes hair that melts into the skin to the nearest darker shade that reads, and keeps black hair on the darkest skin', () => {

@@ -184,8 +184,8 @@ const SILVER = 0x8b8884;
 // greyer on the ridges and the muzzle (lips), so brow, sockets, nose pad and
 // mouth still read on a face a dozen pixels tall
 const SKIN = 0x24201e;
-const SKIN_RIDGE = 0x433c38;
-const SKIN_MUZZLE = 0x47403c;
+const SKIN_RIDGE = 0x4e4641;
+const SKIN_MUZZLE = 0x52493f;
 const CHESTSKIN = 0x2a2726;
 
 function gorillaCoat(male: boolean, eye: Vec3) {
@@ -234,9 +234,9 @@ function gorillaCoat(male: boolean, eye: Vec3) {
         // bridge, alae, lips) over deep, dark eye sockets, nostrils and mouth
         // line: the face reads by its form, not as one black patch
         const ridge = smooth(0.1, 0.7, c.ny * 0.7 + c.nz * 0.5);
-        blendHex(c.color, SKIN_RIDGE, 0.65 * ridge * k);
-        blendHex(c.color, SKIN_MUZZLE, 0.6 * k * smooth(0.975, 0.955, y) * smooth(0.55, 0.585, z));
-        c.color.multiplyScalar(1 - 0.75 * c.ao(0.035));
+        blendHex(c.color, SKIN_RIDGE, 0.7 * ridge * k);
+        blendHex(c.color, SKIN_MUZZLE, 0.65 * k * smooth(0.975, 0.955, y) * smooth(0.55, 0.585, z));
+        c.color.multiplyScalar(1 - 0.8 * c.ao(0.035));
       }
     }
     if (c.part === 'ear') {

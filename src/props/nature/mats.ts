@@ -367,10 +367,10 @@ export class BarkMaterial extends THREE.MeshStandardMaterial {
 }
 
 /**
- * Share of the moonlit ground's night look for wood, paint and stone on
- * structures (fences, shelters, benches; material userData.nightGround,
- * applyNightLook): less than bark's, so they keep a little of their stain
- * and paint, but no longer read cold blue next to the neutral ground.
+ * Share of the moonlit ground's night look for wood and paint on structures
+ * (fences, shelters, benches; material userData.nightGround, applyNightLook):
+ * less than bark's, so they keep a little of their stain and paint, but no
+ * longer read cold blue next to the neutral ground.
  */
 export const STRUCTURE_NIGHT_GROUND = 0.6;
 
@@ -553,13 +553,13 @@ export class RockMaterial extends THREE.MeshStandardMaterial {
   }
 }
 
-/** Share of the moonlit ground's night look for rocks (applyNightLook): ground-like stone, not slate-blue boulders. */
-const ROCK_NIGHT_GROUND = 0.8;
+/** Share of the moonlit ground's night look for rocks and stone walls (applyNightLook): ground-like stone, like bark, not slate-blue boulders. */
+export const STONE_NIGHT_GROUND = 1;
 
 export function rockMaterial(key: string, p: RockParams): RockMaterial {
   return cachedMaterial(`rock:${key}`, () => {
     const m = new RockMaterial(p);
-    m.userData.nightGround = ROCK_NIGHT_GROUND;
+    m.userData.nightGround = STONE_NIGHT_GROUND;
     return m;
   });
 }

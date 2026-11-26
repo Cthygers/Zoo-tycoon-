@@ -103,6 +103,48 @@ describe('CameraController follow swing around outcrops', () => {
     expect(c.yaw).toBeCloseTo(0, 6);
   });
 
+  it('asks about the subject’s body and its top', () => {
+    const c = rig();
+    const tops: (number | undefined)[] = [];
+    const bodies: number[] = [];
+    c.blockerQuery = (cam, s, out, topY) => {
+      bodies.push(s.y);
+      tops.push(topY);
+      out.length = 0;
+      return 0;
+    };
+    run(c, 3);
+    // the look height is about the subject's middle: its top is twice as high
+    expect(bodies[0]).toBeCloseTo(ground + subject.lookHeight, 6);
+    expect(tops[0]).toBeCloseTo(ground + 2 * subject.lookHeight, 6);
+  });
+
+  it('swings toward the side that ends with the subject in view', () => {
+    const c = rig();
+    // a tall, narrow rock just right of the line: away from it is screen-left (a smaller yaw)
+    setBlocker(1, { x: 70.2, y: ground + 1, z: 72, r: 0.6, ry: 1.5 });
+    // a second rock where a full swing screen-left would end, but not on today's line
+    const away = new THREE.Vector3().copy(c.camera.position).sub(new THREE.Vector3(subject.x, 0, subject.z));
+    const a = -40 * DEG;
+    const lx = subject.x + away.x * Math.cos(a) + away.z * Math.sin(a);
+    const lz = subject.z - away.x * Math.sin(a) + away.z * Math.cos(a);
+    setBlocker(2, { x: (lx + subject.x) / 2, y: ground + 1, z: (lz + subject.z) / 2, r: 0.8, ry: 1.5 });
+    const s = new THREE.Vector3(subject.x, ground + subject.lookHeight, subject.z);
+    expect(followBlockers(c.camera.position, s, [] as BlockerHit[])).toBe(1); // only the outcrop is in the way now
+    run(c, 60);
+    // it went screen-right, round the rock's own side, and the subject is clear
+    expect(c.yaw).toBeGreaterThan(5 * DEG);
+    expect(blocked(c)).toBe(false);
+  });
+
+  it('swings away from the rock’s side when both sides end clear', () => {
+    const c = rig();
+    setBlocker(1, { x: 70.2, y: ground + 1, z: 72, r: 0.6, ry: 1.5 });
+    run(c, 60);
+    expect(c.yaw).toBeLessThan(-5 * DEG);
+    expect(blocked(c)).toBe(false);
+  });
+
   it('swings after a pinch that zooms in behind a rock', () => {
     const c = rig();
     c.setView(subject.x, subject.z, 30, 0, 25 * DEG); // out of range, the rock under the line

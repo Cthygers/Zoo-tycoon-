@@ -362,11 +362,6 @@ export function plasticDark(): THREE.MeshStandardMaterial {
   return cached('plasticDark', () => new THREE.MeshStandardMaterial({ color: 0x1c1d1e, roughness: 0.62, metalness: 0 }));
 }
 
-/** Near-black unlit void (cave interior, deep hatches). */
-export function voidDark(): THREE.MeshStandardMaterial {
-  return cached('void', () => new THREE.MeshStandardMaterial({ color: 0x050403, roughness: 1, metalness: 0, envMapIntensity: 0 }));
-}
-
 /** Painted signs (no glow). */
 export function signs(): THREE.MeshStandardMaterial {
   return cached('signs', () => new THREE.MeshStandardMaterial({ map: signTexture(), roughness: 0.62, metalness: 0 }));

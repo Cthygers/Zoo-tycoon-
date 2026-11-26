@@ -129,6 +129,28 @@ describe('guest outfits and close-range detail', () => {
     expect(person.fs).toContain('float hmStyle = uStyle;');
   });
 
+  it('takes the figures’ moonlit night look: neutral moonlight before the lamp light, the lamp field last', () => {
+    const batched = compiled(createHumanBatchMaterial(0, [MARKS, MARKS, MARKS, MARKS]).material);
+    const person = compiled(
+      createHumanMaterial({ skin: 0x45291a, hair: 0x16110e, shirt: 0xe6e6e2, pants: 0x2c3e5c, shoes: 0x222222, hat: 0 }, { sleeve: 0.13, pants: 1.1, coat: -1, inflate: 0 }, MARKS, 0),
+    );
+    for (const { fs } of [batched, person]) {
+      const night = fs.indexOf('float fnK = uFigureNight');
+      const lamp = fs.indexOf('uLampLight * (lfPool');
+      const crease = fs.indexOf('reflectedLight.indirectDiffuse *= 1.0 - 0.7 * vOccl');
+      expect(night).toBeGreaterThan(0);
+      // the lamps' warm light is added after the moonlight turns neutral; the creases dim both
+      expect(lamp).toBeGreaterThan(night);
+      expect(crease).toBeGreaterThan(lamp);
+      // the darkest skins' albedo lifts with the night level (0 by day)
+      expect(fs).toMatch(/\(1\.0 \+ 0\.\d+ \* uFigureNight \* hmSkin \* hmSkinDark\)/);
+      expect(fs.indexOf('uniform float uFigureNight')).toBeLessThan(fs.indexOf('* uFigureNight * hmSkin'));
+      // the night grade mark never overwrites the lamp's, and the dark-skin toe still runs last
+      expect(fs).toContain('whLampLit = max( whLampLit, figNightMark )');
+      expect(fs.lastIndexOf('(LF_SKIN)')).toBeGreaterThan(night);
+    }
+  });
+
   it('settles box-filtered stripes to their mean as they shrink toward the pixel size', () => {
     // the shader's hm_stripe in TS
     const stripe = (x: number, w: number) => {
@@ -138,5 +160,34 @@ describe('guest outfits and close-range detail', () => {
     expect(stripe(0.75, 0.01)).toBeCloseTo(1, 5);
     expect(stripe(0.25, 0.01)).toBeCloseTo(0, 5);
     for (let x = 0; x < 2; x += 0.07) expect(stripe(x, 1)).toBeCloseTo(0.5, 5);
+  });
+
+  it('draws the finger grooves as box-filtered lines that settle to their mean, in a hand frame from each body’s wrist', () => {
+    // the shader's hm_lines in TS: lines of half-width hw centred on the integers
+    const lines = (x: number, hw: number, w: number) => {
+      const I = (a: number) => Math.floor(a) * 2 * hw + Math.min(a - Math.floor(a), 2 * hw);
+      return (I(x + hw + 0.5 * w) - I(x + hw - 0.5 * w)) / w;
+    };
+    expect(lines(0, 0.14, 0.01)).toBeCloseTo(1, 5);
+    expect(lines(1.05, 0.14, 0.01)).toBeCloseTo(1, 5);
+    expect(lines(0.5, 0.14, 0.01)).toBeCloseTo(0, 5);
+    for (let x = 0; x < 2; x += 0.07) expect(lines(x, 0.14, 1)).toBeCloseTo(0.28, 5);
+    const wrists: HumanMarks[] = [0.3, 0.31, 0.32, 0.33].map((x) => ({ ...MARKS, wristL: [x, 0.9, -0.01] }));
+    const mat = createHumanBatchMaterial(0, wrists).material;
+    const shader = { vertexShader: THREE.ShaderLib.standard.vertexShader, fragmentShader: THREE.ShaderLib.standard.fragmentShader, uniforms: THREE.UniformsUtils.clone(THREE.ShaderLib.standard.uniforms), defines: {} };
+    mat.onBeforeCompile(shader as unknown as THREE.WebGLProgramParametersWithUniforms, {} as THREE.WebGLRenderer);
+    expect((shader.uniforms as Record<string, { value: THREE.Vector3[] }>).uHmWrist.value.map((v) => v.x)).toEqual([0.3, 0.31, 0.32, 0.33]);
+    expect(shader.fragmentShader).toContain('- uHmWrist[hmBody];');
+  });
+
+  it('shades the cloth folds as a bump of the normal, set by the colour stage and faded with the pixel footprint', () => {
+    for (const { fs } of [compiled(createHumanBatchMaterial(1, [MARKS, MARKS, MARKS, MARKS]).material), compiled(createHumanMaterial({ skin: 0xc08060, hair: 0x302010, shirt: 0x4060a0, pants: 0x303030, shoes: 0x202020, hat: 0 }, { sleeve: 0.56, pants: 1.1, coat: -1, inflate: 0 }, MARKS, 0))]) {
+      const set = fs.indexOf('hmFold = 0.0035 * hmBs * folds;');
+      const bump = fs.indexOf('normal = hm_bump(normal, hmFold, faceDirection);');
+      expect(set).toBeGreaterThan(0);
+      expect(bump).toBeGreaterThan(set);
+      expect(bump).toBeGreaterThan(fs.indexOf('#include <normal_fragment_maps>'));
+      expect(fs).toContain('* (1.0 - smoothstep(0.01, 0.018, hmPix));');
+    }
   });
 });
