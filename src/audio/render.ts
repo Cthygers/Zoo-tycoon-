@@ -8,7 +8,7 @@
 // tails and level normalisation to the recipe's peak / RMS targets.
 
 import { Rng, mulberry32 } from '../core/rng';
-import { Kit, noiseBuffer, noiseData, noiseToBuffer, prepareNoise, releaseNoise, type NoiseColor, type RenderNoise } from './kit';
+import { Kit, noiseData, noiseToBuffer, prepareNoise, releaseNoise, type NoiseColor, type RenderNoise } from './kit';
 
 export interface Recipe {
   /** Loop length (beds) or nominal length (one-shots), seconds. */
@@ -304,11 +304,11 @@ export async function renderRecipe(r: Recipe, seed: number, opts: RenderOptions 
   await sl.tick();
   await prepareNoise(c, sl);
   // long noise in loops gets its own buffer as long as the render (no 3 s repeats inside the bed)
-  const noise: RenderNoise = { seconds: fold ? loopNoiseSeconds(r) : 0, shared: new Map(), own: new Map() };
-  const kit = new Kit(c, dry, wet, new Rng(seed), total, noise);
+  const loopNoise: RenderNoise | undefined = fold ? { seconds: loopNoiseSeconds(r), sources: new Map() } : undefined;
+  const kit = new Kit(c, dry, wet, new Rng(seed), total, loopNoise);
   const it = r.build(kit);
   if (it) while (!it.next().done) await sl.tick();
-  await assignNoise(c, noise, seed, sl);
+  if (loopNoise) await assignLoopNoise(c, loopNoise, seed, sl);
   sl.pause();
   const rendered = await startRendering(c);
   sl.restart();
@@ -320,16 +320,9 @@ export async function renderRecipe(r: Recipe, seed: number, opts: RenderOptions 
   return asset;
 }
 
-/** Give the build's noise sources their buffers, a few per slice (each assignment copies the buffer). */
-async function assignNoise(c: BaseAudioContext, noise: RenderNoise, seed: number, sl: Slicer): Promise<void> {
-  for (const [color, srcs] of noise.shared) {
-    const buf = noiseBuffer(c, color);
-    for (const src of srcs) {
-      src.buffer = buf;
-      await sl.tick();
-    }
-  }
-  for (const [color, srcs] of noise.own) {
+/** Generate a loop's per-render noise (one buffer per colour, sliced) and hand it to the waiting sources. */
+async function assignLoopNoise(c: BaseAudioContext, noise: RenderNoise, seed: number, sl: Slicer): Promise<void> {
+  for (const [color, srcs] of noise.sources) {
     const g = noiseData(c.sampleRate, color, noise.seconds, (seed ^ LOOP_NOISE_SEED[color]) >>> 0);
     let res = g.next();
     while (!res.done) {
@@ -337,13 +330,10 @@ async function assignNoise(c: BaseAudioContext, noise: RenderNoise, seed: number
       res = g.next();
     }
     const buf = noiseToBuffer(c, res.value);
-    for (const src of srcs) {
-      src.buffer = buf;
-      await sl.tick();
-    }
+    for (const src of srcs) src.buffer = buf;
+    await sl.tick();
   }
-  noise.shared.clear();
-  noise.own.clear();
+  noise.sources.clear();
 }
 
 async function postProcess(c: BaseAudioContext, buf: AudioBuffer, r: Recipe, sl: Slicer): Promise<SoundAsset> {

@@ -61,15 +61,22 @@ export function* noiseData(sr: number, color: NoiseColor, seconds: number, seed:
     tmp[i] = tmp[i] * a + tmp[n + i] * b;
   }
   let mean = 0;
-  for (let i = 0; i < n; i++) mean += tmp[i];
+  for (let s = 0; s < n; s += STEP) {
+    for (let i = s, e = Math.min(n, s + STEP); i < e; i++) mean += tmp[i];
+    yield;
+  }
   mean /= n;
-  yield;
   let ss = 0;
-  for (let i = 0; i < n; i++) ss += (tmp[i] - mean) * (tmp[i] - mean);
-  yield;
+  for (let s = 0; s < n; s += STEP) {
+    for (let i = s, e = Math.min(n, s + STEP); i < e; i++) ss += (tmp[i] - mean) * (tmp[i] - mean);
+    yield;
+  }
   const k = 0.25 / Math.sqrt(ss / n || 1);
   const out = tmp.subarray(0, n);
-  for (let i = 0; i < n; i++) out[i] = (tmp[i] - mean) * k;
+  for (let s = 0; s < n; s += STEP) {
+    for (let i = s, e = Math.min(n, s + STEP); i < e; i++) out[i] = (tmp[i] - mean) * k;
+    yield;
+  }
   return out;
 }
 
@@ -272,17 +279,17 @@ const MARIMBA: readonly Partial3[] = [
 export const LONG_NOISE_S = 2.5;
 
 /**
- * The noise sources of one render. Kit.noise() leaves their `buffer` unset and
- * lists them here; the renderer assigns the buffers after the build, in time
- * slices (assigning a buffer copies it). Long sources of loop recipes read a
- * per-render buffer as long as the render (the 3 s repeats of the shared
- * buffers sound frozen in a bed); everything else reads the shared 3 s buffers.
+ * Per-render noise of a loop recipe. Its long noise sources read a buffer as
+ * long as the render instead of the shared 3 s ones (whose repeats sound frozen
+ * in a bed): Kit.noise() leaves their `buffer` unset and lists them here by
+ * colour; the renderer generates one buffer per colour (in time slices),
+ * assigns it before rendering and drops it after. Short bursts keep the shared
+ * buffers.
  */
 export interface RenderNoise {
-  /** Per-render buffer length, s (≥ the render length); 0 = shared buffers only. */
+  /** Per-render buffer length, s (≥ the render length). */
   seconds: number;
-  readonly shared: Map<NoiseColor, AudioBufferSourceNode[]>;
-  readonly own: Map<NoiseColor, AudioBufferSourceNode[]>;
+  readonly sources: Map<NoiseColor, AudioBufferSourceNode[]>;
 }
 
 export class Kit {
@@ -303,7 +310,7 @@ export class Kit {
     readonly rng: Rng,
     /** Total render length in seconds. */
     readonly length: number,
-    /** Deferred noise buffers (see RenderNoise); without it noise reads the shared buffers at once. */
+    /** Loop recipes: per-render noise for long sources (see RenderNoise). */
     private readonly renderNoise?: RenderNoise,
   ) {
     this.sr = c.sampleRate;
@@ -377,18 +384,20 @@ export class Kit {
 
   noise(color: NoiseColor, t0: number, t1: number): AudioBufferSourceNode {
     const s = this.c.createBufferSource();
-    const rn = this.renderNoise;
-    const own = !!rn && rn.seconds > 0 && t1 - t0 >= LONG_NOISE_S;
-    const offsets = own ? this.ownOffsets : this.sharedOffsets;
+    const rn = t1 - t0 >= LONG_NOISE_S ? this.renderNoise : undefined;
+    const offsets = rn ? this.ownOffsets : this.sharedOffsets;
     let used = offsets.get(color);
     if (!used) offsets.set(color, (used = []));
-    const off = own ? pickNoiseOffset(this.rng, used, rn!.seconds) : pickNoiseOffset(this.rng, used, SHARED_NOISE_S, SHARED_NOISE_S - 0.1);
+    let off: number;
     if (rn) {
-      const map = own ? rn.own : rn.shared;
-      const list = map.get(color);
+      off = pickNoiseOffset(this.rng, used, rn.seconds);
+      const list = rn.sources.get(color);
       if (list) list.push(s);
-      else map.set(color, [s]);
-    } else s.buffer = noiseBuffer(this.c, color);
+      else rn.sources.set(color, [s]);
+    } else {
+      s.buffer = noiseBuffer(this.c, color);
+      off = pickNoiseOffset(this.rng, used, SHARED_NOISE_S, SHARED_NOISE_S - 0.1);
+    }
     s.loop = true;
     s.start(Math.max(0, t0), off);
     s.stop(Math.min(this.length, Math.max(t0 + 0.01, t1)));
