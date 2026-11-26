@@ -560,6 +560,8 @@ export class ZooAudio implements IAudio {
   private readonly pending = new Set<string>();
   private readonly failed = new Set<string>();
   private queue: string[] = [];
+  /** Queued ids that were requested urgently: they keep their order (first requested, first rendered). */
+  private readonly urgentIds = new Set<string>();
   private working = false;
   private idleWaiters: (() => void)[] = [];
   private warned = false;
@@ -931,6 +933,7 @@ export class ZooAudio implements IAudio {
     this.ctx = null;
     this.sounds.clear();
     this.queue.length = 0;
+    this.urgentIds.clear();
     this.pending.clear();
   }
 
@@ -1217,25 +1220,33 @@ export class ZooAudio implements IAudio {
   private request(id: string, urgent = false): void {
     if (this.sounds.has(id) || this.failed.has(id) || !RECIPES[id]) return;
     if (this.pending.has(id)) {
-      if (urgent) {
+      // already urgent: keep its place (audible beds are re-requested every frame and must
+      // not keep overtaking each other — the current-hour bed was starved by later ones)
+      if (urgent && !this.urgentIds.has(id)) {
         const i = this.queue.indexOf(id);
-        if (i > this.urgentSlot()) {
+        if (i >= 0) {
           this.queue.splice(i, 1);
           this.queue.splice(this.urgentSlot(), 0, id);
+          this.urgentIds.add(id);
         }
       }
       return;
     }
     this.pending.add(id);
-    if (urgent) this.queue.splice(this.urgentSlot(), 0, id);
-    else this.queue.push(id);
+    if (urgent) {
+      this.queue.splice(this.urgentSlot(), 0, id);
+      this.urgentIds.add(id);
+    } else this.queue.push(id);
     void this.pump();
   }
 
-  /** Urgent renders go right after any queued UI cues (cues stay first: they are tiny and wanted at the first tap). */
+  /**
+   * Urgent renders go after any queued UI cues (cues stay first: they are tiny and wanted at the
+   * first tap) and after the urgent renders already queued (first requested, first rendered).
+   */
   private urgentSlot(): number {
     let i = 0;
-    while (i < this.queue.length && this.queue[i].startsWith('cue.')) i++;
+    while (i < this.queue.length && (this.queue[i].startsWith('cue.') || this.urgentIds.has(this.queue[i]))) i++;
     return i;
   }
 
@@ -1250,6 +1261,7 @@ export class ZooAudio implements IAudio {
       while (this.queue.length && !this.disposed && this._enabled && !this.appSuspended) {
         if (this.reverbBuild && !this.queue[0].startsWith('cue.')) await this.buildReverb();
         const id = this.queue.shift()!;
+        this.urgentIds.delete(id);
         try {
           const lowRate = this.lowSpec && !id.startsWith('cue.');
           const a = await renderRecipe(RECIPES[id], seedFor(id), lowRate ? { maxRate: LOWSPEC_RATE } : undefined);
