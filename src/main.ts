@@ -639,7 +639,8 @@ async function boot() {
     if (versusCtrl) {
       if (versusCtrl.wantsSave()) save();
     } else {
-      autosaveTimer += dt;
+      // real seconds (a slow phone's capped frame steps would stretch the 90 s)
+      autosaveTimer += Math.min(raw, 1);
       if (autosaveTimer > AUTOSAVE_SECONDS) {
         autosaveTimer = 0;
         save();

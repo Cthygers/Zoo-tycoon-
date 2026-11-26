@@ -1,10 +1,11 @@
-// Pure helpers of the fauna module for when animals call: daily activity,
-// which bout a scheduled caller makes (night roars, the giraffe's nocturnal
-// hum), idle weighting by distance and time of day, how far spontaneous bouts
-// reach in a close view, zoo-wide rate trims and the colony murmur level.
+// Pure helpers of the fauna module for when and what animals call: daily
+// activity, which bout a scheduled caller makes (night roars, the giraffe's
+// nocturnal hum), signature and landmark calls, herd answers, idle weighting by
+// distance and time of day, how far spontaneous bouts reach and calls carry,
+// zoo-wide rate trims and the colony murmur level.
 
 import type { Rng } from '../../core/rng';
-import type { Bout, SpeciesAudio } from '../recipes/speciesAudio';
+import type { Bout, BoutKind, SpeciesAudio } from '../recipes/speciesAudio';
 import { pickBout, pickWhere } from './bout';
 
 /** Scheduled-bout multiplier at a fractional hour: linear between the 24 hourly values. */
@@ -53,22 +54,83 @@ export function pickKind(sp: SpeciesAudio, nightness: number, member: Member, rn
   return pickWhere(sp, rng, (b) => SCHEDULED.includes(b.kind) && (!b.sex || b.sex === member.sex));
 }
 
+/** Whether a species makes its 'night' call now: at night, a giraffe only lying down (and never by day). */
+export function nightCaller(sp: SpeciesAudio, m: Member, hour: number, nightness: number): boolean {
+  return nightness > 0.5 && canNight(sp, m, hour) && sp.bouts.some((b) => b.kind === 'night');
+}
+
 function canNight(sp: SpeciesAudio, m: Member, hour: number): boolean {
   if (sp.voice !== 'giraffe') return true;
   const h = ((hour % 24) + 24) % 24;
   return (m.action === 'sleep' || m.action === 'sit') && (h < HUM_DAY[0] || h >= HUM_DAY[1]);
 }
 
+/** A colony displays, and a penguin's signature is its display bray, from this daily activity on. */
+export const ACTIVE_HOURS = 0.6;
+
+/**
+ * A species' signature bout at this hour, the call that tells which animal it
+ * is: a lion's call (moans and a grunt series by day; its roar at night, as the
+ * roar count allows), an elephant's contact rumble (0.8) or trumpet (0.2), a
+ * penguin's display bray in its active hours, a zebra's bray, a tiger's main
+ * call, a gorilla's hoots and chest-beat, a hippo's honks, a lying giraffe's
+ * hum at night. Null when the species has nothing suitable now.
+ */
+export function signatureBout(sp: SpeciesAudio, m: Member, hour: number, nightness: number, rng: Rng): Bout | null {
+  switch (sp.voice) {
+    case 'elephant':
+      return pickBout(sp, rng.float() < 0.8 ? 'contact' : 'call', m.sex, rng);
+    case 'penguin':
+      return pickBout(sp, activityAt(sp, hour) >= ACTIVE_HOURS ? 'call' : 'contact', m.sex, rng);
+    case 'giraffe':
+      return pickBout(sp, nightness > 0.5 && canNight(sp, m, hour) ? 'night' : 'call', m.sex, rng);
+  }
+  return pickBout(sp, 'display', m.sex, rng) ?? pickBout(sp, 'call', m.sex, rng);
+}
+
+/**
+ * Landmark calls of mid and far views, the zoo's best-known voices: an
+ * elephant's trumpet, a lion's moans and grunts (roars only at night, as the
+ * roar count allows), a gorilla's hoots and chest-beat, a penguin colony's
+ * display (active hours), a flamingo flock's honking burst, a zebra's bray, a
+ * hippo's honks, a tiger's main call and a lying giraffe's hum at night.
+ */
+export const LANDMARKS: readonly string[] = ['elephant', 'lion', 'gorilla', 'penguin', 'flamingo', 'zebra', 'hippo', 'tiger', 'giraffe'];
+
+/** The landmark bout of a species now, or null (not a landmark voice, or nothing to say at this hour). */
+export function landmarkBout(sp: SpeciesAudio, m: Member, hour: number, nightness: number, rng: Rng): Bout | null {
+  switch (sp.voice) {
+    case 'elephant':
+      return pickBout(sp, 'call', m.sex, rng);
+    case 'penguin':
+      return activityAt(sp, hour) >= ACTIVE_HOURS ? pickBout(sp, 'call', m.sex, rng) : null;
+    case 'giraffe':
+      return nightness > 0.5 && canNight(sp, m, hour) ? pickBout(sp, 'night', m.sex, rng) : null;
+  }
+  return LANDMARKS.includes(sp.voice) ? signatureBout(sp, m, hour, nightness, rng) : null;
+}
+
+/** Herd-mates answer the focus animal's contact calls: the bout kinds that count as one, and the answer. */
+export const ANSWERS: Readonly<Record<string, { to: readonly BoutKind[]; kind: BoutKind }>> = {
+  penguin: { to: ['idle', 'contact', 'social', 'call'], kind: 'contact' },
+  flamingo: { to: ['idle', 'social', 'call'], kind: 'social' },
+  elephant: { to: ['contact', 'social', 'call'], kind: 'contact' },
+  zebra: { to: ['call', 'social'], kind: 'call' },
+  lion: { to: ['social', 'call'], kind: 'social' },
+};
+
 /** Lions roar in full only from this activity on (dusk and night); by day a call is moans and a few grunts. */
 export const ROAR_ACTIVITY = 0.6;
 const softCalls = new WeakMap<Bout, Bout>();
 
-/** A lion's daytime call: its call grammar without the inhale and the roars, and a short grunt series. */
+/** A lion's daytime call: its call grammar without the inhale and the roars: one or two moans and a short grunt series, 3 dB softer. */
 export function daytimeCall(sp: SpeciesAudio, bout: Bout): Bout {
   if (sp.voice !== 'lion' || bout.kind !== 'call') return bout;
   let soft = softCalls.get(bout);
   if (!soft) {
-    const steps = bout.steps.filter((s) => s.syl !== 'roar' && s.syl !== 'inhale').map((s) => (s.syl === 'grunt' ? { ...s, n: [3, 6] as const } : s));
+    const steps = bout.steps
+      .filter((s) => s.syl !== 'roar' && s.syl !== 'inhale')
+      .map((s) => (s.syl === 'grunt' ? { ...s, n: [3, 6] as const, db: (s.db ?? 0) - 3 } : s.syl === 'moan' ? { ...s, n: [1, 2] as const, db: (s.db ?? 0) - 3 } : s));
     soft = { ...bout, steps };
     softCalls.set(bout, soft);
   }
@@ -93,14 +155,35 @@ export const ZOO_RATE: Readonly<Record<string, { perMin: number; idle: number }>
   rhino: { perMin: 4, idle: 2 },
   tiger: { perMin: 1.5, idle: 2 },
 };
-/** Presence applies with the camera further than this from its focus, m (closer views are about the animals in them). */
-const PRESENCE_CAM = 20;
+/** Mid and far views start here (camera distance to its focus, m): the zoo's presence, landmark calls, calls that carry. */
+export const PRESENCE_CAM = 30;
 
-/** Scheduled bouts per second of one species group in range at this hour, its closest member `dist` m from the ear. */
-export function schedRate(sp: SpeciesAudio, hour: number, dist: number, camDist: number): number {
-  const reach = reachFactor(dist, camDist, sp.refDist);
+/** Scheduled bouts per second of one species group in range at this hour, given its spontaneous reach (spontaneousReach). */
+export function schedRate(sp: SpeciesAudio, hour: number, reach: number, camDist: number): number {
   const presence = camDist > PRESENCE_CAM ? (ZOO_RATE[sp.voice]?.perMin ?? 0) * reach : 0;
-  return Math.max(sp.boutsPerMin * activityAt(sp, hour) * reach * reach, presence) / 60;
+  return Math.max(sp.boutsPerMin * activityAt(sp, hour) * reach, presence) / 60;
+}
+
+/**
+ * How readily an animal starts spontaneous bouts (idle, scheduled, sim calls),
+ * 0..1. Close views are about the animals in them: reachFactor by distance from
+ * the ear, squared. Mid and far views hear the whole view: reachFactor by
+ * distance from the ground focus point, once.
+ */
+export function spontaneousReach(earDist: number, focusDist: number, camDist: number, refDist: number): number {
+  if (camDist > PRESENCE_CAM) return reachFactor(focusDist, camDist, refDist);
+  return reachFactor(earDist, camDist, refDist) ** 2;
+}
+
+/**
+ * Calls carry over distance: in mid and far views, call and display bouts fall
+ * off as (refDist / r)^0.75 instead of refDist / r. Returns the reference
+ * distance that turns the host's law into that one at `dist` m (the play's own
+ * gain stays the caller's level).
+ */
+export function carryRefDist(kind: Bout['kind'], dist: number, refDist: number, camDist: number): number {
+  if (camDist <= PRESENCE_CAM || (kind !== 'call' && kind !== 'display')) return refDist;
+  return Math.max(refDist, Math.pow(refDist, 0.75) * Math.pow(dist, 0.25));
 }
 
 /** Idle-lottery weight: chatty animals near the ear win; `boost` for the followed / selected / close-up animal. */
@@ -126,8 +209,7 @@ export function pickWeighted<T>(items: readonly T[], weight: (x: T) => number, r
  * How likely a far animal is to start a spontaneous bout: the closer the camera,
  * the more a view is about the animals in it rather than the whole zoo's
  * chatter. Reach is 1.5 × the camera distance (10–60 m), scaled by the species'
- * reference distance (a lion's roar carries 2.5× further than a honk). Idle and
- * scheduler rates use its square.
+ * reference distance (a lion's roar carries 2.5× further than a honk).
  */
 export function reachFactor(dist: number, camDist: number, refDist: number): number {
   const reach = Math.min(60, Math.max(10, 1.5 * camDist)) * (refDist / 10);

@@ -884,6 +884,8 @@ export class Simulation implements ISimulation {
   // ================================================================ queries
   private statsCache: ZooStats | null = null;
   private statsTime = -1;
+  /** world.revision at the cached stats: a build while the clock is paused (paths, gate) refreshes them. */
+  private statsRevision = -1;
   private statsSpecies = new Set<string>();
   /** Zoo statistics (cached per simulated instant, so calling it every frame is cheap). */
   stats(): ZooStats {
@@ -891,6 +893,7 @@ export class Simulation implements ISimulation {
     if (
       st &&
       this.statsTime === this.time &&
+      this.statsRevision === this.world.revision &&
       st.guestsInZoo === this.guests.size &&
       st.animalCount === this.animals.size &&
       st.staffCount === this.staff.size &&
@@ -926,6 +929,7 @@ export class Simulation implements ISimulation {
     };
     this.statsCache = out;
     this.statsTime = this.time;
+    this.statsRevision = this.world.revision;
     return out;
   }
 

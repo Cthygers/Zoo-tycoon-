@@ -267,6 +267,8 @@ export class SyncEngineImpl implements SyncEngine {
     const C = head.meta.playSeconds - b;
     const other = this.card(null, head, false, C, C > L, true);
     if (holder) other.deviceName = holder;
+    // the other card is the device holding the lease now, even when the latest push came from this one
+    other.thisDevice = false;
     return {
       profileName: this.d.profileName(r.profileId),
       here: this.card(r, null, true, L, L >= C, false),
@@ -360,6 +362,8 @@ export class SyncEngineImpl implements SyncEngine {
       return { kind: 'blocked', reason: R.blocked === 'quota' ? 'quota' : R.blocked === 'rejected' ? 'rejected' : 'too_large' };
     }
     if (R?.state === 'conflict' && !mode.opening && !mode.force) return { kind: 'skipped' };
+    // the lease was lost while this run waited for the lock: nothing goes up until the player chose (§3.8)
+    if (this.leaseLostPending.has(key) && !mode.opening) return { kind: 'skipped' };
     if (R?.state === 'waiting' && R.waitUntil && R.waitUntil > this.d.now() && !mode.opening && !mode.force) return { kind: 'skipped' };
     this.running++;
     this.changed();

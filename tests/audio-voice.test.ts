@@ -2,7 +2,10 @@
 // determinism and output bounds.
 import { describe, expect, it } from 'vitest';
 import { Rng } from '../src/core/rng';
-import { glottalSource, type PulseSpec } from '../src/audio/voice';
+import { Kit } from '../src/audio/kit';
+import { RECIPES, seedFor } from '../src/audio/recipes';
+import { glottalSource, glottalSteps, voice, voiceSteps, type PulseSpec, type VoiceSpec } from '../src/audio/voice';
+import { FakeAudioContext } from './helpers/fakeAudio';
 
 const SR = 22050;
 
@@ -99,6 +102,69 @@ describe('glottalSource', () => {
         pk = Math.max(pk, Math.abs(v));
       }
       expect(pk).toBeLessThanOrEqual(0.9 + 1e-6);
+    }
+  });
+});
+
+/** A kit on a recording context (no audio is rendered). */
+function fakeKit(sr: number, seed: number) {
+  const ctx = new FakeAudioContext(sr);
+  const kit = new Kit(ctx as unknown as BaseAudioContext, ctx.createGain() as unknown as AudioNode, null, new Rng(seed), 3);
+  return { ctx, kit };
+}
+
+const ROAR: VoiceSpec = {
+  t: 0.1,
+  dur: 1.7,
+  f0: [[0, 75], [0.5, 190], [1.7, 60]],
+  amp: [[0, 0], [0.5, 1], [1.7, 0]],
+  chaos: [[0.45, 0.8, 0.08]],
+  pd: [[0.8, 0.95, 0.3]],
+  biphon: { ratio: 1.5, db: -14 },
+  aspiration: 0.45,
+  formants: [[300, 110, -1], [850, 160, -1], [1550, 230, -6]],
+  drive: 1.3,
+  bias: 0.2,
+  noise: { level: 0.1, lo: 600, hi: 1500 },
+};
+
+describe('render slicing (long calls are built in steps)', () => {
+  it('glottalSteps yields every few thousand samples and gives exactly glottalSource', () => {
+    const g = glottalSteps(ROAR, 16000, new Rng(9));
+    let steps = 0;
+    let r = g.next();
+    while (!r.done) {
+      steps++;
+      r = g.next();
+    }
+    // two pulse trains (biphonation) of 27200 samples, a step per 2048
+    expect(steps).toBeGreaterThanOrEqual(2 * Math.floor(27200 / 2048) - 2);
+    expect(Array.from(r.value)).toEqual(Array.from(glottalSource(ROAR, 16000, new Rng(9))));
+  });
+
+  it('voiceSteps schedules exactly what voice does, over several steps', () => {
+    const a = fakeKit(16000, 4);
+    voice(a.kit, ROAR);
+    const b = fakeKit(16000, 4);
+    const g = voiceSteps(b.kit, ROAR);
+    let steps = 0;
+    while (!g.next().done) steps++;
+    expect(steps).toBeGreaterThan(10);
+    expect(b.ctx.filters.map((f) => [f.type, f.frequency.value, f.Q.value])).toEqual(a.ctx.filters.map((f) => [f.type, f.frequency.value, f.Q.value]));
+    expect(b.ctx.gains.map((g) => g.gain.value)).toEqual(a.ctx.gains.map((g) => g.gain.value));
+    const data = (x: FakeAudioContext) => x.sources.filter((s) => !s.loop).map((s) => Array.from(s.buffer!.getChannelData(0)));
+    expect(data(b.ctx)).toEqual(data(a.ctx));
+  });
+
+  it('builds the long voiced syllables (roars, moans, rumbles, brays) as generators of many short steps', () => {
+    for (const id of ['syl.lion.roar#0', 'syl.lion.moan#1', 'syl.lion.growl#0', 'syl.elephant.rumble#0', 'syl.zebra.bray#2', 'syl.tiger.main#0']) {
+      const r = RECIPES[id];
+      const { kit } = fakeKit(r.rate ?? 22050, seedFor(id));
+      const it = r.build(kit);
+      expect(it, id).toBeTruthy();
+      let steps = 0;
+      while (!it!.next().done) steps++;
+      expect(steps, id).toBeGreaterThanOrEqual(Math.floor((r.dur * (r.rate ?? 22050)) / 2048) - 1);
     }
   });
 });

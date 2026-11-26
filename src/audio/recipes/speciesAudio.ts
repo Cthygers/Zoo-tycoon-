@@ -55,7 +55,7 @@ export interface SpeciesAudio {
 /** The bank of a voice, derived from the registered syllable variants. */
 function banks(voice: string): Record<string, SylBank> {
   const out: Record<string, SylBank> = {};
-  for (const [syl, def] of Object.entries(SYLLABLES[voice])) out[syl] = { variants: def.n, dur: (def.d[0] + def.d[1]) / 2 };
+  for (const [syl, def] of Object.entries(SYLLABLES[voice])) out[syl] = { variants: def.n, lowSpecVariants: def.lowSpec, dur: (def.d[0] + def.d[1]) / 2 };
   return out;
 }
 
@@ -324,11 +324,8 @@ export const SPECIES_AUDIO: Readonly<Record<string, SpeciesAudio>> = {
     bouts: [
       {
         kind: 'call',
-        steps: [
-          // onsets 0.42 s or more apart: a cycle (≤ 0.34 s, slower with the rate spread) never overlaps the next
-          { syl: 'cycle', n: [4, 8], ioi: [0.42, 0.46], grow: 1.04, ioiMax: 0.55, rateStep: 0.98 },
-          { ...once('final'), gap: [0.05, 0.15] },
-        ],
+        // one piece: its inhale-exhale cycles run back to back (animals.ts zebraBray)
+        steps: [once('bray')],
       },
       { kind: 'idle', steps: [once('blow')] },
       { kind: 'alarm', steps: [{ syl: 'snort', n: [1, 2], ioi: [0.2, 0.35] }] },

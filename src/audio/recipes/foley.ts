@@ -4,15 +4,18 @@
 // per path surface. Registered by modules/fauna.ts with registerRecipes.
 //
 // Close up, an animal breathes, chews and drinks like its body family
-// (`fx.<kind>.<family>#k`: a lion's rough nasal huff, an elephant's trunk
-// blow, a penguin's beak dip); the generic fx.breath.big / fx.chew / fx.lap
-// remain for voices without a family.
+// (`fx.<kind>.<family>#k`: a lion's deep, rough chest exhale, an elephant's
+// trunk blow, a penguin's beak dip); birds do not breathe audibly but ruffle
+// their feathers (fx.rustle.bird). The generic fx.breath.big / fx.chew /
+// fx.lap remain for voices without a family. Pad-footed giants (elephant,
+// hippo, rhino) walk almost silently: a soft, dull scuff (fx.step.scuff).
 //
 // Rates follow the content: 8 kHz for sounds below ~1.5 kHz (the generic
-// breath and chew, suck, ear flaps), 11.025 kHz for water and blows, 16 kHz for transients up to 6 kHz
-// and the family banks (their presence lies at 1–5 kHz), 22.05 kHz only for
-// gravel crunch. No baked reverb: the engine's shared outdoor reverb places
-// them. Tails are short (no reverb to ring out).
+// breath and chew, suck, ear flaps, scuffs), 11.025 kHz for water, blows and
+// low-passed rustles and swishes, 16 kHz for transients up to 6 kHz and the
+// breath, chew and drink banks (their presence lies at 1–5 kHz), 22.05 kHz
+// only for gravel crunch. No baked reverb: the engine's shared outdoor reverb
+// places them. Tails are short (no reverb to ring out).
 
 import type { Rng } from '../../core/rng';
 import type { Formant, Kit, NoiseColor, Pt } from '../kit';
@@ -34,6 +37,7 @@ export const FOLEY_BANKS = {
   'fx.step.hoofHard': 3,
   'fx.step.hoofSoft': 3,
   'fx.step.bird': 2,
+  'fx.step.scuff': 3,
   'fx.splash.small': 3,
   'fx.splash.big': 2,
   'fx.lap': 3,
@@ -46,7 +50,7 @@ export const FOLEY_BANKS = {
   'fx.dust': 0,
   'fx.surface': 2,
   'fx.dive': 2,
-  'fx.tail': 0,
+  'fx.tail': 3,
   'fx.gstep.paved': 3,
   'fx.gstep.gravel': 3,
   'fx.gstep.board': 3,
@@ -56,7 +60,7 @@ export const FOLEY_BANKS = {
   'fx.breath.grazer': 3,
   'fx.breath.equid': 3,
   'fx.breath.primate': 3,
-  'fx.breath.bird': 3,
+  'fx.rustle.bird': 3,
   'fx.chew.cat': 3,
   'fx.chew.pachyderm': 3,
   'fx.chew.bear': 3,
@@ -181,6 +185,38 @@ function hoofSoft(k: Kit): void {
 function birdStep(k: Kit): void {
   const r = k.rng;
   tick(k, 0.002, r.range(1400, 2100), 0.9, 0.015, 1);
+}
+
+/**
+ * A pad-footed giant (elephant, hippo, rhino) sets its cushioned sole down
+ * almost silently: a slow-onset, dull scuff under ~1 kHz with a little grit
+ * and the weight felt below it; no click.
+ */
+function scuffStep(k: Kit, v: number): void {
+  const r = k.rng;
+  const d = r.range(0.16, 0.22);
+  k.thump(0.012, 55 * r.range(0.9, 1.1), 35, 0.12, 0.1, { wet: 0 });
+  k.burst({
+    t: 0,
+    dur: d,
+    color: 'pink',
+    band: [
+      [0, r.range(420, 520)],
+      [d, r.range(260, 320)],
+    ],
+    q: 0.8,
+    amp: [
+      [0, 0],
+      [0.025, 1],
+      [d * 0.45, 0.55],
+      [d, 0],
+    ],
+    rough: [r.range(30, 45), 0.5],
+    lp: 1100,
+    wet: 0,
+  });
+  // the sole drags a little on the last variant
+  if (v === 2) pcm(k, crackle(k.sr, d * 0.8, r, 140, d * 0.3, d * 0.25), 0.03, 0.18, k.bq('bandpass', r.range(900, 1200), 0.9), k.bq('lowpass', 1800));
 }
 
 // ------------------------------------------------------------------ water
@@ -405,81 +441,118 @@ function breath(k: Kit): void {
   });
 }
 
+/**
+ * An elephant's ear flap: the big ear swung out (a slow, low whoosh) and
+ * slapped back against the neck (a dull, leathery smack).
+ */
 function flap(k: Kit): void {
   const r = k.rng;
-  const n = r.int(2, 3);
-  for (let i = 0; i < n; i++) {
-    const t = 0.01 + i * r.range(0.08, 0.11);
-    k.burst({
-      t,
-      dur: 0.06,
-      band: [
-        [0, 300],
-        [0.06, 1000],
-      ],
-      q: 0.9,
-      amp: [
-        [0, 0],
-        [0.02, 1],
-        [0.06, 0],
-      ],
-      level: 1 - i * 0.2,
-      wet: 0,
-    });
-  }
-}
-
-function dust(k: Kit): void {
-  k.burst({
-    t: 0,
-    dur: 0.6,
-    band: [
-      [0, 1600],
-      [0.6, 2600],
-    ],
-    q: 0.6,
-    amp: [
-      [0, 0],
-      [0.05, 1],
-      [0.3, 0.5],
-      [0.6, 0],
-    ],
-    rough: [40, 0.6],
-    level: 1,
-    wet: 0,
-  });
-  k.burst({
-    t: 0,
-    dur: 0.3,
-    band: [[0, 500]],
-    q: 1,
-    amp: [
-      [0, 0],
-      [0.03, 1],
-      [0.3, 0],
-    ],
-    level: 0.4,
-    wet: 0,
-  });
-}
-
-function tailSwish(k: Kit): void {
   k.burst({
     t: 0,
     dur: 0.22,
+    color: 'pink',
     band: [
-      [0, 2500],
-      [0.22, 4500],
+      [0, r.range(220, 280)],
+      [0.22, r.range(420, 520)],
     ],
-    q: 1,
+    q: 0.8,
     amp: [
       [0, 0],
-      [0.09, 1],
+      [0.14, 1],
       [0.22, 0],
     ],
-    level: 1,
+    level: 0.45,
     wet: 0,
   });
+  const slap = r.range(0.19, 0.22);
+  k.burst({
+    t: slap,
+    dur: 0.07,
+    color: 'pink',
+    band: [[0, r.range(550, 750)]],
+    q: 0.9,
+    amp: [
+      [0, 0],
+      [0.005, 1],
+      [0.025, 0.4],
+      [0.07, 0],
+    ],
+    wet: 0,
+  });
+  k.thump(slap + 0.002, r.range(100, 125), 70, 0.07, 0.12, { wet: 0 });
+}
+
+/**
+ * An elephant dusting itself: a hard trunk blow (a low, hollow whoosh) throws
+ * dry earth that patters down, a spray of sandy grains thinning out over half a
+ * second rather than a steady hiss.
+ */
+function dust(k: Kit): void {
+  const r = k.rng;
+  k.burst({
+    t: 0,
+    dur: 0.35,
+    color: 'pink',
+    band: [
+      [0, r.range(380, 480)],
+      [0.35, r.range(650, 800)],
+    ],
+    q: 0.9,
+    amp: [
+      [0, 0],
+      [0.04, 1],
+      [0.15, 0.6],
+      [0.35, 0],
+    ],
+    rough: [r.range(18, 26), 0.5],
+    lp: 1800,
+    wet: 0,
+  });
+  const fall = (t: number) => (t < 0.08 ? t / 0.08 : Math.exp(-(t - 0.08) / 0.18));
+  pcm(k, grains(k.sr, 0.55, r, 600, fall), 0.06, 0.35, k.bq('bandpass', r.range(1300, 1700), 0.7), k.bq('lowpass', 3500));
+}
+
+/**
+ * A tail swish: the hair whips through the air, a short swept rustle (rough
+ * grain, low-passed: not a hiss), and on variants 0 and 2 flicks the flank.
+ */
+function tailSwish(k: Kit, v: number): void {
+  const r = k.rng;
+  const d = r.range(0.17, 0.24);
+  k.burst({
+    t: 0,
+    dur: d,
+    color: 'pink',
+    band: [
+      [0, r.range(800, 1000)],
+      [d * 0.6, r.range(1700, 2200)],
+      [d, r.range(1200, 1500)],
+    ],
+    q: 1.1,
+    amp: [
+      [0, 0],
+      [d * 0.55, 1],
+      [d, 0],
+    ],
+    rough: [r.range(60, 90), 0.6],
+    lp: 3800,
+    wet: 0,
+  });
+  if (v !== 1)
+    k.burst({
+      t: d * r.range(0.8, 0.9),
+      dur: 0.05,
+      color: 'pink',
+      band: [[0, r.range(600, 800)]],
+      q: 1,
+      amp: [
+        [0, 0],
+        [0.004, 1],
+        [0.05, 0],
+      ],
+      level: 0.5,
+      wet: 0,
+    });
 }
 
 // ------------------------------------------------------------------ guest steps
@@ -581,38 +654,70 @@ function crunch(k: Kit, t: number, len: number, rate: number, hz: number, q: num
 
 /** One breath per family: `v` picks a pattern so the variants differ in shape, not only in noise. */
 const BREATH: Readonly<Record<string, (k: Kit, v: number) => void>> = {
-  // big cat: a rough nasal huff (soft palate flutter, nasal resonances up to 3.5 kHz), a soft inhale
+  // big cat: a deep, rough exhale from the chest (pink noise: a 250–600 Hz body and a 0.9–1.5 kHz
+  // nasal band, low-passed near 3 kHz; irregular soft-palate roughness, not a hiss), a soft inhale
   cat: (k, v) => {
     const r = k.rng;
-    const d = r.range(0.75, 0.9);
+    const d = r.range(0.75, 0.95);
     const pulses = v === 2 ? 2 : 1; // a chuffing double exhale
     for (let i = 0; i < pulses; i++) {
       const dd = d / pulses;
-      blow(k, i * dd * 1.1, dd, exhale(dd, 0.025), {
-        color: 'white',
-        band: [[0, r.range(1300, 1600)], [dd, r.range(800, 950)]],
-        q: 0.55,
-        flutter: [r.range(22, 34), r.range(0.45, 0.6)],
-        peaks: [[r.range(650, 750), 5, 1.4], [r.range(2000, 2400), 5, 2], [r.range(3200, 3700), 4, 2.5]],
+      k.burst({
+        t: i * dd * 1.1,
+        dur: dd,
+        color: 'pink',
+        band: [
+          [0, r.range(400, 470)],
+          [dd, r.range(290, 340)],
+        ],
+        q: 0.8,
+        amp: exhale(dd, 0.03),
+        rough: [r.range(22, 32), 0.65],
+        formants: [[r.range(1000, 1300), 6, 1.4]],
+        lp: r.range(2600, 3200),
+        wet: 0,
       });
     }
-    blow(k, 0, d, exhale(d, 0.04), { band: [[0, 220]], type: 'lowpass', q: 0.8, level: 0.4 });
-    if (v !== 1) blow(k, d + r.range(0.1, 0.16), 0.24, inhale(0.24), { color: 'white', band: [[0, 2600]], q: 0.8, peaks: [[3400, 3, 2]], level: 0.45 });
+    // the chest under it (headphones)
+    k.burst({ t: 0, dur: d, color: 'pink', type: 'lowpass', band: [[0, 170]], q: 0.8, amp: exhale(d, 0.05), level: 0.25, wet: 0 });
+    if (v !== 1)
+      k.burst({
+        t: d + r.range(0.12, 0.2),
+        dur: 0.28,
+        color: 'pink',
+        band: [
+          [0, 650],
+          [0.28, 850],
+        ],
+        q: 0.9,
+        amp: inhale(0.28),
+        rough: [16, 0.3],
+        formants: [[1200, 4, 1.5]],
+        lp: 2600,
+        level: 0.35,
+        wet: 0,
+      });
   },
-  // trunk / big nostril blow: a tube comb (harmonics of a ~1.8 m pipe) over a broad whoosh
+  // trunk blow: the hollow resonances of a ~1.8 m tube (harmonics of 85–105 Hz, gliding down a
+  // little as the trunk relaxes) over a soft, dark whoosh, low-passed: no hiss
   pachyderm: (k, v) => {
     const r = k.rng;
     const d = r.range(0.9, 1.05);
     const pipe = r.range(85, 105);
     const nz = k.noise('pink', 0, d + 0.02);
     const sum = k.gain(1);
-    for (let h = 2; h <= 9; h++) {
-      const b = k.bq('bandpass', pipe * h * r.range(0.98, 1.02), 7);
+    for (let h = 1; h <= 9; h++) {
+      const f = pipe * h * r.range(0.98, 1.02);
+      const b = k.bq('bandpass', f, 9);
+      k.path(b.frequency, 0, [
+        [0, f],
+        [d, f * 0.95],
+      ]);
       nz.connect(b);
-      b.connect(k.gain(1.6 / Math.sqrt(h), sum));
+      b.connect(k.gain((h === 1 ? 0.8 : 1.6) / Math.sqrt(h), sum));
     }
-    k.chain(nz, k.bq('bandpass', 1400, 0.5), k.gain(0.35, sum));
-    let node: AudioNode = sum;
+    k.chain(nz, k.bq('bandpass', 700, 0.6), k.gain(0.15, sum));
+    let node: AudioNode = k.chain(sum, k.bq('lowpass', 2000));
     if (v === 1) {
       // trunk-tip flutter
       const g = k.gain(0.7);
@@ -623,7 +728,7 @@ const BREATH: Readonly<Record<string, (k: Kit, v: number) => void>> = {
     k.chain(node, e);
     k.path(e.gain, 0, exhale(d, 0.06));
     k.send(e, 1, 0);
-    if (v === 2) blow(k, d + 0.12, 0.32, inhale(0.32), { band: [[0, 700], [0.32, 1100]], q: 1.2, level: 0.5 });
+    if (v === 2) blow(k, d + 0.12, 0.32, inhale(0.32), { band: [[0, 600], [0.32, 900]], q: 1.2, peaks: [[300, 4, 1.5]], level: 0.45 });
   },
   // bear: a deep, moist huffing breath with a short grunt of voice
   bear: (k, v) => {
@@ -673,20 +778,6 @@ const BREATH: Readonly<Record<string, (k: Kit, v: number) => void>> = {
       peaks: [[r.range(480, 560), 4, 1.5], [r.range(1400, 1600), 4, 2], [r.range(2500, 2800), 3, 2.5]],
     });
     blow(k, d + r.range(0.1, 0.16), 0.28, inhale(0.28), { color: 'white', band: [[0, 2100]], q: 0.7, peaks: [[3000, 3, 2]], level: 0.5 });
-  },
-  // bird: two quick, small breaths through the beak with a faint wheeze (a sleeping penguin or flamingo)
-  bird: (k, v) => {
-    const r = k.rng;
-    let t = 0;
-    for (let i = 0; i < 2; i++) {
-      const d = r.range(0.14, 0.2);
-      const a = i ? r.range(0.6, 0.8) : 1;
-      blow(k, t, d, exhale(d, 0.02), { color: 'white', band: [[0, r.range(2400, 3200)]], q: 0.9, peaks: [[r.range(1700, 2100), 4, 2]], level: a });
-      const f = r.range(1800, 2600) * (v === 1 ? 1.25 : 1);
-      k.tone({ t: t + 0.02, dur: d * 0.8, wave: 'sine', f: [[0, f], [d * 0.8, f * 0.9]], amp: [[0, 0], [0.03, 0.18 * a], [d * 0.8, 0]], wet: 0 });
-      blow(k, t + d + r.range(0.08, 0.14), 0.13, inhale(0.13), { color: 'white', band: [[0, 3500]], q: 1, level: 0.45 * a });
-      t += d + r.range(0.25, 0.32);
-    }
   },
 };
 
@@ -786,39 +877,93 @@ const DRINK: Readonly<Record<string, (k: Kit, v: number) => void>> = {
   },
 };
 
+/**
+ * Soft noise grains: `rate` per s on average, each 4–14 ms with a smooth
+ * (Hann) rise and fall and its own level, under the envelope `env(t)`.
+ * Feathers brushing past each other: grain, not a steady hiss.
+ */
+function grains(sr: number, len: number, rng: Rng, rate: number, env: (t: number) => number): Float32Array {
+  const out = new Float32Array(Math.ceil(len * sr));
+  for (let t = rng.range(0, 2 / rate); t < len; t += rng.range(0.2, 1.8) / rate) {
+    const n = Math.ceil(rng.range(0.004, 0.014) * sr);
+    const i0 = Math.floor(t * sr);
+    const a = rng.range(0.3, 1) * env(t);
+    for (let i = 0; i < n && i0 + i < out.length; i++) out[i0 + i] += (rng.float() * 2 - 1) * a * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / n));
+  }
+  return out;
+}
+
+/**
+ * A bird at rest is nearly silent: now and then it ruffles its feathers (a
+ * quick shake, variants 0 and 2) or shuffles them into place (variant 1),
+ * soft grains at 1–3 kHz with no whistle. The fauna module plays it about
+ * 1.25× faster, so it is rendered a little low.
+ */
+const RUSTLE: Readonly<Record<string, (k: Kit, v: number) => void>> = {
+  bird: (k, v) => {
+    const r = k.rng;
+    const len = r.range(0.25, 0.36);
+    const shake = v === 1 ? 0 : r.range(12, 16);
+    const env = (t: number) => Math.sin(Math.PI * Math.min(1, t / len)) * (shake ? 0.6 + 0.4 * Math.sin(2 * Math.PI * shake * t) : 1);
+    pcm(k, grains(k.sr, len, r, v === 1 ? 260 : 420, env), 0.005, 1, k.bq('bandpass', r.range(1300, 1800), 0.8), k.bq('lowpass', 3200));
+    // the body settling under the feathers
+    k.burst({ t: len * 0.4, dur: 0.08, color: 'pink', band: [[0, r.range(500, 650)]], q: 1, amp: [[0, 0], [0.02, 1], [0.08, 0]], level: 0.25, wet: 0 });
+  },
+};
+
 // ------------------------------------------------------------------ registry
 
-function bank(base: FoleyBank, n: number, r: Omit<Recipe, 'build'>, build: (k: Kit) => void): Record<string, Recipe> {
+/** `base#0..n−1` (or the bare `base` when n is 0); `v` reaches the generator so variants can differ in gesture too. */
+function bank(base: FoleyBank, n: number, r: Omit<Recipe, 'build'>, build: (k: Kit, v: number) => void): Record<string, Recipe> {
   const out: Record<string, Recipe> = {};
-  const recipe: Recipe = { ...r, build };
-  if (n === 0) out[base] = recipe;
+  if (n === 0) out[base] = { ...r, build: (k) => build(k, 0) };
   // one Recipe per id: the per-id seed makes each variant different
-  for (let i = 0; i < n; i++) out[`${base}#${i}`] = { ...recipe };
+  for (let v = 0; v < n; v++) out[`${base}#${v}`] = { ...r, build: (k) => build(k, v) };
   return out;
 }
 
 type FamilyGen = (k: Kit, v: number) => void;
 
-/** `fx.<kind>.<family>#v` for every family of a kind; `v` reaches the generator so variants differ in shape. */
-function familyBanks(kind: 'breath' | 'chew' | 'drink', gens: Readonly<Record<string, FamilyGen>>, r: Omit<Recipe, 'build' | 'dur'>, dur: Readonly<Record<string, number>>): Record<string, Recipe> {
+/**
+ * `fx.<kind>.<family>#v` for every family of a kind; `v` reaches the generator so variants
+ * differ in shape. `db` trims a family's loudness target (dB re the kind's).
+ */
+function familyBanks(
+  kind: 'breath' | 'chew' | 'drink' | 'rustle',
+  gens: Readonly<Record<string, FamilyGen>>,
+  r: Omit<Recipe, 'build' | 'dur'>,
+  dur: Readonly<Record<string, number>>,
+  db: Readonly<Record<string, number>> = {},
+): Record<string, Recipe> {
   const out: Record<string, Recipe> = {};
   for (const [family, gen] of Object.entries(gens)) {
     const n = FOLEY_BANKS[`fx.${kind}.${family}` as FoleyBank];
-    for (let v = 0; v < n; v++) out[`fx.${kind}.${family}#${v}`] = { ...r, dur: dur[family], build: (k) => gen(k, v) };
+    const rms = r.rms * Math.pow(10, (db[family] ?? 0) / 20);
+    for (let v = 0; v < n; v++) out[`fx.${kind}.${family}#${v}`] = { ...r, rms, dur: dur[family], build: (k) => gen(k, v) };
   }
   return out;
 }
 
-/** Longest content of each family's breath / chew / drink, s (silent ends are trimmed at render). */
-const BREATH_S = { cat: 1.3, pachyderm: 1.5, bear: 1.4, grazer: 1.4, equid: 1.3, primate: 1.35, bird: 1.0 };
+/** Longest content of each family's breath / chew / drink / rustle, s (silent ends are trimmed at render). */
+const BREATH_S = { cat: 1.3, pachyderm: 1.5, bear: 1.4, grazer: 1.4, equid: 1.3, primate: 1.35 };
 const CHEW_S = { cat: 0.6, pachyderm: 0.45, bear: 0.45, grazer: 0.55, equid: 0.45, primate: 0.45, bird: 0.6 };
 const DRINK_S = { cat: 0.18, pachyderm: 0.22, bear: 0.2, grazer: 0.22, equid: 0.24, primate: 0.18, bird: 0.22 };
+const RUSTLE_S = { bird: 0.38 };
+/** Big cats and pachyderms breathe 4 dB under the other families: close up, their breath sat as loud as their voice. */
+const BREATH_DB = { cat: -4, pachyderm: -4 };
+/**
+ * A giant's scuff sits 6 dB under the other steps (phone-weighted at its own rate): it
+ * spreads over 0.2 s and is played at 0.7–0.75×, so on a phone it lands about 3 dB
+ * under a pad step, and no louder in full band.
+ */
+const SCUFF = { ...STEP, rms: STEP.rms * Math.pow(10, -6 / 20) };
 
 export const FOLEY_RECIPES: Record<string, Recipe> = {
   ...bank('fx.step.pad', 3, { dur: 0.12, rate: 16000, hp: 30, ...STEP }, padStep),
   ...bank('fx.step.hoofHard', 3, { dur: 0.08, rate: 16000, hp: 60, ...STEP }, hoofHard),
   ...bank('fx.step.hoofSoft', 3, { dur: 0.1, rate: 16000, hp: 50, ...STEP }, hoofSoft),
   ...bank('fx.step.bird', 2, { dur: 0.05, rate: 16000, hp: 200, ...STEP }, birdStep),
+  ...bank('fx.step.scuff', 3, { dur: 0.23, rate: 8000, hp: 30, ...SCUFF }, scuffStep),
   ...bank('fx.splash.small', 3, { dur: 0.15, rate: 16000, hp: 150, ...SPLASH }, (k) => splash(k, false)),
   ...bank('fx.splash.big', 2, { dur: 0.4, rate: 16000, hp: 50, ...SPLASH }, (k) => splash(k, true)),
   ...bank('fx.lap', 3, { dur: 0.14, rate: 16000, hp: 300, ...SPLASH }, lap),
@@ -827,15 +972,16 @@ export const FOLEY_RECIPES: Record<string, Recipe> = {
   ...bank('fx.crop', 3, { dur: 0.2, rate: 16000, hp: 600, ...OTHER }, crop),
   ...bank('fx.chew', 2, { dur: 1.2, rate: 8000, hp: 100, ...OTHER }, chew),
   ...bank('fx.breath.big', 2, { dur: 1.15, rate: 8000, hp: 80, ...OTHER }, breath),
-  ...bank('fx.flap', 2, { dur: 0.3, rate: 8000, hp: 120, ...OTHER }, flap),
-  ...bank('fx.dust', 0, { dur: 0.6, rate: 11025, hp: 300, ...OTHER }, dust),
+  ...bank('fx.flap', 2, { dur: 0.32, rate: 8000, hp: 60, ...OTHER }, flap),
+  ...bank('fx.dust', 0, { dur: 0.65, rate: 11025, hp: 200, ...OTHER }, dust),
   ...bank('fx.surface', 2, { dur: 0.8, rate: 11025, hp: 120, ...SPLASH }, surface),
   ...bank('fx.dive', 2, { dur: 0.4, rate: 11025, hp: 40, ...SPLASH }, dive),
-  ...bank('fx.tail', 0, { dur: 0.25, rate: 16000, hp: 1200, ...OTHER }, tailSwish),
+  ...bank('fx.tail', 3, { dur: 0.26, rate: 11025, hp: 300, ...OTHER }, tailSwish),
   ...bank('fx.gstep.paved', 3, { dur: 0.05, rate: 16000, hp: 120, ...STEP }, pavedStep),
   ...bank('fx.gstep.gravel', 3, { dur: 0.09, rate: 22050, hp: 1500, ...STEP }, gravelStep),
   ...bank('fx.gstep.board', 3, { dur: 0.12, rate: 16000, hp: 100, ...STEP }, boardStep),
-  ...familyBanks('breath', BREATH, { rate: 16000, hp: 60, ...OTHER }, BREATH_S),
+  ...familyBanks('breath', BREATH, { rate: 16000, hp: 60, ...OTHER }, BREATH_S, BREATH_DB),
   ...familyBanks('chew', CHEW, { rate: 16000, hp: 80, ...OTHER }, CHEW_S),
   ...familyBanks('drink', DRINK, { rate: 16000, hp: 150, ...SPLASH }, DRINK_S),
+  ...familyBanks('rustle', RUSTLE, { rate: 11025, hp: 400, ...OTHER }, RUSTLE_S),
 };

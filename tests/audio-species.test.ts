@@ -10,8 +10,10 @@ import { ANIMAL_RECIPES, SYLLABLES } from '../src/audio/recipes/animals';
 import { BED_RECIPES } from '../src/audio/recipes/beds';
 import { COLONY_RECIPES } from '../src/audio/recipes/colony';
 import { CUE_RECIPES } from '../src/audio/recipes/cues';
+import { Kit } from '../src/audio/kit';
 import type { Recipe } from '../src/audio/render';
 import { SPECIES } from '../src/data/species';
+import { FakeAudioContext, FakeNode, FakeParam } from './helpers/fakeAudio';
 
 /** Nominal decoded size of a recipe, bytes (mono float32). */
 function bytes(r: Recipe): number {
@@ -83,6 +85,21 @@ describe('SPECIES_AUDIO', () => {
     for (const voice of ['lion', 'elephant', 'zebra', 'penguin', 'hippo']) expect(SPECIES_AUDIO[voice].syllables.juv?.variants).toBe(3);
   });
 
+  it('gives the types played in long series or often in a row enough variants not to cycle audibly', () => {
+    for (const [voice, syl, n] of [
+      ['lion', 'grunt', 8],
+      ['giraffe', 'snort', 4],
+      ['rhino', 'snort', 5],
+      ['flamingo', 'grunt', 6],
+      ['penguin', 'pair', 6],
+      ['gorilla', 'hoot', 6],
+    ] as const)
+      expect(SPECIES_AUDIO[voice].syllables[syl].variants, `${voice}.${syl}`).toBeGreaterThanOrEqual(n);
+    // lowSpec renders at most two of each, one whole zebra bray
+    for (const sp of Object.values(SPECIES_AUDIO)) for (const b of Object.values(sp.syllables)) expect(b.lowSpecVariants ?? 2).toBeLessThanOrEqual(2);
+    expect(SPECIES_AUDIO.zebra.syllables.bray.lowSpecVariants).toBe(1);
+  });
+
   it('gives the most-played syllable types six variants', () => {
     for (const [voice, syl] of [
       ['gorilla', 'piggrunt'],
@@ -94,11 +111,8 @@ describe('SPECIES_AUDIO', () => {
       expect(SPECIES_AUDIO[voice].syllables[syl].variants, `${voice}.${syl}`).toBeGreaterThanOrEqual(6);
   });
 
-  it('never lets one animal overlap its own zebra bray cycles or penguin display pairs', () => {
-    for (const [voice, syl] of [
-      ['zebra', 'cycle'],
-      ['penguin', 'pair'],
-    ]) {
+  it('never lets one animal overlap its own penguin display pairs', () => {
+    for (const [voice, syl] of [['penguin', 'pair']]) {
       const sp = SPECIES_AUDIO[voice];
       const bout = sp.bouts.find((b) => b.kind === 'call')!;
       // longest variant at the slowest playback: the deepest individual and the lowest per-play rate
@@ -111,6 +125,83 @@ describe('SPECIES_AUDIO', () => {
           expect(end - items[i].t, `${voice} seed ${seed} #${i}`).toBeLessThanOrEqual(0.02);
         }
       }
+    }
+  });
+});
+
+/** Build a recipe on a recording context: every pulse source with its start and length, s. */
+function pulses(id: string): { t: number; len: number }[] {
+  const r = RECIPES[id];
+  const ctx = new FakeAudioContext(r.rate);
+  const kit = new Kit(ctx as unknown as BaseAudioContext, ctx.createGain() as unknown as AudioNode, null, new Rng(seedFor(id)), r.dur + (r.tail ?? 0));
+  const it = r.build(kit);
+  if (it) while (!it.next().done);
+  return ctx.sources.filter((src) => src.buffer && !src.loop).map((src) => ({ t: src.startAt!, len: src.buffer!.duration }));
+}
+
+describe('zebra bray', () => {
+  it('is one syllable whose inhale-exhale cycles run back to back: cross-fades of 15 ms, no gap', () => {
+    const cycles = new Set<number>();
+    for (let v = 0; v < SPECIES_AUDIO.zebra.syllables.bray.variants; v++) {
+      // squeal, bark, squeal, bark... then the final bark
+      const p = pulses(sylId('zebra', 'bray', v));
+      expect(p.length % 2, `#${v}`).toBe(1);
+      cycles.add((p.length - 1) / 2);
+      // each part (squeal, bark, next squeal...) starts as the previous one ends
+      for (let i = 1; i < p.length; i++) {
+        const gap = p[i].t - (p[i - 1].t + p[i - 1].len);
+        expect(gap, `#${v} part ${i}`).toBeGreaterThanOrEqual(-0.02);
+        expect(gap, `#${v} part ${i}`).toBeLessThanOrEqual(0.02);
+      }
+      expect(p[p.length - 1].t + p[p.length - 1].len).toBeLessThanOrEqual(RECIPES[sylId('zebra', 'bray', v)].dur + 1e-3);
+    }
+    // the variants differ in length: 4, 6 and 7 cycles
+    expect(cycles.size).toBe(3);
+    for (const n of cycles) expect(n >= 4 && n <= 7).toBe(true);
+  });
+});
+
+/** A recording context that also makes oscillators (thumps, flutter). */
+class OscContext extends FakeAudioContext {
+  readonly oscillators: { frequency: FakeParam; startAt: number }[] = [];
+  createOscillator() {
+    const o = Object.assign(new FakeNode(this), {
+      type: 'sine',
+      frequency: new FakeParam(this, 440),
+      detune: new FakeParam(this, 0),
+      startAt: 0,
+      setPeriodicWave() {},
+      start(t = 0) {
+        o.startAt = t;
+      },
+      stop() {},
+    });
+    this.oscillators.push(o);
+    return o;
+  }
+  createPeriodicWave() {
+    return {};
+  }
+}
+
+describe('signature calls up close', () => {
+  it('a chest-beat is a run of hollow, damped beats: nothing rings on between them', () => {
+    for (let v = 0; v < SPECIES_AUDIO.gorilla.syllables.beat.variants; v++) {
+      const id = sylId('gorilla', 'beat', v);
+      const r = RECIPES[id];
+      const ctx = new OscContext(r.rate);
+      const kit = new Kit(ctx as unknown as BaseAudioContext, ctx.createGain() as unknown as AudioNode, null, new Rng(seedFor(id)), r.dur + (r.tail ?? 0));
+      r.build(kit);
+      // every envelope of a beat closes within 80 ms of its start; the body thump decays with τ ≤ 15 ms
+      for (const g of ctx.gains) {
+        const ev = g.gain.scheduled;
+        const set = ev.find((e) => e.type === 'set');
+        const target = ev.find((e) => e.type === 'target');
+        if (target && target.type === 'target') expect(target.tc, id).toBeLessThanOrEqual(0.015);
+        else if (set && ev.length > 2 && ev[ev.length - 1].v === 0) expect(ev[ev.length - 1].t - set.t, id).toBeLessThanOrEqual(0.08);
+      }
+      // resonances are broad (a narrow one rang like a tom-drum)
+      for (const f of ctx.filters) if (f.type === 'bandpass') expect(f.Q.value, id).toBeLessThanOrEqual(3);
     }
   });
 });
@@ -139,14 +230,14 @@ describe('syllable and colony recipes', () => {
   });
 
   it('stay within the memory budget', () => {
-    // demo zoo (where the round's targets are measured): every variant ≤ 6 MB
-    // (a game day renders about 4.2 MB of them: variants render on first use),
-    // the #0 set rendered at warmup ≤ 2.5 MB
-    expect(sylBytes(DEMO_ZOO, false)).toBeLessThanOrEqual(6 * MB);
+    // demo zoo (where the round's targets are measured): every variant ≤ 6.4 MB (A3: whole
+    // zebra brays and bigger grunt, snort, hoot and display banks; variants render on first use
+    // and the engine gives back sounds unheard for minutes), the #0 set rendered at warmup ≤ 2.5 MB
+    expect(sylBytes(DEMO_ZOO, false)).toBeLessThanOrEqual(6.4 * MB);
     expect(sylBytes(DEMO_ZOO, true)).toBeLessThanOrEqual(2.5 * MB);
-    // any species adds at most 1.5 MB (the lion, with six roars and moans), 0.5 MB at warmup
+    // any species adds at most 1.6 MB (the lion, with six roars and moans and eight grunts), 0.5 MB at warmup
     for (const voice of Object.keys(SPECIES_AUDIO)) {
-      expect(sylBytes([voice], false), voice).toBeLessThanOrEqual(1.5 * MB);
+      expect(sylBytes([voice], false), voice).toBeLessThanOrEqual(1.6 * MB);
       expect(sylBytes([voice], true), voice).toBeLessThanOrEqual(0.5 * MB);
     }
     // colony loops, once folded

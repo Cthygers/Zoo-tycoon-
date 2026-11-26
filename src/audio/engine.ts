@@ -67,13 +67,17 @@ const MODULES = import.meta.glob<AudioModuleFactory>('./modules/*.ts', { eager: 
 
 const BED_IDS = ['wind', 'birds', 'night', 'crowd', 'water', 'fountain', 'savanna', 'savanna.night', 'arctic', 'humid', 'humid.night'] as const;
 type BedId = (typeof BED_IDS)[number];
-/** Static mix level of each bed relative to its normalised buffer (biome beds carry theirs in the level formula). */
+/**
+ * Static mix level of each bed relative to its normalised buffer (biome beds carry theirs in the level formula).
+ * Crowd and water renders are peak-bound: their talk bursts and slap clusters leave them 1 / 2 dB under the
+ * RMS of the steadier A2 versions, made up here.
+ */
 const BED_MIX: Record<BedId, number> = {
   wind: 0.36,
   birds: 0.5,
   night: 0.4,
-  crowd: 0.4,
-  water: 0.42,
+  crowd: 0.45,
+  water: 0.53,
   fountain: 0.36,
   savanna: 1,
   'savanna.night': 1,
@@ -89,10 +93,17 @@ const CUE_IDS: readonly Cue[] = ['tap', 'select', 'open', 'close', 'build', 'bul
 const CHANNELS: readonly Channel[] = ['ambience', 'world', 'ui', 'music'];
 const VOLUME_CHANNELS: readonly AudioChannel[] = ['master', ...CHANNELS];
 /**
- * Master gain into the glue compressor, calibrated on the demo zoo's day cycle with the
- * focus mix and the altitude trim: −17.3 LUFS integrated, overview −18.3, night −20.6.
+ * Master gain into the glue compressor, calibrated on the demo zoo's 480 s day cycle with the
+ * focus mix, the presence leveller and the fauna module's presence calls: −16.4 LUFS
+ * integrated, overview −19.6, night −22.1, true peak −1.6 dBTP.
  */
-const MASTER = 2.25;
+const MASTER = 2.07;
+/**
+ * Limiter threshold, dBFS (ratio 20). A DynamicsCompressorNode adds makeup gain, 0.6 × its full-scale
+ * gain reduction (+3.4 dB here), so held peaks leave it at ≈ −2.6 dBFS: clear of the soft clip's knee
+ * (0.8 = −1.9 dBFS) and of −1 dBTP. At −3 dB they left at −1.3 dBFS and fed the knee.
+ */
+const LIMIT_DB = -6;
 /**
  * Static channel levels: a lion roar within its reference distance −10…−13 LUFS
  * momentary; UI cues clear of a busy day bed on a phone (the UI scale below
@@ -103,38 +114,101 @@ const CHANNEL_LEVEL: Record<Channel, number> = { ambience: 0.55, world: 0.4, ui:
 const REVERB_RETURN = 1.8;
 /** The shared reverb's IR is set up in this many partial convolvers (one main-thread slice each). */
 const REVERB_PARTS = 3;
-/** Σ bed levels in a busy daytime close view: the UI channel is at full level from here up. */
+/** Σ bed levels in a busy daytime close view: the UI channel's reference level. */
 const DAY_CLOSE_REF = 1;
 /**
- * The UI level follows the ambience, (Σ bed levels / DAY_CLOSE_REF)^UI_SCALE_SLOPE down to
- * UI_SCALE_FLOOR, so the cues keep about the same margin over the beds in every view: a night
- * overview's beds are ~12 dB quieter on a phone for a third of the bed-level sum.
+ * The UI level follows the ambience, (Σ bed levels / DAY_CLOSE_REF)^UI_SCALE_SLOPE between
+ * UI_SCALE_FLOOR and UI_SCALE_MAX, so the cues keep about the same margin over the beds in every
+ * view: a night overview's beds are ~12 dB quieter on a phone for half the bed-level sum, and a
+ * crowded plaza by the fountain is busier than the reference.
  */
-const UI_SCALE_SLOPE = 2;
+const UI_SCALE_SLOPE = 2.5;
 const UI_SCALE_FLOOR = 0.165;
+const UI_SCALE_MAX = 1.4;
+/** The UI channel's scale and focus boost together stay under this (+4 dB): cue peaks stay clear of the limiter. */
+const UI_GAIN_MAX = 1.6;
 /**
  * Focus views: the camera follows an animal, has one selected or hovers close over
- * some. Full focus mix with the camera within FOCUS_CAM[0] m of its focus, none
- * from FOCUS_CAM[1] m (well before the overview).
+ * some. Full focus mix with the camera within FOCUS_CAM[0] m of its focus (the game's
+ * own follow framing lands at ≈ 23.4 m), none from FOCUS_CAM[1] m.
  */
-const FOCUS_CAM: readonly [number, number] = [20, 30];
+const FOCUS_CAM: readonly [number, number] = [24, 34];
 /** A followed or selected animal further than this from the focus point (m) is not the one in view. */
 const FOCUS_ANIMAL_RADIUS = 25;
-/** Hovering: any animal within this many m of the focus point. */
-const FOCUS_HOVER_RADIUS = 12;
+/**
+ * Hovering: a focus starts when an animal comes within FOCUS_HOVER_START m of the focus point
+ * and ends once the nearest is beyond FOCUS_HOVER_END m, at least FOCUS_HOLD s later (a pan
+ * across a habitat must not toggle the mix). Its depth follows the nearest animal's distance:
+ * full within FOCUS_PROXIMITY[0] m, none from FOCUS_PROXIMITY[1] m.
+ */
+const FOCUS_HOVER_START = 12;
+const FOCUS_HOVER_END = 18;
+const FOCUS_HOLD = 3;
+const FOCUS_PROXIMITY: readonly [number, number] = [8, 18];
 /**
  * Focus mix, so the animal in view (breath, steps, chewing, calls) cuts through on a
  * phone speaker: ambience −6 dB, plus a −6 dB dip around 3.4 kHz where the birds,
- * cicadas and humid-biome insects sit; world (animals) +4 dB of presence, which also keeps
- * the view's loudness up.
+ * cicadas and humid-biome insects sit; world (animals) +2 dB of presence by day (the fauna
+ * module brings the focus animal itself forward) and −6 dB at night, so a close-up on a
+ * roaring pride is not the loudest scene in the game; UI cues +5 dB so they stay clear of
+ * the close-up's calls, steps and breaths.
  */
 const FOCUS_AMB_DB = -6;
-const FOCUS_WORLD_DB = 4;
+const FOCUS_WORLD_DB = 2;
+const FOCUS_WORLD_NIGHT_DB = -6;
+const FOCUS_UI_DB = 5;
 const FOCUS_BAND = { hz: 3400, q: 0.8, db: -6 } as const;
-/** Focus mix attack / release time constants (s): ≈ 0.6 s in, ≈ 1.5 s out. */
-const FOCUS_TC: readonly [number, number] = [0.2, 0.5];
-/** World voices recede as the camera rises (gain at the overview: −6 dB). Lion choruses must not make the overview the loudest view. */
+/**
+ * Outside focus views the birds' band dips too, less with height: BAND_BY_DIST[2] of the focus
+ * dip at BAND_BY_DIST[0] m, BAND_BY_DIST[3] from BAND_BY_DIST[1] m (mid views are not wall-to-wall birds).
+ */
+const BAND_BY_DIST: readonly [number, number, number, number] = [24, 52, 0.6, 0.3];
+/**
+ * Focus amount smoothing: attack / release time constants (s), and the attack's rate limit
+ * (per s), so the ambience moves at most ~5 dB in a second when a pan passes animals.
+ */
+const FOCUS_TC: readonly [number, number] = [0.5, 1.5];
+const FOCUS_RISE_MAX = 0.8;
+/**
+ * Animal foley, steps and colony loops recede as the camera rises (gain at the overview: −6 dB);
+ * vocal calls hardly do (−1.9 dB): they are what carries the zoo's animals to a mid or overview camera.
+ */
 const ALTITUDE_TRIM_MIN = 0.5;
+const VOCAL_ALTITUDE_MIN = 0.8;
+/**
+ * Presence leveller (non-focus views): when many habitats call at once, the calls must not bury the
+ * zoo's ambience. Their slow mean power (PRESENCE_TC s, estimated from the plays: heard level × the
+ * sound's RMS, against the beds' levels × their RMS) may reach PRESENCE_RATIO[2] dB re the beds at
+ * PRESENCE_RATIO[0] m, PRESENCE_RATIO[3] dB from PRESENCE_RATIO[1] m up; above that the calls are turned
+ * down (at most PRESENCE_CUT dB, slewed at PRESENCE_SLEW dB/s down / up). A sparse zoo is never turned
+ * up. The estimate reads ≈ 6 dB under the stems on a phone (reverb, colony loops, the calls' mid-band
+ * weight): the ratios below put the heard calls ≈ 1 dB over the ambience at 40 m and 2 dB under it at
+ * the overview (−19 LUFS there).
+ */
+const PRESENCE_RATIO: readonly [number, number, number, number] = [40, 90, -5, -8];
+const PRESENCE_TC = 12;
+const PRESENCE_CUT = -12;
+const PRESENCE_SLEW: readonly [number, number] = [1.5, 0.75];
+/**
+ * Beds at mid and overview cameras by day: BED_HEIGHT_DB from BED_HEIGHT_CAM[1] m up, room for the
+ * animals' landmark calls (a night zoo has few calls to make room for, and its beds are quiet already).
+ */
+const BED_HEIGHT_DB = -1.5;
+const BED_HEIGHT_CAM: readonly [number, number] = [24, 45];
+/**
+ * Near-field calls: a vocal play heard above VOICE_CEIL (linear, focus boost included; 1 = a lion
+ * roar at its reference distance) is compressed 2:1 above it. Peaks stay clear of the limiter and
+ * a close roar is still the loudest thing in the scene.
+ */
+const VOICE_CEIL = 0.5;
+/** A loud call (or a play with `duck`) dips the ambience this much (dB) while it plays, outside focus views. */
+const CALL_DUCK_DB = -3;
+/** A landmark call in a non-focus view dips the ambience this much (dB) for its length, at least LANDMARK_HOLD s. */
+const LANDMARK_DB = -3;
+const LANDMARK_HOLD = 1;
+/** Fountains run from FOUNTAIN_HOURS[0] to FOUNTAIN_HOURS[1] h while the zoo is open; they start and stop over FOUNTAIN_FADE s. */
+const FOUNTAIN_HOURS: readonly [number, number] = [7, 22];
+const FOUNTAIN_FADE = 20;
 /** Tutorial read-aloud: ambience and world −9 dB; attack / release time constants (≈ 0.25 s / 0.6 s). */
 const SPEECH_DB = -9;
 const SPEECH_TC: readonly [number, number] = [0.083, 0.2];
@@ -148,8 +222,17 @@ const LOWSPEC_RATE = 16000;
 /** Max keyed loops [normal, lowSpec] and beds playing at once. */
 const MAX_LOOPS: readonly [number, number] = [4, 2];
 const MAX_BEDS: readonly [number, number] = [7, 5];
-/** lowSpec: a bed silent this long (s) releases its buffer (decoded memory ≤ 14 MB over a game day). */
-const LOWSPEC_BED_RELEASE = 180;
+/**
+ * Decoded audio: a sound not heard for SOUND_RELEASE s gives its buffer back (beds, loops, syllable
+ * and foley variants other than #0, ambient one-shots; never the UI cues or a bank's #0, so a
+ * focus sound always has a variant at hand). A released variant renders again in the background
+ * the next time its bank is looked at. Above DECODED_CAP MiB [normal, lowSpec], sounds idle for
+ * CAP_IDLE s go too, least recently used first. Checked every RELEASE_SWEEP s.
+ */
+const SOUND_RELEASE = 180;
+const DECODED_CAP: readonly [number, number] = [21, 13];
+const CAP_IDLE = 30;
+const RELEASE_SWEEP = 10;
 /** Steal / stop fade (s) and the gap before a stolen voice restarts. */
 const STEAL_FADE = 0.02;
 const STEAL_GAP = 0.025;
@@ -610,7 +693,9 @@ interface ChannelNodes {
   vol: GainNode;
   /** Short ducks (calls, celebrate), separate from the volume. */
   duck: GainNode;
-  /** Slow mix trims: focus views and the tutorial's speech. */
+  /** The focus mix (ramped at the mix rate). */
+  focus: GainNode;
+  /** The tutorial's speech duck. */
   trim: GainNode;
   duckDb: number;
   duckUntil: number;
@@ -660,14 +745,27 @@ export class ZooAudio implements IAudio {
   private sfxBus!: AudioNode;
   private uiBus!: AudioNode;
   private reverbIn!: GainNode;
-  /** Animal voices, foley and colony loops (and their reverb send): the altitude trim. */
+  /** Animal foley and colony loops (and their reverb send): the altitude trim. */
   private animalBus!: GainNode;
   private animalSend!: GainNode;
+  /** Animal calls (and their reverb send): the vocal altitude trim. */
+  private vocalBus!: GainNode;
+  private vocalSend!: GainNode;
   /** Focus views: the dip of the birds' and insects' band on the ambience. */
   private focusEq!: BiquadFilterNode;
-  /** Current focus amount 0..1 and altitude trim (targets of the smoothed params). */
+  /** Current focus amount 0..1 (smoothed), birds' band dip 0..1, the world's focus boost (dB) and altitude trim. */
   private focus = 0;
+  private band = 0;
+  private worldDb = 0;
+  /** The UI channel's focus boost (linear), capped with the UI scale by UI_GAIN_MAX. */
+  private uiFocus = 1;
   private altitude = 1;
+  /** Hover focus: on (hysteresis), held until this engine time, and its depth floor while held. */
+  private hoverOn = false;
+  private hoverUntil = 0;
+  private hoverFloor = 0;
+  /** Fountains running 0..1 (fades with the hour and the zoo closing); −1 until the first update. */
+  private fountainRun = -1;
   private selectedId = -1;
   private speech = false;
   private speechUntil = 0;
@@ -679,6 +777,16 @@ export class ZooAudio implements IAudio {
   private fxVoices: Voice[] = this.pools.fx;
   private uiLive = 0;
   private readonly sounds = new Map<string, SoundAsset>();
+  /** Engine time each rendered sound was last played (beds and loops: heard). */
+  private readonly lastUsed = new Map<string, number>();
+  /** Presence leveller: decaying energy of the calls played (heard level² × RMS² × s) and its trim, dB. */
+  private callEnergy = 0;
+  private presenceDb = 0;
+  /** The calls' bus gain: vocal altitude trim × presence trim. */
+  private vocalGain = 1;
+  /** Sounds whose buffers were given back: they render again when asked for. */
+  private readonly released = new Set<string>();
+  private sweepT = RELEASE_SWEEP;
   private readonly pending = new Set<string>();
   private readonly failed = new Set<string>();
   private queue: string[] = [];
@@ -837,7 +945,7 @@ export class ZooAudio implements IAudio {
         return self.followId;
       },
       attenuate: (x, y, z, refDist, radius) => this.attenuate(x, y, z, refDist, radius),
-      has: (id) => this.sounds.has(id),
+      has: (id) => this.hasSound(id),
       request: (id, urgent) => this.request(id, urgent),
       duration: (id) => this.sounds.get(id)?.duration ?? 0,
       play: (spec) => this.playSpec(spec),
@@ -1026,9 +1134,14 @@ export class ZooAudio implements IAudio {
     this.envT -= dt;
     if (this.envT <= 0) {
       this.envT = 0.25;
+      this.sweepT -= 0.25;
+      if (this.sweepT <= 0) {
+        this.sweepT = RELEASE_SWEEP;
+        this.releaseIdle();
+      }
       this.sampleEnvironment(0.25);
       this.updateBeds(0.25);
-      this.updateMix();
+      this.updateMix(0.25);
       this.reseekOne();
     }
     this.animT -= dt;
@@ -1073,6 +1186,8 @@ export class ZooAudio implements IAudio {
     }
     this.ctx = null;
     this.sounds.clear();
+    this.lastUsed.clear();
+    this.released.clear();
     this.queue.length = 0;
     this.urgentIds.clear();
     this.pending.clear();
@@ -1157,7 +1272,7 @@ export class ZooAudio implements IAudio {
         zoomNear: r2(this.ear.zoomNear),
         near: this.nearCount,
       },
-      mix: { focus: r2(this.focus), altitude: r2(this.altitude), speech: this.speech, uiScale: r2(this.uiScale) },
+      mix: { focus: r2(this.focus), band: r2(this.band), altitude: r2(this.altitude), presenceDb: r2(this.presenceDb), speech: this.speech, uiScale: r2(this.uiScale), fountains: r2(this.fountainRun) },
     };
   }
 
@@ -1207,7 +1322,7 @@ export class ZooAudio implements IAudio {
     glue.attack.value = 0.015;
     glue.release.value = 0.3;
     const limiter = c.createDynamicsCompressor();
-    limiter.threshold.value = -3;
+    limiter.threshold.value = LIMIT_DB;
     limiter.knee.value = 0;
     limiter.ratio.value = 20;
     limiter.attack.value = 0.001;
@@ -1241,11 +1356,13 @@ export class ZooAudio implements IAudio {
       const vol = c.createGain();
       vol.gain.value = this.volumes[ch] ** 2;
       const duck = c.createGain();
+      const focus = c.createGain();
       const trim = c.createGain();
       input.connect(vol);
       vol.connect(duck);
-      duck.connect(trim);
-      chan[ch] = { input, vol, duck, trim, duckDb: 0, duckUntil: 0 };
+      duck.connect(focus);
+      focus.connect(trim);
+      chan[ch] = { input, vol, duck, focus, trim, duckDb: 0, duckUntil: 0 };
     }
     this.chan = chan;
     // focus views dip the band where the birds and insects sing, on the ambience only
@@ -1265,6 +1382,9 @@ export class ZooAudio implements IAudio {
     this.animalBus = c.createGain();
     this.animalBus.connect(chan.world.input);
     this.animalSend = c.createGain();
+    this.vocalBus = c.createGain();
+    this.vocalBus.connect(chan.world.input);
+    this.vocalSend = c.createGain();
     // a speech duck asked for before the context existed
     if (this.speech) for (const ch of ['ambience', 'world'] as const) chan[ch].trim.gain.value = dbGain(SPEECH_DB);
     // One shared outdoor reverb, returned into the world channel. Built by the render queue after
@@ -1275,6 +1395,7 @@ export class ZooAudio implements IAudio {
     this.reverbIn = c.createGain();
     this.reverbIn.gain.value = REVERB_RETURN;
     this.animalSend.connect(this.reverbIn);
+    this.vocalSend.connect(this.reverbIn);
     const reverbIn = this.reverbIn;
     const out = chan.world.input;
     this.reverbBuild = async () => {
@@ -1303,10 +1424,9 @@ export class ZooAudio implements IAudio {
     for (const id of BED_IDS) this.beds.set(id, new Bed(c, chan.ambience.input, !this.lowSpec || LOWSPEC_STEREO.has(id)));
     const tier = this.lowSpec ? 1 : 0;
     for (const p of ['voice', 'foley', 'fx', 'amb'] as const) {
-      // animal voices and foley go through the altitude trim; coins, bells and crates do not
-      const animal = p === 'voice' || p === 'foley';
-      const dest = animal ? this.animalBus : chan[POOL_CHANNEL[p]].input;
-      const rev = animal ? this.animalSend : POOL_CHANNEL[p] === 'world' ? this.reverbIn : null;
+      // animal calls and foley take their altitude trims; coins, bells and crates do not
+      const dest = p === 'voice' ? this.vocalBus : p === 'foley' ? this.animalBus : chan[POOL_CHANNEL[p]].input;
+      const rev = p === 'voice' ? this.vocalSend : p === 'foley' ? this.animalSend : POOL_CHANNEL[p] === 'world' ? this.reverbIn : null;
       for (let i = 0; i < POOL_SIZES[p][tier]; i++) this.pools[p].push(new Voice(c, dest, rev));
     }
     if (!this.injected) {
@@ -1454,6 +1574,8 @@ export class ZooAudio implements IAudio {
           const a = await renderRecipe(RECIPES[id], seedFor(id), lowRate ? { maxRate: LOWSPEC_RATE } : undefined);
           if (this.disposed) return;
           this.sounds.set(id, a);
+          this.lastUsed.set(id, this.time);
+          this.released.delete(id);
         } catch (err) {
           this.failed.add(id);
           if (!this.warned) {
@@ -1533,7 +1655,7 @@ export class ZooAudio implements IAudio {
     const c = this.ctx!;
     const now = c.currentTime;
     const when = Math.max(now, spec.when ?? now);
-    const level = spec.gain ?? 1;
+    let level = spec.gain ?? 1;
     const rate = spec.rate ?? 1;
     if (pool === 'ui') return this.playUi(asset.buffer, spec.id, level, rate, when);
 
@@ -1559,6 +1681,8 @@ export class ZooAudio implements IAudio {
     const refDist = spec.refDist ?? DEFAULT_REF_DIST;
     const radius = spec.radius ?? DEFAULT_RADIUS;
     const att = positional ? this.attenuate(px, py, pz, refDist, radius) : this.centred();
+    // near-field calls: the focus boost and the call's own level stop pushing it into the limiter
+    if (pool === 'voice') level *= voiceCeiling(level * att.gain * dbGain(this.worldDb));
     const final = level * att.gain;
     if (final < 0.01) return null;
     const pv = this.pools[pool];
@@ -1580,7 +1704,10 @@ export class ZooAudio implements IAudio {
       v.group = spec.group ?? -1;
       layer = v.start(asset.buffer, rate, level, when, att, spec.color);
     }
-    if (spec.duck ?? (pool === 'voice' && final > 0.3)) this.duck('ambience', -3, layer.endAt - now);
+    if (spec.landmark) this.ambienceDip(LANDMARK_DB, Math.max(LANDMARK_HOLD, layer.endAt - now));
+    else if (spec.duck ?? (pool === 'voice' && final > 0.3)) this.ambienceDip(CALL_DUCK_DB, layer.endAt - now);
+    if (pool === 'voice') this.callEnergy += (final * asset.rms) ** 2 * (asset.duration / rate);
+    this.lastUsed.set(spec.id, this.time);
     this.log(spec.id, pool, final, rate, positional ? att.dist : 0, track, px, pz, spec.group ?? -1, when);
     const voice = v;
     return {
@@ -1634,6 +1761,54 @@ export class ZooAudio implements IAudio {
     this.debugLog.push({ t: r(t), id, pool, gain: r(gain), rate: r(rate), dist: r(dist, 10), track, x: r(x, 10), z: r(z, 10), group });
   }
 
+  /** Rendered and ready. A sound whose buffer was released renders again in the background (re-render on demand). */
+  private hasSound(id: string): boolean {
+    if (this.sounds.has(id)) return true;
+    if (this.released.has(id)) this.request(id);
+    return false;
+  }
+
+  /**
+   * Give back the buffers of sounds not heard for SOUND_RELEASE s, then, while decoded audio is
+   * over its cap, of those idle for CAP_IDLE s, least recently used first. Buffers that playing
+   * beds and loops hold are kept.
+   */
+  private releaseIdle(): void {
+    const held = new Set<SoundAsset>();
+    for (const b of this.beds.values()) {
+      if (b.playing) for (const a of [b.asset, b.assetB]) if (a) held.add(a);
+    }
+    for (const e of this.loops.values()) if (e.bed.asset) held.add(e.bed.asset);
+    let bytes = 0;
+    const idle: [string, number][] = [];
+    for (const [id, a] of this.sounds) {
+      bytes += decodedBytes(a);
+      if (held.has(a) || !releasable(id)) continue;
+      const since = this.time - (this.lastUsed.get(id) ?? 0);
+      if (since >= CAP_IDLE) idle.push([id, since]);
+    }
+    const cap = DECODED_CAP[this.lowSpec ? 1 : 0] * 1048576;
+    idle.sort((x, y) => y[1] - x[1]);
+    for (const [id, since] of idle) {
+      if (since < SOUND_RELEASE && bytes <= cap) break;
+      bytes -= decodedBytes(this.sounds.get(id)!);
+      this.releaseSound(id);
+    }
+  }
+
+  private releaseSound(id: string): void {
+    const a = this.sounds.get(id)!;
+    this.sounds.delete(id);
+    this.lastUsed.delete(id);
+    this.released.add(id);
+    // a silent bed lets go of its buffer too (it re-requests it when it is heard again)
+    for (const b of this.beds.values()) {
+      if (b.playing) continue;
+      if (b.asset === a) b.asset = null;
+      if (b.assetB === a) b.assetB = null;
+    }
+  }
+
   private playing(pool: Pool): number {
     if (!this.ctx) return 0;
     if (pool === 'ui') return this.uiLive;
@@ -1683,6 +1858,7 @@ export class ZooAudio implements IAudio {
     }
     if (e.bed.asset && !e.bed.playing && level > 0.004) e.bed.start(this.rng);
     if (e.bed.playing) {
+      this.lastUsed.set(id, this.time);
       e.bed.setLevel(level, 0.9);
       e.bed.setBias(side);
     }
@@ -1722,8 +1898,17 @@ export class ZooAudio implements IAudio {
     g.setTargetAtTime(1, until, 0.4); // ≈ 1.2 s release
   }
 
-  /** 4 Hz: the altitude trim of the animals, the focus mix and the speech duck's failsafe. */
-  private updateMix(): void {
+  /**
+   * The ambience makes room for a call for `hold` s. Scaled out as the focus mix comes in: a focus
+   * view has made room already, and ducking again under each call would pump the ambience.
+   */
+  private ambienceDip(db: number, hold: number): void {
+    const depth = db * (1 - this.focus);
+    if (depth < -0.5) this.duck('ambience', depth, hold);
+  }
+
+  /** 4 Hz (every `dt` s): the altitude trim of the animals, the focus mix and the speech duck's failsafe. */
+  private updateMix(dt: number): void {
     const now = this.ctx!.currentTime;
     const alt = ALTITUDE_TRIM_MIN + (1 - ALTITUDE_TRIM_MIN) * this.ear.zoomNear;
     if (Math.abs(alt - this.altitude) > 0.01) {
@@ -1731,41 +1916,90 @@ export class ZooAudio implements IAudio {
       for (const g of [this.animalBus.gain, this.animalSend.gain]) g.setTargetAtTime(alt, now, 0.5);
     }
     if (this.speech && this.time > this.speechUntil) this.speechDuck(false);
-    const f = this.focusAmount();
-    if (Math.abs(f - this.focus) > 0.02 || (f !== this.focus && (f === 0 || f === 1))) {
-      const tc = f > this.focus ? FOCUS_TC[0] : FOCUS_TC[1];
-      this.focus = f;
-      this.applyTrims(tc);
+    const f = smoothFocus(this.focus, this.focusTarget(), dt);
+    this.levelPresence(dt, f);
+    const band = Math.max(f, bandAt(this.ear.camDist));
+    const n = this.nightness;
+    const worldDb = (FOCUS_WORLD_DB * (1 - n) + FOCUS_WORLD_NIGHT_DB * n) * f;
+    const uiFocus = Math.max(1, Math.min(dbGain(FOCUS_UI_DB * f), UI_GAIN_MAX / this.uiScale));
+    if (f === this.focus && Math.abs(band - this.band) < 0.01 && Math.abs(worldDb - this.worldDb) < 0.1 && Math.abs(uiFocus - this.uiFocus) < 0.01) return;
+    this.focus = f;
+    this.band = band;
+    this.worldDb = worldDb;
+    this.uiFocus = uiFocus;
+    // linear ramps to this tick's values, reached as the next tick starts: the gains never step
+    const end = now + dt;
+    const ramp = (p: AudioParam, v: number) => {
+      hold(p, now);
+      p.linearRampToValueAtTime(v, end);
+    };
+    ramp(this.chan.ambience.focus.gain, dbGain(FOCUS_AMB_DB * f));
+    ramp(this.chan.world.focus.gain, dbGain(worldDb));
+    ramp(this.chan.ui.focus.gain, uiFocus);
+    ramp(this.focusEq.gain, FOCUS_BAND.db * band);
+  }
+
+  /** The presence leveller's step (see PRESENCE_RATIO), applied with the vocal altitude trim on the calls' bus. */
+  private levelPresence(dt: number, focus: number): void {
+    this.callEnergy *= Math.exp(-dt / PRESENCE_TC);
+    // the beds play two sides each, into a louder channel than the calls
+    let beds = 0;
+    for (const b of this.beds.values()) if (b.playing && b.asset) beds += 2 * (b.level * b.asset.rms) ** 2;
+    const calls = (this.callEnergy / PRESENCE_TC) * (CHANNEL_LEVEL.world / CHANNEL_LEVEL.ambience) ** 2;
+    // a close-up's own calls are not a zoo calling at once: the leveller rests in focus views, and the
+    // focus mix takes its trim off as it comes in (a tap to follow is answered at full level)
+    const target = focus < 0.5 ? presenceTrim(calls, beds, this.ear.camDist) : 0;
+    const step = (target < this.presenceDb ? PRESENCE_SLEW[0] : PRESENCE_SLEW[1]) * dt;
+    const next = approach(this.presenceDb, target, step);
+    const vocal = (VOCAL_ALTITUDE_MIN + (1 - VOCAL_ALTITUDE_MIN) * this.ear.zoomNear) * dbGain(next * (1 - focus));
+    if (Math.abs(vocal - this.vocalGain) < 0.005) return;
+    this.presenceDb = next;
+    this.vocalGain = vocal;
+    const now = this.ctx!.currentTime;
+    for (const g of [this.vocalBus.gain, this.vocalSend.gain]) {
+      hold(g, now);
+      g.linearRampToValueAtTime(vocal, now + dt);
     }
   }
 
   /**
-   * 0..1, how much this is a focus view: the camera close to its focus, with the followed
-   * animal (else the selected one) in view, else any animal right under the focus point.
+   * 0..1, how deep a focus view this is: the camera close to its focus, with the followed animal
+   * (else the selected one) in view, else hovering over animals (hysteresis and hold, depth by
+   * the nearest one's distance from the focus point).
    */
-  private focusAmount(): number {
+  private focusTarget(): number {
     const e = this.ear;
     const close = 1 - smoothstep(FOCUS_CAM[0], FOCUS_CAM[1], e.camDist);
-    if (close <= 0) return 0;
-    const near = (a: AnimalState | undefined, r: number) => !!a && (a.x - e.fx) ** 2 + (a.z - e.fz) ** 2 <= r * r;
+    if (close <= 0) {
+      this.hoverOn = false;
+      return 0;
+    }
+    const d2 = (a: AnimalState) => (a.x - e.fx) ** 2 + (a.z - e.fz) ** 2;
     const id = this.followId >= 0 ? this.followId : this.selectedId;
-    if (id >= 0 && near(this.sim.animals.get(id), FOCUS_ANIMAL_RADIUS)) return close;
-    for (const a of this.sim.animals.values()) if (near(a, FOCUS_HOVER_RADIUS)) return close;
-    return 0;
+    const chosen = id >= 0 ? this.sim.animals.get(id) : undefined;
+    if (chosen && d2(chosen) <= FOCUS_ANIMAL_RADIUS ** 2) return close;
+    let best = Infinity;
+    for (const a of this.sim.animals.values()) best = Math.min(best, d2(a));
+    const dn = Math.sqrt(best);
+    const depth = 1 - smoothstep(FOCUS_PROXIMITY[0], FOCUS_PROXIMITY[1], dn);
+    if (dn <= FOCUS_HOVER_START && !this.hoverOn) {
+      this.hoverOn = true;
+      this.hoverUntil = this.time + FOCUS_HOLD;
+      this.hoverFloor = depth;
+    } else if (this.hoverOn && dn > FOCUS_HOVER_END && this.time >= this.hoverUntil) this.hoverOn = false;
+    if (!this.hoverOn) return 0;
+    return close * (this.time < this.hoverUntil ? Math.max(depth, this.hoverFloor) : depth);
   }
 
-  /** Ramp the slow trims (focus mix + speech duck) to their targets with time constant `tc`. */
+  /** Ramp the speech duck's trim to its target with time constant `tc`. */
   private applyTrims(tc: number): void {
     const now = this.ctx!.currentTime;
-    const sp = this.speech ? SPEECH_DB : 0;
-    const f = this.focus;
-    const set = (p: AudioParam, v: number) => {
+    const v = dbGain(this.speech ? SPEECH_DB : 0);
+    for (const ch of ['ambience', 'world'] as const) {
+      const p = this.chan[ch].trim.gain;
       hold(p, now);
       p.setTargetAtTime(v, now, tc);
-    };
-    set(this.chan.ambience.trim.gain, dbGain(FOCUS_AMB_DB * f + sp));
-    set(this.chan.world.trim.gain, dbGain(FOCUS_WORLD_DB * f + sp));
-    set(this.focusEq.gain, FOCUS_BAND.db * f);
+    }
   }
 
   private setWorldFilter(cutHz: number, gainDb: number, tc: number): void {
@@ -1998,7 +2232,10 @@ export class ZooAudio implements IAudio {
     // close: the guests around the ear; overview: the whole visible crowd, muffled
     L.crowd = this.openness * (zn * this.crowdNear + (1 - zn) * 0.55 * this.crowdFar);
     L.water = this.waterNear * (0.3 + 0.7 * zn);
-    L.fountain = this.fountainNear * (0.25 + 0.75 * zn);
+    const run = fountainsOn(h, this.sim.isOpen()) ? 1 : 0;
+    // the first update starts in the right state; later the fountains start and stop over FOUNTAIN_FADE s
+    this.fountainRun = this.fountainRun < 0 ? run : approach(this.fountainRun, run, dt / FOUNTAIN_FADE);
+    L.fountain = this.fountainNear * (0.25 + 0.75 * zn) * this.fountainRun;
     for (const bm of ['savanna', 'humid'] as const) {
       const nightId = `${bm}.night` as const;
       // lowSpec keeps to one bed per biome (memory): the day bed thins out at night instead
@@ -2015,9 +2252,9 @@ export class ZooAudio implements IAudio {
     const cap = MAX_BEDS[this.lowSpec ? 1 : 0];
     const ambOn = this.channelOn('ambience');
     let sum = 0;
+    const height = bedHeightTrim(this.ear.camDist, night);
     for (const id of BED_IDS) {
-      // no altitude recession here: from above, the animals recede (animalBus) and the zoo's ambience carries the overview
-      const tgt = ambOn && RECIPES[`bed.${id}`] ? L[id] * BED_MIX[id] : 0;
+      const tgt = ambOn && RECIPES[`bed.${id}`] ? L[id] * BED_MIX[id] * height : 0;
       L[id] = tgt;
       sum += tgt;
     }
@@ -2045,18 +2282,12 @@ export class ZooAudio implements IAudio {
         }
         if (bed.asset && !bed.playing && (bed.assetB || !wantB)) bed.start(this.rng);
         bed.quiet = 0;
+        this.lastUsed.set(`bed.${id}`, this.time);
+        if (wantB) this.lastUsed.set(bId, this.time);
       } else if (bed.playing) {
         bed.quiet += dt;
         // over the cap: make room now; otherwise let it fade for 4 s first
         if (bed.quiet > 4 || L[id] > 0.004) bed.stop();
-      } else if (this.lowSpec && bed.asset) {
-        // lowSpec: a bed silent for minutes gives its buffer back; it renders again when it is heard again
-        bed.quiet += dt;
-        if (bed.quiet > LOWSPEC_BED_RELEASE) {
-          bed.asset = bed.assetB = null;
-          this.sounds.delete(`bed.${id}`);
-          this.sounds.delete(`bed.${id}.b`);
-        }
       }
       if (bed.playing) bed.setLevel(tgt, 0.9);
     }
@@ -2075,7 +2306,7 @@ export class ZooAudio implements IAudio {
       if (bm !== 'arctic') this.beds.get(`${bm}.night`)!.setBias(bias);
     }
     // UI cues sit relative to the ambience: quieter in a quiet night overview
-    const uiScale = Math.max(UI_SCALE_FLOOR, Math.min(1, sum / DAY_CLOSE_REF) ** UI_SCALE_SLOPE);
+    const uiScale = uiScaleFor(sum);
     if (Math.abs(uiScale - this.uiScale) > 0.01) {
       const g = this.chan.ui.input.gain;
       // the first value applies at once: a tap right after start-up gets the scene's level
@@ -2260,6 +2491,67 @@ export class ZooAudio implements IAudio {
     this.coinTokens -= 1;
     this.coinLast = t;
   }
+}
+
+/** Decoded size of a sound, bytes (32-bit float samples). */
+function decodedBytes(a: SoundAsset): number {
+  return a.buffer.length * a.buffer.numberOfChannels * 4;
+}
+
+/** Sounds whose buffers may be given back: not the UI cues (instant at a tap) nor a bank's #0 (always one variant at hand). */
+export function releasable(id: string): boolean {
+  return !id.startsWith('cue.') && !id.endsWith('#0');
+}
+
+/** One mix step (`dt` s) of the focus amount towards `target`: exponential, with the attack rate-limited. */
+export function smoothFocus(f: number, target: number, dt: number): number {
+  const tc = target > f ? FOCUS_TC[0] : FOCUS_TC[1];
+  let next = f + (target - f) * (1 - Math.exp(-dt / tc));
+  if (next > f) next = Math.min(next, f + FOCUS_RISE_MAX * dt);
+  return Math.abs(target - next) < 0.005 ? target : next;
+}
+
+/** Gain factor of a vocal play heard at `heard` (linear): 1 up to VOICE_CEIL, 2:1 above it. */
+export function voiceCeiling(heard: number): number {
+  return heard > VOICE_CEIL ? Math.sqrt(VOICE_CEIL / heard) : 1;
+}
+
+/**
+ * The presence leveller's trim, dB (≤ 0): how far the calls' mean power `calls` exceeds the beds' `beds`
+ * beyond the ratio allowed at this camera distance, m.
+ */
+export function presenceTrim(calls: number, beds: number, camDist: number): number {
+  if (!(beds > 1e-9) || !(calls > 0)) return 0;
+  const [d0, d1, r0, r1] = PRESENCE_RATIO;
+  const allowed = r0 + (r1 - r0) * smoothstep(d0, d1, camDist);
+  const excess = 10 * Math.log10(calls / beds) - allowed;
+  return Math.max(PRESENCE_CUT, Math.min(0, -excess));
+}
+
+/** The birds' band dip outside focus views (0..1 of the focus dip) at a camera distance, m. */
+export function bandAt(camDist: number): number {
+  const [d0, d1, a0, a1] = BAND_BY_DIST;
+  return a0 + (a1 - a0) * smoothstep(d0, d1, camDist);
+}
+
+/** The UI channel's level (re CHANNEL_LEVEL.ui) over beds whose levels sum to `bedSum`. */
+export function uiScaleFor(bedSum: number): number {
+  return Math.max(UI_SCALE_FLOOR, Math.min(UI_SCALE_MAX, (bedSum / DAY_CLOSE_REF) ** UI_SCALE_SLOPE));
+}
+
+/** Bed gain at a camera distance, m, and nightness 0..1: a little lower from mid views up, by day. */
+export function bedHeightTrim(camDist: number, nightness: number): number {
+  return dbGain(BED_HEIGHT_DB * smoothstep(BED_HEIGHT_CAM[0], BED_HEIGHT_CAM[1], camDist) * (1 - nightness));
+}
+
+/** `v` moved towards `target` by at most `step`. */
+function approach(v: number, target: number, step: number): number {
+  return v < target ? Math.min(target, v + step) : Math.max(target, v - step);
+}
+
+/** Fountains run by day while the zoo is open. */
+export function fountainsOn(hour: number, open: boolean): boolean {
+  return open && hour >= FOUNTAIN_HOURS[0] && hour < FOUNTAIN_HOURS[1];
 }
 
 /** 0 day .. 1 night. */

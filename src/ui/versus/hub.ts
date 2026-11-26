@@ -8,6 +8,7 @@ import type { CloudHandle } from '../../core/cloud-types';
 import type { MenuResult, PlayerInfo } from '../../core/contracts';
 import type { KV } from '../../core/player-state';
 import { vsSlot } from '../../core/storage-keys';
+import { VERSUS_TEST } from '../../net/config';
 import { markIndexSeen, readIndex, readRecord, upsertIndex, writeIndex } from '../../versus/record';
 
 export { versusNeedsAttention } from '../../versus/record';
@@ -228,7 +229,9 @@ class Hub {
   // ------------------------------------------------------------------ challenge
   private lengths(): VersusLength[] {
     const cfg = this.deps.cloud.versus.config();
-    const ls = cfg?.versusLengths?.length ? cfg.versusLengths : DEFAULT_LENGTHS;
+    const ls: VersusLength[] = cfg?.versusLengths?.length ? [...cfg.versusLengths] : [...DEFAULT_LENGTHS];
+    // the 4-minute test match (2 zoo days): only in a VITE_VERSUS_TEST build talking to a server that allows it
+    if (VERSUS_TEST && cfg?.testLength && !ls.includes(4)) ls.unshift(4);
     return ls.filter((l) => lengthSpec(l, true) !== null);
   }
 

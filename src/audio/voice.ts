@@ -60,11 +60,50 @@ function contourAt(pts: readonly Pt[], t: number, exp: boolean): number {
   return pts[pts.length - 1][1];
 }
 
+/** Pulse-train samples written between the yields of glottalSteps: well under a millisecond on a desktop. */
+const STEP_SAMPLES = 2048;
+
+/** Per-sample state of a pulse train carried from one glottal cycle to the next. */
+interface TrainState {
+  /** Flow at the previous sample. */
+  prevU: number;
+  /** One-pole 1 kHz high-pass state of the aspiration noise. */
+  nx1: number;
+  ny: number;
+}
+
 /**
- * Add one Rosenberg pulse train (radiated flow derivative) to `out`, plus
- * flow-gated aspiration. `ratio` scales f0 (biphonation), `gain` the level.
+ * One glottal cycle [start, end) of a Rosenberg pulse train (radiated flow
+ * derivative) added into `out`, with flow-gated aspiration.
  */
-function addPulseTrain(out: Float32Array, s: PulseSpec, sr: number, rng: Rng, ratio: number, gain: number): void {
+function addCycle(out: Float32Array, st: TrainState, start: number, end: number, Tp: number, Tn: number, A: number, asp: number, hpA: number, rng: Rng): void {
+  // radiated derivative as the per-sample flow difference (a box-filtered
+  // derivative: less aliasing from the abrupt closure), scaled so the
+  // closing spike peaks near 1 whatever the period
+  const scale = (2 * Tn) / Math.PI;
+  const kOpen = Math.PI / Tp;
+  const kClose = Math.PI / (2 * Tn);
+  const closed = Tp + Tn;
+  for (let j = Math.ceil(start); j < end; j++) {
+    const tau = j - start;
+    const u = tau < Tp ? 0.5 - 0.5 * Math.cos(kOpen * tau) : tau < closed ? Math.cos(kClose * (tau - Tp)) : 0;
+    let v = (u - st.prevU) * scale * A;
+    st.prevU = u;
+    if (asp > 0) {
+      const w = (rng.float() - 0.5) * 3.464; // unit-RMS white noise
+      st.ny = hpA * (st.ny + w - st.nx1);
+      st.nx1 = w;
+      v += asp * st.ny * u * A;
+    }
+    out[j] += v;
+  }
+}
+
+/**
+ * Add one Rosenberg pulse train plus flow-gated aspiration to `out`, yielding
+ * every STEP_SAMPLES samples. `ratio` scales f0 (biphonation), `gain` the level.
+ */
+function* addPulseTrain(out: Float32Array, s: PulseSpec, sr: number, rng: Rng, ratio: number, gain: number): Generator<void> {
   const n = out.length;
   const oq = Math.min(0.95, Math.max(0.1, s.oq ?? DEFAULT_OQ));
   const baseJit = s.jitter ?? DEFAULT_JITTER;
@@ -73,13 +112,11 @@ function addPulseTrain(out: Float32Array, s: PulseSpec, sr: number, rng: Rng, ra
   const chaos = s.chaos ?? [];
   const pd = s.pd ?? [];
   const dur = Math.max(1e-6, s.dur);
-  // one-pole 1 kHz high-pass state for the aspiration noise
   const hpA = Math.exp((-2 * Math.PI * 1000) / sr);
-  let nx1 = 0;
-  let ny = 0;
+  const st: TrainState = { prevU: 0, nx1: 0, ny: 0 };
   let start = 0; // cycle start, fractional samples
   let cycle = 0;
-  let prevU = 0; // flow at the previous sample
+  let nextYield = STEP_SAMPLES;
   while (start < n) {
     const t = start / sr;
     const fr = t / dur;
@@ -105,45 +142,34 @@ function addPulseTrain(out: Float32Array, s: PulseSpec, sr: number, rng: Rng, ra
     // lengthen or shorten the closed phase (as in real phonation), so
     // successive closures are exactly one perturbed period apart
     const open = Math.min(oq * (sr / f), 0.95 * L);
-    const Tp = 0.75 * open;
-    const Tn = 0.25 * open;
-    // radiated derivative as the per-sample flow difference (a box-filtered
-    // derivative: less aliasing from the abrupt closure), scaled so the
-    // closing spike peaks near 1 whatever the period
-    const scale = (2 * Tn) / Math.PI;
-    const kOpen = Math.PI / Tp;
-    const kClose = Math.PI / (2 * Tn);
-    const closed = Tp + Tn;
-    const end = Math.min(n, start + L);
-    if (A === 0) {
-      prevU = 0;
-    } else
-      for (let j = Math.ceil(start); j < end; j++) {
-        const tau = j - start;
-        const u = tau < Tp ? 0.5 - 0.5 * Math.cos(kOpen * tau) : tau < closed ? Math.cos(kClose * (tau - Tp)) : 0;
-        let v = (u - prevU) * scale * A;
-        prevU = u;
-        if (asp > 0) {
-          const w = (rng.float() - 0.5) * 3.464; // unit-RMS white noise
-          ny = hpA * (ny + w - nx1);
-          nx1 = w;
-          v += asp * ny * u * A;
-        }
-        out[j] += v;
-      }
+    if (A === 0) st.prevU = 0;
+    else addCycle(out, st, start, Math.min(n, start + L), 0.75 * open, 0.25 * open, A, asp, hpA, rng);
     start += L;
     cycle++;
+    if (start >= nextYield) {
+      nextYield = start + STEP_SAMPLES;
+      yield;
+    }
   }
+}
+
+/** Run a step generator to its end and return its result. */
+function drain<T>(g: Generator<void, T>): T {
+  let r = g.next();
+  while (!r.done) r = g.next();
+  return r.value;
 }
 
 /**
  * Glottal source as a sample buffer (pure JS, deterministic for a given rng
- * state). Length ceil(dur·sr), peak normalised to 0.9, never NaN.
+ * state), built in steps: it yields every few thousand samples so a long call
+ * is computed over several short main-thread slices. Length ceil(dur·sr), peak
+ * normalised to 0.9, never NaN.
  */
-export function glottalSource(s: PulseSpec, sr: number, rng: Rng): Float32Array {
+export function* glottalSteps(s: PulseSpec, sr: number, rng: Rng): Generator<void, Float32Array> {
   const out = new Float32Array(Math.max(1, Math.ceil(s.dur * sr)));
-  addPulseTrain(out, s, sr, rng, 1, 1);
-  if (s.biphon) addPulseTrain(out, s, sr, rng, s.biphon.ratio, Math.pow(10, s.biphon.db / 20));
+  yield* addPulseTrain(out, s, sr, rng, 1, 1);
+  if (s.biphon) yield* addPulseTrain(out, s, sr, rng, s.biphon.ratio, Math.pow(10, s.biphon.db / 20));
   const tilt = Math.min(0.9, Math.max(0, s.tilt ?? 0));
   if (tilt > 0) {
     let y = 0;
@@ -162,6 +188,11 @@ export function glottalSource(s: PulseSpec, sr: number, rng: Rng): Float32Array 
     for (let i = 0; i < out.length; i++) out[i] *= g;
   } else out.fill(0);
   return out;
+}
+
+/** glottalSteps() in one go. */
+export function glottalSource(s: PulseSpec, sr: number, rng: Rng): Float32Array {
+  return drain(glottalSteps(s, sr, rng));
 }
 
 /** Play sample data from `t` (seconds) on the kit's graph. */
@@ -271,10 +302,18 @@ export interface VoiceSpec extends PulseSpec {
   dest?: AudioNode;
 }
 
-export function voice(k: Kit, s: VoiceSpec): void {
-  const data = glottalSource(s, k.sr, k.rng);
-  const src = pcmSource(k, data, s.t);
+/**
+ * voice() in steps: the glottal source yields every few thousand samples and the
+ * tract and graph get a step of their own, so a recipe that is a generator
+ * (`yield* voiceSteps(...)`) spreads a long call over short main-thread slices.
+ * Renders exactly as voice() does.
+ */
+export function* voiceSteps(k: Kit, s: VoiceSpec): Generator<void> {
+  const data = yield* glottalSteps(s, k.sr, k.rng);
+  yield;
   const pk = tractPeak(data, s.formants, k.sr, s.amp);
+  yield;
+  const src = pcmSource(k, data, s.t);
   let out: AudioNode = k.chain(tract(k, src, s.formants, s.t, s.fmove), k.gain(pk > 1e-6 ? Math.min(100, 1 / pk) : 1));
   if (s.drive) {
     const shaper = k.shaper(s.drive);
@@ -305,6 +344,11 @@ export function voice(k: Kit, s: VoiceSpec): void {
   if (s.hp) out = k.chain(out, k.bq('highpass', s.hp));
   if (s.lp) out = k.chain(out, k.bq('lowpass', s.lp));
   k.send(out, s.level ?? 1, s.wet ?? 0.05, s.dest);
+}
+
+/** A complete voiced call scheduled in one go (see voiceSteps). */
+export function voice(k: Kit, s: VoiceSpec): void {
+  drain(voiceSteps(k, s));
 }
 
 /**

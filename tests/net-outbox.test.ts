@@ -177,7 +177,9 @@ describe('versus api', () => {
     expect(joined.players.map((x) => x.name)).toEqual(['Mia', 'Leo']);
     const c = track(await bootPhone(fake, { name: 'Laptop', sub: 'parentC' }));
     const zoe = (await c.cloud.profiles.create('Zoe', { animal: 'hippo', color: 0 })).id;
-    await expect(c.cloud.versus.join(m.id, { profileId: zoe, code: m.code!, rulesVersion: 1 })).rejects.toMatchObject({ code: 'not_found' });
+    // the code stays on the match after the join (as on the server, see server/test/contract.test.ts):
+    // a third player hears "Someone already joined this one"
+    await expect(c.cloud.versus.join(m.id, { profileId: zoe, code: m.code!, rulesVersion: 1 })).rejects.toMatchObject({ code: 'match_full', message: VS_MSG.full });
     expect((await a.cloud.versus.list(mia)).map((x) => x.id)).toEqual([m.id]);
     // device binding: the seat is played on the Phone; another phone of the same account gets the device name
     a.cloud.versus.enqueueSnapshots(m.id, mia, [snap(6)]);

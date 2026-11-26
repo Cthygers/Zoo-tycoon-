@@ -505,7 +505,10 @@ const PLAYER = { ref: 'guest', profileId: null, accountId: null, name: null, ava
     await waitStep('speed-note');
     await assertStep('speed-note', { step: 'speed-note' });
     v = await view();
-    check('speed-note: offline line (no versus in this build)', v.line === 'speed-note.offline', v.line);
+    // the Versus line where the build has Versus (wired into a cloud build: main.ts passes versusEnabled = cloud.enabled)
+    const versusBuild = wired && (await page.evaluate(() => !!(window.__cloud && window.__cloud.enabled)));
+    const want = versusBuild ? 'speed-note.versus' : 'speed-note.offline';
+    check(`speed-note: ${versusBuild ? 'versus line (this build has Versus)' : 'offline line (no versus in this build)'}`, v.line === want, v.line);
     await tapWhere(rectJs(`document.querySelector('.wh-tut-gotit')`), 'Got it');
   }
 

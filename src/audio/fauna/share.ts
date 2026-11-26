@@ -1,9 +1,20 @@
 // Species-share limiter: no voice may take more than a set share of the vocal
-// energy heard over a sliding window (a pride of lions must not drown the zoo).
+// energy over a sliding window (a far pride of lions must not flood the zoo).
+// Energy is measured at a fixed distance from the caller, not where the
+// listener is, so the species the camera is on does not look "loud" for it.
 
 /** Default window (s) and share. */
 export const SHARE_WINDOW = 600;
 export const SHARE_LIMIT = 0.3;
+/** Shares are measured this far from the caller, m: there every species plays at its own level (refDist ≥ 10). */
+export const SHARE_REF_DIST = 10;
+
+/** Energy (gain² × s) of one play of `seconds` at SHARE_REF_DIST from the caller. */
+export function refEnergy(gain: number, seconds: number, refDist: number): number {
+  const g = gain * Math.min(1, refDist / SHARE_REF_DIST);
+  return g * g * seconds;
+}
+
 /** Below this many recent plays the shares say too little to limit anyone. */
 const MIN_PLAYS = 12;
 
@@ -20,7 +31,7 @@ export class ShareLimiter {
     private readonly limit = SHARE_LIMIT,
   ) {}
 
-  /** Record a play of `voice` heard with this energy (gain² × s) at time `now`. */
+  /** Record a play of `voice` with this energy (refEnergy) at time `now`. */
   add(voice: string, energy: number, now: number): void {
     this.prune(now);
     this.t.push(now);

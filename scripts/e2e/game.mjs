@@ -45,7 +45,7 @@ export async function phone(browser, name, opts = {}) {
     } catch {
       body = null;
     }
-    p.api.push({ method: r.request().method(), url: u.replace(/^https?:\/\/[^/]+/, ''), status: r.status(), body });
+    p.api.push({ t: Date.now(), method: r.request().method(), url: u.replace(/^https?:\/\/[^/]+/, ''), status: r.status(), body });
   });
   return p;
 }

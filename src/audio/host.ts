@@ -63,8 +63,14 @@ export interface PlaySpec {
   color?: { hz: number; db: number };
   /** Bout id: layer onto the voice already playing this group (no steal, tails overlap). */
   group?: number;
-  /** Duck the ambience (−3 dB) while it plays. Default: pool 'voice' and final gain > 0.3. */
+  /** Duck the ambience (−3 dB, less as the focus mix comes in) while it plays. Default: pool 'voice' and final gain > 0.3. */
   duck?: boolean;
+  /**
+   * A landmark / presence call heard from a mid or overview camera: the ambience dips 3 dB
+   * (80 ms in) for its length, at least 1 s, then recovers over ~1.2 s. Scaled out as the
+   * focus mix comes in (a focus view has made room already). Replaces `duck`.
+   */
+  landmark?: boolean;
 }
 
 export interface VoiceHandle {

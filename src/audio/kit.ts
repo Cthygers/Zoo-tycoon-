@@ -269,6 +269,8 @@ export interface PhraseOpts {
   harm?: number;
   /** Trill buzz [rate Hz, cents]. */
   buzz?: readonly [number, number];
+  /** Syrinx roughness [rate Hz, depth 0..1]: random amplitude flutter whose sidebands take the pure-sine edge off a whistle. */
+  rough?: readonly [number, number];
   level?: number;
   wet?: number;
   lp?: number;
@@ -607,6 +609,7 @@ export class Kit {
       prevEnd = e;
     }
     let out: AudioNode = g;
+    if (o.rough) out = this.chain(out, this.roughGain(t0, t1 - t0 + 0.05, o.rough[0], o.rough[1]));
     if (o.lp) out = this.chain(out, this.bq('lowpass', o.lp));
     this.send(out, o.level ?? 1, o.wet ?? 0.25, o.dest);
   }

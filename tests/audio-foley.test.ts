@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { ISimulation } from '../src/core/contracts';
 import { EventBus } from '../src/core/events';
 import { PathType, Terrain, type AnimalState, type GuestState } from '../src/core/types';
-import { FOLEY_FAMILY, FOLEY_SPECIES, FoleyLimiter, foleyBankFor, guestCadence, guestStepBank, stepCrossings } from '../src/audio/fauna/foley';
+import { FEET_BANK, FOLEY_FAMILY, FOLEY_SPECIES, FoleyLimiter, foleyBankFor, guestCadence, guestStepBank, stepCrossings } from '../src/audio/fauna/foley';
 import { FAUNA, createFauna } from '../src/audio/modules/fauna';
 import { RECIPES } from '../src/audio/recipes';
 import { FOLEY_BANKS, FOLEY_RECIPES, LAP_SPACING } from '../src/audio/recipes/foley';
@@ -15,8 +15,10 @@ import { FakeHost } from './helpers/fakeHost';
 const bytes = (r: Recipe) => (r.dur + (r.tail ?? 0.6)) * (r.rate ?? 22050) * 4;
 const KINDS = ['breath', 'chew', 'drink'] as const;
 const FAMILIES = [...new Set(Object.values(FOLEY_FAMILY))];
-/** A per-family close-up bank: fx.breath.cat#2, fx.drink.bird#0... */
-const isFamily = (id: string) => /^fx\.(breath|chew|drink)\.[a-z]+#\d+$/.test(id) && !id.startsWith('fx.breath.big');
+/** A per-family close-up bank: fx.breath.cat#2, fx.drink.bird#0, fx.rustle.bird#1... */
+const isFamily = (id: string) => /^fx\.(breath|chew|drink|rustle)\.[a-z]+#\d+$/.test(id) && !id.startsWith('fx.breath.big');
+/** Birds do not breathe audibly: in place of a breath they ruffle their feathers. */
+const kindFor = (kind: (typeof KINDS)[number], voice: string) => (kind === 'breath' && !FOLEY_SPECIES[voice].breathEvery ? 'rustle' : kind);
 
 describe('foley recipes', () => {
   it('registers every bank as fx.* ids with a short tail and capped peak', () => {
@@ -32,7 +34,7 @@ describe('foley recipes', () => {
     expect(Object.keys(FOLEY_RECIPES).every((id) => id.startsWith('fx.'))).toBe(true);
   });
 
-  it('fits the memory budget: animal foley ≤ 0.7 MB, guest steps ≤ 0.3 MB, family close-ups ≤ 0.45 MB each', () => {
+  it('fits the memory budget: animal foley ≤ 0.75 MB, guest steps ≤ 0.3 MB, family close-ups ≤ 0.45 MB each, all ≤ 3.72 MB (A2)', () => {
     let animal = 0;
     let guest = 0;
     const family: Record<string, number> = {};
@@ -45,8 +47,10 @@ describe('foley recipes', () => {
         if (id.endsWith('#0')) warm[f] = (warm[f] ?? 0) + bytes(r);
       } else animal += bytes(r);
     }
-    expect(animal).toBeLessThanOrEqual(0.7e6);
+    // the scuff, ear flap and tail banks grew; dropping the bird breath (0.2 MB) pays for them
+    expect(animal).toBeLessThanOrEqual(0.75e6);
     expect(guest).toBeLessThanOrEqual(0.3e6);
+    expect(animal + guest + Object.values(family).reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(3.72e6);
     // every variant of one family; the #0 breath, chew and drink the fauna module warms
     for (const f of FAMILIES) {
       expect(family[f], f).toBeLessThanOrEqual(0.45e6);
@@ -54,20 +58,37 @@ describe('foley recipes', () => {
     }
   });
 
-  it('gives every body family its own breath, chew and drink banks, rendered for phones', () => {
+  it('gives every body family its own breath (birds: feather rustle), chew and drink banks, rendered for phones', () => {
     const registered = (id: string) => id in RECIPES;
     for (const [voice, f] of Object.entries(FOLEY_FAMILY))
-      for (const kind of KINDS) expect(foleyBankFor(kind, voice, registered), `${voice} ${kind}`).toBe(`fx.${kind}.${f}`);
-    for (const f of FAMILIES)
       for (const kind of KINDS) {
-        const base = `fx.${kind}.${f}` as keyof typeof FOLEY_BANKS;
+        const k = kindFor(kind, voice);
+        const base = foleyBankFor(k, voice, registered) as keyof typeof FOLEY_BANKS;
+        expect(base, `${voice} ${k}`).toBe(`fx.${k}.${f}`);
         expect(FOLEY_BANKS[base], base).toBeGreaterThanOrEqual(3);
-        for (let k = 0; k < FOLEY_BANKS[base]; k++) {
-          const r = FOLEY_RECIPES[`${base}#${k}`];
-          // presence at 1–5 kHz needs more than the 8 kHz rate of the generic breath
-          expect(r.rate, `${base}#${k}`).toBeGreaterThanOrEqual(16000);
+        for (let v = 0; v < FOLEY_BANKS[base]; v++) {
+          const r = FOLEY_RECIPES[`${base}#${v}`];
+          // presence at 1–5 kHz needs more than the 8 kHz rate of the generic breath (a rustle is low-passed at 3.2 kHz)
+          expect(r.rate, `${base}#${v}`).toBeGreaterThanOrEqual(k === 'rustle' ? 11025 : 16000);
         }
       }
+    // no bird breath is left to hiss
+    expect(Object.keys(FOLEY_RECIPES).some((id) => id.startsWith('fx.breath.bird'))).toBe(false);
+  });
+
+  it('lets big cats and pachyderms breathe 4 dB under the other families, and giants step 6 dB under other feet', () => {
+    const db = (id: string) => 20 * Math.log10(FOLEY_RECIPES[id].rms / FOLEY_RECIPES['fx.breath.grazer#0'].rms);
+    for (const f of ['cat', 'pachyderm']) for (let v = 0; v < 3; v++) expect(db(`fx.breath.${f}#${v}`)).toBeCloseTo(-4, 5);
+    for (const f of ['bear', 'equid', 'primate']) expect(db(`fx.breath.${f}#0`)).toBeCloseTo(0, 5);
+    expect(20 * Math.log10(FOLEY_RECIPES['fx.step.scuff#0'].rms / FOLEY_RECIPES['fx.step.pad#0'].rms)).toBeCloseTo(-6, 5);
+    for (const sp of ['elephant', 'hippo', 'rhino']) expect(FEET_BANK[FOLEY_SPECIES[sp].feet], sp).toBe('fx.step.scuff');
+    expect(FEET_BANK[FOLEY_SPECIES.lion.feet]).toBe('fx.step.pad');
+  });
+
+  it('gives the close-up fillers several variants: tail swish, ear flap, feather rustle, scuff', () => {
+    for (const base of ['fx.tail', 'fx.flap', 'fx.rustle.bird', 'fx.step.scuff'] as const) expect(FOLEY_BANKS[base], base).toBeGreaterThanOrEqual(2);
+    // a rustle is short: the fauna module plays it 1.25× faster every 8–20 s
+    expect(FOLEY_RECIPES['fx.rustle.bird#0'].dur).toBeLessThanOrEqual(0.4);
   });
 
   it('keeps each family sound shorter than the cadence it is played at', () => {
@@ -152,7 +173,8 @@ describe('foley triggers', () => {
     const el = animal('elephant', 5, 0, { action: 'walk', speed: 1.2 });
     s.animals.set(el.id, el);
     s.run(30);
-    const t = foley(s.host, 'fx.step.pad').map((p) => p.t);
+    // a pad-footed giant: a soft, dull scuff
+    const t = foley(s.host, 'fx.step.scuff').map((p) => p.t);
     const iv = t.slice(1).map((x, i) => x - t[i]);
     expect(iv.length).toBeGreaterThan(14);
     const mean = iv.reduce((a, b) => a + b, 0) / iv.length;
@@ -236,7 +258,8 @@ describe('foley triggers', () => {
     s.animals.set(el.id, el);
     s.host.followId = el.id;
     s.run(120);
-    expect(foley(s.host, 'fx.breath.pachyderm').length).toBeGreaterThanOrEqual(15);
+    // an elephant at rest breathes every 9–13 s (FOLEY_SPECIES.breathEvery), a few more fill silences
+    expect(foley(s.host, 'fx.breath.pachyderm').length).toBeGreaterThanOrEqual(Math.floor(120 / FOLEY_SPECIES.elephant.breathEvery![1]));
     expect(foley(s.host, 'fx.flap').length).toBeGreaterThanOrEqual(4);
     expect(foley(s.host, 'fx.tail').length).toBeGreaterThanOrEqual(6);
   });

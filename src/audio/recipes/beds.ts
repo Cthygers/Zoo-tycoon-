@@ -106,13 +106,15 @@ function* birds(k: Kit): Generator<void> {
   far.connect(farLp);
   k.send(farLp, 1, 0.5);
 
-  // whistling songsters: each repeats its own motif with small variations
+  // whistling songsters: each repeats its own motif with small variations; a real syrinx is never a
+  // pure sine (S-10): an audible second harmonic and a fast random flutter give the notes some grain
   for (let ind = 0; ind < 4; ind++) {
     const m = motif(r, r.int(3, 5));
     const near = ind < 2;
+    const grain = [r.range(80, 160), r.range(0.35, 0.55)] as const;
     let t = r.range(0, 4);
     while (t < end - 1.5) {
-      k.phrase(shift(m, t, r.range(0.97, 1.03), r.range(0.8, 1)), { harm: 0.06, level: near ? 0.8 : 0.45, wet: 0.25, dest: near ? undefined : far });
+      k.phrase(shift(m, t, r.range(0.97, 1.03), r.range(0.8, 1)), { harm: 0.2, rough: grain, level: near ? 0.8 : 0.45, wet: 0.25, dest: near ? undefined : far });
       t += r.range(4, 8);
       yield;
     }
@@ -154,7 +156,7 @@ function* birds(k: Kit): Generator<void> {
       n.push({ t: t + i * 0.3, d: 0.08, f0: 5600, f1: 5300, a: 0.7 });
       n.push({ t: t + i * 0.3 + 0.12, d: 0.09, f0: 3300, f1: 3000, a: 0.8 });
     }
-    k.phrase(n, { level: 0.35, wet: 0.3, dest: far });
+    k.phrase(n, { harm: 0.15, rough: [110, 0.4], level: 0.35, wet: 0.3, dest: far });
     t += r.range(8, 14);
     yield;
   }
@@ -317,13 +319,12 @@ function* crowd(k: Kit): Generator<void> {
     k.chain(k.noise('white', 0, D), bp, g);
     return { bp, g, env: new Float32Array(n) };
   });
-  const talkers = r.int(12, 14);
-  for (let i = 0; i < talkers; i++) {
+  /** One talker: phrases separated by `gap` s of silence, at `level`. */
+  function* talker(i: number, level: number, gap: readonly [number, number]): Generator<void> {
     const u = r.float();
     const type = u < TALKERS[0].p ? TALKERS[0] : u < TALKERS[0].p + TALKERS[1].p ? TALKERS[1] : TALKERS[2];
     const f0 = r.range(type.f0[0], type.f0[1]);
     const fs = type.fs * r.range(0.96, 1.04);
-    const level = Math.pow(r.range(0.25, 1), 1.5);
     const o = k.osc('glottal', 0, D, f0);
     // slow pitch drift of ±35 cents on top of the prosody
     k.mod(k.signal(0, D, smoothNoise(r, D, 7, 60)), 35, o.detune);
@@ -369,14 +370,20 @@ function* crowd(k: Kit): Generator<void> {
         f2.frequency.setTargetAtTime(v[1] * fs, t, 0.03);
         t += ioi;
       }
-      t += r.range(0.25, 1.4);
+      t += r.range(gap[0], gap[1]);
       o.frequency.linearRampToValueAtTime(f0, t);
       if (++phrases % 4 === 0) yield;
     }
     amp.gain.setValueCurveAtTime(env, 0, D);
     amp.connect(k.gain(level * 0.5, bus));
+  }
+  const talkers = r.int(12, 14);
+  for (let i = 0; i < talkers; i++) {
+    yield* talker(i, Math.pow(r.range(0.25, 1), 1.5), [0.25, 1.4]);
     yield;
   }
+  // a nearer group now and then (S-3): one louder talker with a phrase every few seconds, never intelligible
+  yield* talker(talkers, 1.6, [3.5, 8]);
   for (const c of cons) {
     c.g.gain.setValueCurveAtTime(c.env, 0, D);
     // bursts about 10 dB under the vowel (band-passed noise carries far less power than the voice)
@@ -396,13 +403,20 @@ function* water(k: Kit): Generator<void> {
   const n = Math.ceil(D * res);
   const swell = new Float32Array(n);
   const slap = new Float32Array(n);
+  // laps come irregularly, now and then after a calm spell, and each breaks as a small cluster of
+  // slaps rather than one (S-14: a steady swell-and-plip reads as a machine)
   let t = r.range(0, 0.8);
   while (t < D) {
-    const att = r.range(0.25, 0.45);
-    const a = r.range(0.5, 1);
-    bump(swell, res, t, att, r.range(0.7, 1.2), a);
-    bump(slap, res, t + att * 0.9, 0.03, 0.12, a * r.range(0.4, 1));
-    t += r.range(1.4, 2.8);
+    const att = r.range(0.2, 0.5);
+    const a = r.range(0.35, 1);
+    bump(swell, res, t, att, r.range(0.6, 1.3), a);
+    const slaps = r.int(2, 4);
+    let ts = t + att * r.range(0.75, 1);
+    for (let j = 0; j < slaps; j++) {
+      bump(slap, res, ts, 0.02, r.range(0.06, 0.14), a * r.range(0.3, 1) * (1 - j * 0.2));
+      ts += r.range(0.03, 0.11);
+    }
+    t += r.range(1.1, 3.2) + (r.chance(0.2) ? r.range(1.5, 3) : 0);
   }
   const lap = k.noise('brown', 0, D);
   const g1 = k.gain(0);
@@ -420,17 +434,17 @@ function* water(k: Kit): Generator<void> {
   k.chain(sp, k.bq('bandpass', 1900, 0.8), g3);
   g3.gain.setValueCurveAtTime(slap, 0, D);
   k.send(g3, 0.25, 0.3);
-  // bubbles and plips in two streams
+  // bubbles: sparse, uneven and a little rough (not a steady sine plip)
   for (let s = 0; s < 2; s++) {
     const notes: Note[] = [];
     let tt = r.range(0, 0.5);
     while (tt < D - 0.2) {
       const f = r.range(650, 1600);
       const d = r.range(0.03, 0.07);
-      notes.push({ t: tt, d, f0: f, f1: f * r.range(1.5, 1.9), a: r.range(0.2, 0.6), att: 0.06 });
-      tt += d + r.range(0.2, 0.9);
+      notes.push({ t: tt, d, f0: f, f1: f * r.range(1.5, 1.9), a: r.range(0.15, 0.5), att: 0.06 });
+      tt += d + (r.chance(0.3) ? r.range(0.08, 0.2) : r.range(0.6, 2.2));
     }
-    k.phrase(notes, { level: 0.12, wet: 0.35 });
+    k.phrase(notes, { rough: [r.range(150, 260), 0.6], level: 0.1, wet: 0.35 });
     yield;
   }
 }

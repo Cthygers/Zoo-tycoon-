@@ -270,7 +270,7 @@ export class InputController {
     } catch {
       /* ignore */
     }
-    const p: Ptr = { id: e.pointerId, x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, t0: performance.now(), type: e.pointerType };
+    const p: Ptr = { id: e.pointerId, x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, t0: e.timeStamp > 0 ? e.timeStamp : performance.now(), type: e.pointerType };
     this.ptrs.set(e.pointerId, p);
     const toolActive = this.cb.tool.active;
     if (!this.acc) this.acc = newAcc();
@@ -410,7 +410,8 @@ export class InputController {
       case 'pending': {
         window.clearTimeout(this.toolTimer);
         this.mode = 'idle';
-        const quick = performance.now() - p.t0 < TAP_MS || p.type === 'mouse';
+        // event times, not handler times: one slow frame between down and up keeps a quick tap a tap
+        const quick = (e.timeStamp > 0 ? e.timeStamp : performance.now()) - p.t0 < TAP_MS || p.type === 'mouse';
         if (cancelled || !quick) break;
         if (this.acc && this.acc.fingers <= 1) this.acc.tap = true;
         if (this.cb.tool.active) {

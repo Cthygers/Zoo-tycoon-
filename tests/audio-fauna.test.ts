@@ -116,15 +116,13 @@ describe('planBout', () => {
     expect(pct(spans, 0.95)).toBeLessThanOrEqual(45);
   });
 
-  it('plans zebra cycles and hippo honk series by their grammar', () => {
+  it('plans a zebra bray as one piece and hippo honk series by their grammar', () => {
     const zebra = SPECIES_AUDIO.zebra;
     const hippo = SPECIES_AUDIO.hippo;
     for (let seed = 1; seed <= 100; seed++) {
-      const z = planBout(zebra, zebra.bouts.find((b) => b.kind === 'call')!, new Rng(seed), dur(zebra)).filter((i) => i.syl === 'cycle');
-      const iois = z.slice(1).map((g, i) => g.t - z[i].t);
-      expect(iois[0]).toBeGreaterThanOrEqual(0.42);
-      expect(iois[0]).toBeLessThanOrEqual(0.46);
-      expect(iois[iois.length - 1]).toBeLessThanOrEqual(0.55 * 1.1);
+      // the bray's cycles run back to back inside one render (animals.ts zebraBray)
+      const z = planBout(zebra, zebra.bouts.find((b) => b.kind === 'call')!, new Rng(seed), dur(zebra));
+      expect(z.map((i) => i.syl)).toEqual(['bray']);
       const honks = planBout(hippo, hippo.bouts.find((b) => b.kind === 'call')!, new Rng(seed), dur(hippo)).filter((i) => i.syl === 'honk');
       expect(honks.length).toBeGreaterThanOrEqual(4);
       expect(honks.length).toBeLessThanOrEqual(10);
@@ -225,6 +223,26 @@ describe('variants and individual voices', () => {
     expect(plays.some((p) => p.spec.id.startsWith('syl.lion.juv'))).toBe(true);
   });
 
+  it('plays every grunt variant of a lion series before any repeats, and drifts the series colour one way', () => {
+    const s = setup({ seed: 3 });
+    const lion = s.add(animal('lion', 6, 0));
+    s.host.hour = 21;
+    s.host.nightness = 1;
+    s.fauna.force!(lion.id, 'call');
+    run(s, 60);
+    const n = SPECIES_AUDIO.lion.syllables.grunt.variants;
+    const grunts = sylPlays(s.host, lion.id).filter((p) => p.spec.id.startsWith('syl.lion.grunt#'));
+    expect(n).toBeGreaterThanOrEqual(8);
+    expect(grunts.length).toBeGreaterThanOrEqual(13);
+    // least recently heard first: the first n grunts of the series use all n variants
+    expect(new Set(grunts.slice(0, n).map((p) => p.spec.id)).size).toBe(n);
+    // the bout's colour moves ±10 % from its first syllable to its last (on top of the ±8 % per play)
+    const bout = sylPlays(s.host, lion.id).filter((p) => p.spec.group === grunts[0].spec.group);
+    expect(bout.length).toBeGreaterThanOrEqual(10);
+    const mean = (xs: typeof bout) => xs.reduce((a, p) => a + p.spec.color!.hz, 0) / xs.length;
+    expect(Math.abs(mean(bout.slice(-3)) / mean(bout.slice(0, 3)) - 1)).toBeGreaterThan(0.08);
+  });
+
   it('picks among rendered variants only and requests the next one', () => {
     const picker = new VariantPicker();
     const ready = new Set(['b#0', 'b#1']);
@@ -260,6 +278,18 @@ describe('warm-up and lowSpec', () => {
     }
     const ids = new Set(sylPlays(s.host).map((p) => p.spec.id));
     expect([...ids].every((id) => /#[01]$/.test(id))).toBe(true);
+  });
+
+  it('warms a feather rustle, not a breath, for birds', () => {
+    for (const lowSpec of [false, true]) {
+      const s = setup({ lowSpec });
+      s.add(animal('penguin', 5, 0));
+      s.add(animal('flamingo', 9, 0));
+      const ids = s.fauna.warm!();
+      expect(ids).toContain('fx.rustle.bird#0');
+      expect(ids).not.toContain('fx.breath.big#0');
+      expect(ids.some((id) => id.startsWith('fx.breath.'))).toBe(false);
+    }
   });
 
   it('warms and plays only the family breath / chew / drink banks, one variant of each on lowSpec', () => {
@@ -461,6 +491,8 @@ describe('idle lottery', () => {
   it('never breaks the per-animal cooldown or the per-species gap', () => {
     // camels: no contagion; their idle-lottery bouts (idle, social) are grumbles
     const s = setup({ seed: 11 });
+    // a camera beyond hovering distance: no camel is the focus (whose own clock idles more often)
+    s.host.listener = { ...s.host.listener, camDist: 40 };
     const near = s.add(animal('camel', 5, 0));
     for (let i = 0; i < 10; i++) s.add(animal('camel', 40 * Math.cos(i), 40 * Math.sin(i)));
     run(s, 1800, 0.1);

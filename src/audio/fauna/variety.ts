@@ -35,6 +35,14 @@ export class RepeatGuard {
     return null;
   }
 
+  /** How recently `id` sounded anywhere in the zoo: 1 just now, 0 at REPEAT_WINDOW s or more. */
+  recency(id: string, now: number): number {
+    const list = this.recent.get(id);
+    const last = list && list.length ? list[list.length - 1].t : -Infinity;
+    // a play scheduled ahead of `now` counts as just now (keeps the term within its grade in VariantPicker)
+    return Math.min(1, Math.max(0, 1 - (now - last) / REPEAT_WINDOW));
+  }
+
   note(id: string, rate: number, now: number): void {
     let list = this.recent.get(id);
     if (!list) this.recent.set(id, (list = []));
@@ -51,4 +59,11 @@ export class RepeatGuard {
 export function playColor(ind: Individual, rng: Rng): { hz: number; db: number } {
   const hz = Math.min(3000, Math.max(1000, ind.color.hz)) * rng.range(0.92, 1.08);
   return { hz, db: ind.color.db + rng.range(-2, 2) };
+}
+
+/** A series drifts its play colour by up to ± this fraction in frequency from its first syllable to its last. */
+export const SERIES_DRIFT = 0.1;
+/** Play colour of syllable i of n in a bout, moved along the bout's drift direction dir (±1). */
+export function seriesColor(c: { hz: number; db: number }, i: number, n: number, dir: number): { hz: number; db: number } {
+  return n < 3 ? c : { hz: c.hz * (1 + SERIES_DRIFT * dir * ((2 * i) / (n - 1) - 1)), db: c.db };
 }

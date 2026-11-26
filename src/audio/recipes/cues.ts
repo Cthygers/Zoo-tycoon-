@@ -6,13 +6,14 @@
 //
 // Levels form a hierarchy on a phone speaker: `rms` is the phone-weighted RMS
 // of the loudest 400 ms (render.ts), and every peak cap sits well above it so
-// the rms target is what binds. Relative to build (−26 dB): tap −6, select /
-// open / close −3 (select, the most frequent, −4), error +0.5, bulldoze −1.5,
-// deny −9, celebrate +5.5.
-// build at −26 dB puts a tap ≥ 6 dB over a busy day bed on a phone; the engine
-// scales the UI channel down in quiet views, so a night overview's cues stay
-// within 12 dB of its ambience. Feedback heard in the world (coins, bell, crate,
-// gate) sits on its own reference, WORLD_DB: it is mixed with the animals.
+// the rms target is what binds. Relative to build (−26 dB): tap −3, select /
+// open / close −3 (select, the most frequent, −4), error +3, bulldoze −1.5,
+// deny −9, celebrate +3.5.
+// build at −26 dB puts a tap ≥ 6 dB and an error ≥ 8 dB over a busy day scene on
+// a phone; the engine scales the UI channel down in quiet views, so a night
+// overview's cues (the celebrate jingle too) stay within 12 dB of its ambience.
+// Feedback heard in the world (coins, bell, crate, gate) sits on its own
+// reference, WORLD_DB: it is mixed with the animals.
 
 import type { Kit, Partial3 } from '../kit';
 import type { Recipe } from '../render';
@@ -98,7 +99,7 @@ function coin(k: Kit, t: number, f: number, vel: number, partials: readonly Part
 const COIN_DB = WORLD_DB - 4;
 
 export const CUE_RECIPES: Record<string, Recipe> = {
-  tap: cue(0.14, BUILD_DB - 6, (k) => {
+  tap: cue(0.14, BUILD_DB - 3, (k) => {
     // warm wooden click: low-mid bar with a soft mallet
     k.bar(0.002, st(9), 0.8, { decay: 0.045, click: 0.3, wet: 0.08, lp: 4500 }); // F#5
     k.bar(0.002, st(-3), 0.35, { decay: 0.03, click: 0, wet: 0 }); // body
@@ -137,7 +138,7 @@ export const CUE_RECIPES: Record<string, Recipe> = {
       k.burst({ t, dur: 0.015, color: 'pink', band: [[0, k.rng.range(1400, 2800)]], q: 1.4, amp: [[0, 0], [0.001, a], [0.015, 0]], wet: 0.1 });
     }
   }, { tail: 0.3, hp: 200, squash: 1.6 }),
-  error: cue(0.4, BUILD_DB + 0.5, (k) => {
+  error: cue(0.4, BUILD_DB + 3, (k) => {
     // muted low double "bonk" with enough overtone and clack to carry on a phone
     // (a phone speaker loses the G4 / E4 fundamentals)
     const p: readonly Partial3[] = [
@@ -277,7 +278,7 @@ export const CUE_RECIPES: Record<string, Recipe> = {
     k.bar(0.002, 659.3, 0.7, { decay: 0.45, partials: p, click: 0.08, wet: 0.25 }); // E5
     k.bar(0.45, 523.3, 0.7, { decay: 0.55, partials: p, click: 0.08, wet: 0.25 }); // C5
   }, { tail: 0.4, rate: FX_LONG_SR, reverb: { decay: 0.25, length: 1.2, bright: 0.5 } }),
-  celebrate: cue(1.6, BUILD_DB + 5.5, function* (k) {
+  celebrate: cue(1.6, BUILD_DB + 3.5, function* (k) {
     // original rising figure, then a soft open chord with a shimmer
     const fig: [number, number, number][] = [
       [0.0, 10, 0.55], // G5

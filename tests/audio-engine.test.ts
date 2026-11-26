@@ -4,7 +4,7 @@
 import * as THREE from 'three';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { distanceModel, type Attenuation, type AudioModule } from '../src/audio/host';
-import { ZooAudio, type AudioEngineOptions } from '../src/audio/engine';
+import { ZooAudio, bedHeightTrim, fountainsOn, presenceTrim, releasable, uiScaleFor, voiceCeiling, type AudioEngineOptions } from '../src/audio/engine';
 import { RECIPES } from '../src/audio/recipes';
 import { MAP_H, MAP_W, TILE } from '../src/core/constants';
 import type { ISimulation } from '../src/core/contracts';
@@ -84,11 +84,12 @@ interface Internals {
   loops: Map<string, unknown>;
   sounds: Map<string, { buffer: unknown }>;
   pending: Set<string>;
-  chan: Record<'ambience' | 'world' | 'ui' | 'music', { vol: FakeGain; duck: FakeGain; input: FakeGain; trim: FakeGain }>;
+  chan: Record<'ambience' | 'world' | 'ui' | 'music', { vol: FakeGain; duck: FakeGain; input: FakeGain; focus: FakeGain; trim: FakeGain }>;
   master: FakeGain;
   beds: Map<string, { playing: boolean }>;
   focusEq: { gain: FakeParam };
   animalBus: FakeGain;
+  vocalBus: FakeGain;
   reverbIn: FakeGain;
 }
 
@@ -461,7 +462,7 @@ describe('beds', () => {
 describe('mix: focus views, altitude trim, speech duck', () => {
   const db = (p: FakeParam, t: number) => 20 * Math.log10(p.valueAt(t));
   /** Run a lion at (100, 100) under a camera `dist` m from it; `setup` follows, selects or removes it. */
-  function scene(dist: number, setup: (audio: ZooAudio, events: EventBus, sim: Sim) => void = () => {}, seconds = 2) {
+  function scene(dist: number, setup: (audio: ZooAudio, events: EventBus, sim: Sim) => void = () => {}, seconds = 3) {
     const sim = fakeSim();
     sim.animals.set(1, animal(1, 'lion', 100, 100));
     const events = new EventBus();
@@ -472,53 +473,187 @@ describe('mix: focus views, altitude trim, speech duck', () => {
     setup(audio, events, sim);
     const v = view(100, 100, dist);
     run(audio, ctx, v, seconds);
-    const mix = (t = ctx.currentTime) => ({ amb: db(i.chan.ambience.trim.gain, t), world: db(i.chan.world.trim.gain, t), band: i.focusEq.gain.valueAt(t) });
+    // the focus mix and the speech duck are separate gain stages
+    const level = (ch: 'ambience' | 'world' | 'ui', t: number) => db(i.chan[ch].focus.gain, t) + db(i.chan[ch].trim.gain, t);
+    const mix = (t = ctx.currentTime) => ({ amb: level('ambience', t), world: level('world', t), ui: level('ui', t), band: i.focusEq.gain.valueAt(t) });
     return { audio, ctx, i, v, sim, events, mix };
   }
+  const focusOf = (audio: ZooAudio) => (audio.debugState().mix as { focus: number }).focus;
 
-  it('ducks the ambience 6 dB and dips its 2–6 kHz band while following an animal close up', () => {
+  it('ducks the ambience 6 dB and dips its 2–6 kHz band while following an animal close up; animals +2 dB, UI +5 dB', () => {
     const { mix } = scene(6, (audio) => audio.follow(1));
     const m = mix();
     expect(m.amb).toBeCloseTo(-6, 0);
     expect(m.band).toBeCloseTo(-6, 0);
-    expect(m.world).toBeCloseTo(4, 0);
+    expect(m.world).toBeCloseTo(2, 0);
+    expect(m.ui).toBeCloseTo(5, 0);
   });
 
-  it('hovering over an animal is a focus view; an empty close view or a far camera is not', () => {
+  it("gives the game's own follow framing (23.4 m) the full focus mix", () => {
+    const { audio } = scene(23.4, (a) => a.follow(1));
+    expect(focusOf(audio)).toBeGreaterThanOrEqual(0.95);
+    expect(focusOf(scene(34, (a) => a.follow(1)).audio)).toBe(0);
+  });
+
+  it('at night the focus mix ducks the ambience and steps the animals back 6 dB (no boost)', () => {
+    const { mix } = scene(6, (audio, _e, sim) => {
+      audio.follow(1);
+      sim.minuteOfDay = 23 * 60;
+    });
+    expect(mix().amb).toBeCloseTo(-6, 0);
+    expect(mix().world).toBeCloseTo(-6, 0);
+  });
+
+  it('compresses near-field calls 2:1 above the ceiling, the focus boost included; quieter calls are untouched', async () => {
+    expect(voiceCeiling(0.3)).toBe(1);
+    expect(voiceCeiling(0.5)).toBe(1);
+    // 12 dB over the ceiling comes out 6 dB over it
+    expect(2 * voiceCeiling(2)).toBeCloseTo(1, 5);
+    // a louder call stays louder
+    expect(2 * voiceCeiling(2)).toBeGreaterThan(1 * voiceCeiling(1));
+    const s = scene(6, (a) => a.follow(1));
+    await s.audio.prefetch(['syl.lion.moan#0']);
+    s.audio.debugLog = [];
+    s.audio.host.play({ id: 'syl.lion.moan#0', track: 1, gain: 1, refDist: 40 });
+    s.audio.host.play({ id: 'syl.lion.moan#0', track: 1, gain: 0.05, refDist: 40 });
+    const [loud, soft] = s.audio.debugLog;
+    // focus view by day: +2 dB on the world, so the loud call is heard at 1.26 and compressed to √(0.5 / 1.26)
+    expect(loud.gain).toBeCloseTo(Math.sqrt(0.5 / Math.pow(10, 2 / 20)), 2);
+    expect(soft.gain).toBeCloseTo(0.05, 3);
+  });
+
+  it('hovering over an animal is a focus view; an empty close view or a far camera is not (the birds band still dips a little)', () => {
     expect(scene(12).mix().amb).toBeCloseTo(-6, 0);
-    expect(scene(12, (_a, _e, sim) => sim.animals.clear()).mix().amb).toBeCloseTo(0, 1);
+    const empty = scene(12, (_a, _e, sim) => sim.animals.clear()).mix();
+    expect(empty.amb).toBeCloseTo(0, 1);
+    expect(empty.band).toBeCloseTo(0.6 * -6, 1);
     const far = scene(60, (audio) => audio.follow(1)).mix();
     expect(far.amb).toBeCloseTo(0, 1);
-    expect(far.band).toBeCloseTo(0, 1);
+    expect(far.band).toBeCloseTo(0.3 * -6, 1);
   });
 
-  it('follows the selection, with a ≈ 0.6 s attack and a ≈ 1.5 s release', () => {
+  it('hover focus: starts within 12 m, deepens with proximity, holds 3 s and ends beyond 18 m', () => {
+    // the lion 15 m from the focus point never came within 12 m: no focus
+    const s = scene(15, (_a, _e, sim) => (sim.animals.get(1)!.x = 115));
+    expect(focusOf(s.audio)).toBe(0);
+    const lion = s.sim.animals.get(1)!;
+    lion.x = 110; // 10 m: the focus starts, at the depth of 10 m
+    run(s.audio, s.ctx, s.v, 3);
+    const at10 = focusOf(s.audio);
+    expect(at10).toBeGreaterThan(0.7);
+    expect(at10).toBeLessThan(0.95);
+    lion.x = 104; // closer: deeper
+    run(s.audio, s.ctx, s.v, 3);
+    expect(focusOf(s.audio)).toBeGreaterThan(0.95);
+    lion.x = 116; // 16 m: still on (hysteresis), shallow
+    run(s.audio, s.ctx, s.v, 4);
+    expect(focusOf(s.audio)).toBeGreaterThan(0.02);
+    expect(focusOf(s.audio)).toBeLessThan(0.2);
+    lion.x = 130; // gone
+    run(s.audio, s.ctx, s.v, 8);
+    expect(focusOf(s.audio)).toBeLessThan(0.02);
+  });
+
+  it('a brief pass over an animal holds the focus for 3 s instead of toggling it', () => {
+    const s = scene(15, (_a, _e, sim) => (sim.animals.get(1)!.x = 130), 1);
+    const lion = s.sim.animals.get(1)!;
+    lion.x = 105;
+    run(s.audio, s.ctx, s.v, 0.5);
+    lion.x = 130;
+    run(s.audio, s.ctx, s.v, 2);
+    expect(focusOf(s.audio)).toBeGreaterThan(0.5);
+    run(s.audio, s.ctx, s.v, 9);
+    expect(focusOf(s.audio)).toBeLessThan(0.02);
+  });
+
+  it('follows the selection with a rate-limited attack and a ≈ 1.5 s release', () => {
     const { audio, ctx, v, events, mix, i } = scene(15, (_a, events) => events.emit('selectionChanged', { selection: { kind: 'animal', id: 1 } }), 0.05);
     const t0 = ctx.currentTime;
-    expect(mix(t0 + 0.6).amb).toBeLessThan(-5.4);
-    run(audio, ctx, v, 2);
+    expect(mix(t0 + 0.6).amb).toBeGreaterThan(-4);
+    run(audio, ctx, v, 2.5);
+    expect(mix().amb).toBeLessThan(-5.4);
     events.emit('selectionChanged', { selection: null });
     // the lion is still right under the camera: hovering keeps the focus mix
     run(audio, ctx, v, 1);
     expect(mix().amb).toBeCloseTo(-6, 0);
     (audio as unknown as { sim: Sim }).sim.animals.clear();
-    // the next 4 Hz mix update starts the release
-    run(audio, ctx, v, 0.3);
-    const t1 = ctx.currentTime - 0.05;
-    expect(mix(t1 + 0.5).amb).toBeLessThan(-1.5);
-    expect(mix(t1 + 1.5).amb).toBeGreaterThan(-0.5);
-    expect(steepestRamp([i.chan.ambience.trim.gain])).toBeLessThanOrEqual(0.05);
+    run(audio, ctx, v, 3.3);
+    // hovering ends after its 3 s hold; then a 1.5 s release
+    const t1 = ctx.currentTime;
+    run(audio, ctx, v, 1.5);
+    expect(mix(t1 + 1.5).amb).toBeLessThan(-1.5);
+    run(audio, ctx, v, 4);
+    expect(mix().amb).toBeGreaterThan(-0.5);
+    // never faster than 6 dB in a second
+    const g = i.chan.ambience.focus.gain;
+    let worst = 0;
+    for (let t = 0; t < ctx.currentTime - 1; t += 0.05) worst = Math.max(worst, Math.abs(db(g, t + 1) - db(g, t)));
+    expect(worst).toBeLessThanOrEqual(6);
   });
 
-  it('trims the animals 6 dB at the overview and leaves the coins and bells alone', () => {
+  it('a pan at 18 m across a herd moves the ambience at most 6 dB per second', () => {
+    const sim = fakeSim();
+    for (let k = 0; k < 6; k++) sim.animals.set(k + 1, animal(k + 1, 'zebra', 100 + k * 25, 100 + (k % 2) * 6));
+    const { audio, ctx, i } = engine(sim);
+    const g = i.chan.ambience.focus.gain;
+    for (let t = 0; t < 30; t += 0.05) {
+      ctx.currentTime += 0.05;
+      const v = view(80 + t * 6, 100, 18);
+      audio.update(0.05, v.cam, v.focus);
+    }
+    let worst = 0;
+    let deepest = 0;
+    for (let t = 1; t < 29; t += 0.05) {
+      worst = Math.max(worst, Math.abs(db(g, t + 1) - db(g, t)));
+      deepest = Math.min(deepest, db(g, t));
+    }
+    expect(deepest).toBeLessThan(-3);
+    expect(worst).toBeLessThanOrEqual(6);
+  });
+
+  it('foley and colony loops recede 6 dB at the overview, vocal calls only 1.9 dB', () => {
     const close = scene(10);
     expect(close.i.animalBus.gain.valueAt(close.ctx.currentTime + 5)).toBeCloseTo(1, 2);
+    expect(close.i.vocalBus.gain.valueAt(close.ctx.currentTime + 5)).toBeCloseTo(1, 2);
     const over = scene(140);
     expect(over.i.animalBus.gain.valueAt(over.ctx.currentTime + 5)).toBeCloseTo(0.5, 2);
+    expect(over.i.vocalBus.gain.valueAt(over.ctx.currentTime + 5)).toBeCloseTo(0.8, 2);
     const out = (v: unknown) => (v as { pan: { outputs: unknown[] } }).pan.outputs[0];
-    expect(out(over.i.pools.voice[0])).toBe(over.i.animalBus);
+    expect(out(over.i.pools.voice[0])).toBe(over.i.vocalBus);
     expect(out(over.i.pools.foley[0])).toBe(over.i.animalBus);
     expect(out(over.i.pools.fx[0])).toBe(over.i.chan.world.input);
+  });
+
+  it('beds lose 1.5 dB from mid views up by day, not at night', () => {
+    expect(20 * Math.log10(bedHeightTrim(20, 0))).toBeCloseTo(0, 3);
+    expect(20 * Math.log10(bedHeightTrim(52, 0))).toBeCloseTo(-1.5, 2);
+    expect(20 * Math.log10(bedHeightTrim(90, 0))).toBeCloseTo(-1.5, 2);
+    expect(20 * Math.log10(bedHeightTrim(90, 1))).toBeCloseTo(0, 3);
+  });
+
+  it('a landmark call dips the ambience 3 dB for at least 1 s in a non-focus view, not in a focus view', async () => {
+    const far = scene(52);
+    await far.audio.prefetch(['syl.lion.moan#0']);
+    far.audio.host.play({ id: 'syl.lion.moan#0', track: 1, landmark: true });
+    const t = far.ctx.currentTime;
+    expect(db(far.i.chan.ambience.duck.gain, t + 0.5)).toBeCloseTo(-3, 0);
+    expect(db(far.i.chan.ambience.duck.gain, t + 1)).toBeLessThan(-2.5);
+    expect(db(far.i.chan.ambience.duck.gain, t + 4)).toBeGreaterThan(-0.2);
+    const close = scene(6, (a) => a.follow(1));
+    await close.audio.prefetch(['syl.lion.moan#0']);
+    close.audio.host.play({ id: 'syl.lion.moan#0', track: 1, landmark: true });
+    expect(db(close.i.chan.ambience.duck.gain, close.ctx.currentTime + 0.5)).toBeCloseTo(0, 1);
+  });
+
+  it('a loud call ducks the ambience 3 dB outside focus views only (a focus view must not pump)', async () => {
+    const duckAt = async (dist: number, follow: boolean) => {
+      const s = scene(dist, (a) => follow && a.follow(1));
+      await s.audio.prefetch(['syl.lion.moan#0']);
+      s.audio.host.play({ id: 'syl.lion.moan#0', track: 1, gain: 1, refDist: 40 });
+      return db(s.i.chan.ambience.duck.gain, s.ctx.currentTime + 0.5);
+    };
+    expect(await duckAt(52, false)).toBeCloseTo(-3, 0);
+    expect(await duckAt(6, true)).toBeCloseTo(0, 1);
   });
 
   it('speechDuck ducks ambience and world 9 dB, tolerates repeats and lets go on its own', () => {
@@ -554,6 +689,32 @@ describe('mix: focus views, altitude trim, speech duck', () => {
     const t = ctx.currentTime + 0.5;
     expect(db(i.chan.ambience.duck.gain, t)).toBeLessThan(-5);
     expect(db(i.chan.world.duck.gain, t)).toBeLessThan(-5);
+  });
+
+  it('UI level follows the beds: full at the busy day reference, up to +2.9 dB over a crowded plaza, floored at night', () => {
+    expect(uiScaleFor(1)).toBeCloseTo(1, 5);
+    expect(uiScaleFor(1.3)).toBeCloseTo(1.4, 5);
+    expect(uiScaleFor(0.49)).toBeCloseTo(0.168, 3);
+    expect(uiScaleFor(0.3)).toBe(0.165);
+  });
+
+  it('a close-up over a busy plaza keeps the UI scale and focus boost together within +4 dB', async () => {
+    const sim = fakeSim();
+    sim.animals.set(1, animal(1, 'lion', 100, 100));
+    for (let k = 0; k < 60; k++) sim.guests.set(k + 1, guest(k + 1, 100 + (k % 8) * 2 - 8, 100 + Math.floor(k / 8) * 2 - 8));
+    sim.world.objects.set(1, { defId: 'fountain', x: 100, z: 104 });
+    for (let z = 22; z < 28; z++) for (let x = 22; x < 28; x++) sim.world.terrain[z * MAP_W + x] = Terrain.Water;
+    const { audio, ctx, i } = engine(sim);
+    audio.follow(1);
+    const v = view(100, 100, 6);
+    audio.update(0.01, v.cam, v.focus);
+    run(audio, ctx, v, 1);
+    await audio.prefetch();
+    run(audio, ctx, v, 4);
+    const ui = (audio.debugState().mix as { uiScale: number }).uiScale;
+    expect(ui).toBeGreaterThan(1);
+    const t = ctx.currentTime;
+    expect(i.chan.ui.input.gain.valueAt(t) * i.chan.ui.focus.gain.valueAt(t)).toBeLessThanOrEqual(0.7 * 1.6 + 1e-3);
   });
 
   it('keeps the UI channel between its floor and full level as the ambience thins', () => {
@@ -622,7 +783,7 @@ describe('beds: repetition and lowSpec memory', () => {
     expect(beds.crowd).toBeGreaterThan(0);
   });
 
-  it('lowSpec releases a bed silent for minutes, and renders it again when it is heard again', async () => {
+  it('releases a bed silent for minutes (both tiers), and renders it again when it is heard again', async () => {
     const released = async (lowSpec: boolean) => {
       const sim = fakeSim();
       sim.world.terrain.fill(Terrain.DryGrass);
@@ -645,7 +806,153 @@ describe('beds: repetition and lowSpec memory', () => {
       return gone;
     };
     expect(await released(true)).toBe(true);
-    expect(await released(false)).toBe(false);
+    expect(await released(false)).toBe(true);
+  });
+});
+
+describe('decoded memory', () => {
+  const SYL = Object.keys(RECIPES).filter((k) => k.startsWith('syl.lion.') && /#[12]$/.test(k));
+
+  it('gives back a variant not played for 3 minutes, never a #0 or a UI cue, and renders it again when its bank is looked at', async () => {
+    const sim = fakeSim();
+    const { audio, ctx, i } = engine(sim);
+    const v = view(0, 0, 60);
+    audio.update(0.01, v.cam, v.focus);
+    const ids = [SYL[0], SYL[0].replace(/#\d$/, '#0'), 'cue.tap'];
+    await audio.prefetch(ids);
+    run(audio, ctx, v, 170);
+    for (const id of ids) expect(i.sounds.has(id), id).toBe(true);
+    run(audio, ctx, v, 25);
+    expect(i.sounds.has(ids[0])).toBe(false);
+    expect(i.sounds.has(ids[1])).toBe(true);
+    expect(i.sounds.has('cue.tap')).toBe(true);
+    // the fauna module's variant picker asks the host: the released variant renders again
+    expect(audio.host.has(ids[0])).toBe(false);
+    await audio.prefetch();
+    expect(audio.host.has(ids[0])).toBe(true);
+  });
+
+  it('a variant played within 3 minutes stays', async () => {
+    const sim = fakeSim();
+    sim.animals.set(1, animal(1, 'lion', 0, 0));
+    const { audio, ctx, i } = engine(sim);
+    const v = view(0, 0, 20);
+    audio.update(0.01, v.cam, v.focus);
+    await audio.prefetch([SYL[0]]);
+    for (let k = 0; k < 4; k++) {
+      run(audio, ctx, v, 60);
+      expect(audio.host.play({ id: SYL[0], track: 1 })).not.toBeNull();
+    }
+    expect(i.sounds.has(SYL[0])).toBe(true);
+  });
+
+  it('over the cap, sounds idle for 30 s go first, least recently used first', async () => {
+    const sim = fakeSim();
+    sim.animals.set(1, animal(1, 'lion', 0, 0));
+    const { audio, ctx, i } = engine(sim, { lowSpec: true });
+    const v = view(0, 0, 20);
+    audio.update(0.01, v.cam, v.focus);
+    // fill the store beyond the lowSpec cap with every releasable variant (silent fake buffers)
+    const big = Object.keys(RECIPES).filter((k) => releasable(k) && !k.startsWith('bed.'));
+    await audio.prefetch(big);
+    const bytes = () => [...i.sounds.values()].reduce((n, a) => n + (a.buffer as AudioBuffer).length * (a.buffer as AudioBuffer).numberOfChannels * 4, 0);
+    const before = bytes();
+    run(audio, ctx, v, 20);
+    expect(bytes()).toBe(before);
+    audio.host.play({ id: big[0], track: 1 });
+    run(audio, ctx, v, 20);
+    expect(before).toBeGreaterThan(13 * 1048576);
+    expect(bytes()).toBeLessThanOrEqual(13 * 1048576);
+    expect(i.sounds.has(big[0])).toBe(true);
+  });
+});
+
+describe('presence leveller', () => {
+  it('turns the calls down only by how far their mean power exceeds the beds beyond the ratio allowed at that distance', () => {
+    expect(presenceTrim(0.316, 1, 40)).toBeCloseTo(0, 2);
+    expect(presenceTrim(3.16, 1, 40)).toBeCloseTo(-10, 2);
+    expect(presenceTrim(1, 1, 90)).toBeCloseTo(-8, 5);
+    expect(presenceTrim(0.1, 1, 90)).toBe(0);
+    expect(presenceTrim(1e4, 1, 40)).toBe(-12);
+    expect(presenceTrim(1, 0, 40)).toBe(0);
+  });
+
+  it('a zoo calling over its beds in a mid view is turned down slowly; a focus view is left alone', async () => {
+    const level = async (dist: number, follow: boolean) => {
+      const sim = fakeSim();
+      sim.animals.set(1, animal(1, 'lion', 100, 100));
+      const { audio, ctx, i } = engine(sim);
+      if (follow) audio.follow(1);
+      const v = view(100, 100, dist);
+      audio.update(0.01, v.cam, v.focus);
+      await audio.prefetch(['syl.lion.moan#0', 'bed.wind', 'bed.birds']);
+      const start = i.vocalBus.gain.valueAt(ctx.currentTime + 1);
+      for (let k = 0; k < 40; k++) {
+        audio.host.play({ id: 'syl.lion.moan#0', track: 1, gain: 1, refDist: 200 });
+        run(audio, ctx, v, 0.5);
+      }
+      return 20 * Math.log10(i.vocalBus.gain.valueAt(ctx.currentTime) / start);
+    };
+    const mid = await level(60, false);
+    expect(mid).toBeLessThan(-3);
+    expect(mid).toBeGreaterThanOrEqual(-12.5);
+    expect(await level(6, true)).toBeCloseTo(0, 1);
+  });
+  it('a tap to follow takes the trim off with the focus mix', async () => {
+    const sim = fakeSim();
+    sim.animals.set(1, animal(1, 'lion', 100, 100));
+    const { audio, ctx, i } = engine(sim);
+    const far = view(100, 100, 60);
+    audio.update(0.01, far.cam, far.focus);
+    await audio.prefetch(['syl.lion.moan#0', 'bed.wind', 'bed.birds']);
+    for (let k = 0; k < 40; k++) {
+      audio.host.play({ id: 'syl.lion.moan#0', track: 1, gain: 1, refDist: 200 });
+      run(audio, ctx, far, 0.5);
+    }
+    expect((audio.debugState().mix as { presenceDb: number }).presenceDb).toBeLessThan(-3);
+    audio.follow(1);
+    run(audio, ctx, view(100, 100, 6), 3);
+    expect(i.vocalBus.gain.valueAt(ctx.currentTime)).toBeGreaterThan(0.95);
+  });
+});
+
+describe('fountains', () => {
+  it('run from 07:00 to 22:00 while the zoo is open', () => {
+    expect(fountainsOn(12, true)).toBe(true);
+    expect(fountainsOn(12, false)).toBe(false);
+    expect(fountainsOn(6.5, true)).toBe(false);
+    expect(fountainsOn(22.5, true)).toBe(false);
+  });
+
+  it('fade out over ~20 s when the zoo closes, and a night start finds them off', async () => {
+    const sim = fakeSim();
+    sim.world.objects.set(1, { defId: 'fountain', x: 100, z: 100 });
+    let open = true;
+    sim.isOpen = () => open;
+    const { audio, ctx } = engine(sim);
+    const v = view(100, 100, 20);
+    audio.update(0.01, v.cam, v.focus);
+    run(audio, ctx, v, 1);
+    await audio.prefetch();
+    run(audio, ctx, v, 3);
+    const running = () => (audio.debugState().mix as { fountains: number }).fountains;
+    const bed = () => (audio.debugState().beds as Record<string, number>).fountain;
+    expect(running()).toBe(1);
+    expect(bed()).toBeGreaterThan(0.1);
+    open = false;
+    run(audio, ctx, v, 10);
+    expect(running()).toBeGreaterThan(0.3);
+    expect(running()).toBeLessThan(0.75);
+    run(audio, ctx, v, 15);
+    expect(running()).toBe(0);
+    expect(bed()).toBeLessThan(0.01);
+    const night = fakeSim();
+    night.minuteOfDay = 23 * 60;
+    night.world.objects.set(1, { defId: 'fountain', x: 100, z: 100 });
+    const n = engine(night);
+    n.audio.update(0.01, v.cam, v.focus);
+    run(n.audio, n.ctx, v, 1);
+    expect((n.audio.debugState().mix as { fountains: number }).fountains).toBe(0);
   });
 });
 
