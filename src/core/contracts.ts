@@ -12,6 +12,9 @@
 //  src/main.ts  → wires everything together and runs the loop
 
 import type * as THREE from 'three';
+import type { Avatar, VersusParts, VersusSnapshot } from '../../shared/api-types';
+import type { VersusRules } from '../../shared/versus-rules';
+import type { UIExtension } from './ui-ext';
 import type { EventBus, NotifyKind, TileRect } from './events';
 import type { EdgeRef, World } from './world';
 import type {
@@ -134,6 +137,8 @@ export interface NewGameOptions {
    * morning under short shadows instead of a dim dawn.
    */
   startMinute?: number;
+  /** Start a versus match: 4× locked clock, rules.startMoney, the match's seed. */
+  versus?: VersusRules;
 }
 
 export interface ISimulation {
@@ -155,6 +160,18 @@ export interface ISimulation {
   ledger: LedgerEntry[];
   /** Running totals for the current day. */
   today: LedgerEntry;
+
+  // ---- feature round 14 (all optional so existing implementers and mocks compile)
+  /** Versus match state; null/undefined outside a match. setSpeed() is ignored while set. */
+  readonly versus?: VersusView | null;
+  /** 4 during a versus match, else 1 (undefined = 1). */
+  readonly paceScale?: number;
+  /** Opaque tutorial progress, round-tripped in saves; newGame() sets null. */
+  tutorial?: Record<string, unknown> | null;
+  /** Let one guest party in now if the zoo is open, the gate is open, not full and empty. */
+  welcomeFirstGuests?(): boolean;
+  /** Habitats whose fence was opened (tile indices of the old habitat). */
+  openEnclosures?(): ReadonlyArray<{ id: number; tiles: readonly number[] }>;
 
   isOpen(): boolean;
   stats(): ZooStats;
@@ -285,6 +302,8 @@ export interface IRenderContext {
   /** Ray-cast terrain + water surface from normalized device coords (-1..1). */
   pickGround(ndcX: number, ndcY: number): THREE.Vector3 | null;
   setQuality(level: QualityLevel): void;
+  /** Minimum seconds between sky environment re-captures while time flows; jumpBypass=false keeps a >10° sun jump from forcing one (only load/settle/quality do). Default (6, true). */
+  setEnvCaptureFloor?(seconds: number, jumpBypass: boolean): void;
   dispose(): void;
 }
 
@@ -451,6 +470,12 @@ export interface UIDeps {
   save(): 'saved' | 'showcase' | 'kept' | 'failed';
   /** Start a new game (main.ts provides). */
   newGame(): void;
+  /** Who is playing (feature round 14); absent in builds and mocks that predate it. */
+  player?: PlayerInfo;
+  /** Save, push/release, then reload into the target (main.ts). */
+  switchSlot?(target: BootIntent): Promise<void>;
+  /** In-game feature plug-ins (tutorial, account, versus), mounted by createGameUI in order. */
+  extensions?: UIExtension[];
 }
 
 export interface IGameUI {
@@ -464,4 +489,42 @@ export interface IGameUI {
    */
   handleBack(): boolean;
   dispose(): void;
+}
+
+// ===========================================================================
+// Players, slots, menu and versus view (feature round 14)
+// ===========================================================================
+
+export type PlayerRef = string; // 'guest' or a profile id
+export type SlotName = 'main' | 'practice' | `vs-${string}`;
+export type SlotKey = `${string}/${SlotName}`; // e.g. 'guest/main', '<pid>/vs-<matchId>'
+export interface PlayerInfo {
+  ref: PlayerRef;
+  profileId: string | null; // null for the guest
+  accountId: string | null;
+  name: string | null;
+  avatar: Avatar | null;
+}
+export interface MenuResult {
+  kind: 'continue' | 'new' | 'tutorial' | 'versus';
+  player: PlayerRef;
+  slot: SlotName; // continue/new: 'main' | 'practice'; tutorial: 'practice'; versus: `vs-${matchId}`
+  matchId?: string;
+  startTutorial?: boolean; // 'new' only: run the first-run tutorial even if done/skipped
+  discard?: SlotName; // local slot to delete before booting (e.g. 'practice')
+}
+export type BootIntent = MenuResult | { kind: 'menu'; player?: PlayerRef };
+export interface VersusView {
+  readonly rules: VersusRules;
+  readonly hour: number; // match hours completed
+  readonly hoursTotal: number; // 24 × days
+  readonly ended: boolean;
+  readonly endReason: 'complete' | 'budget' | null;
+  parts(): VersusParts;
+  total(): number; // Math.round(score(parts()))
+  todayPoints(): number; // since the last midnight, rounded
+  gameSecondsLeft(): number; // endTime − sim.time (sim-s)
+  realSecondsLeft(): number; // gameSecondsLeft() / 4
+  lastSnapshot(): VersusSnapshot | null; // at the last completed match hour
+  endNow(reason: 'budget'): void; // freeze at the last completed hour; emits versusEnded
 }

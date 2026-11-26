@@ -1,5 +1,6 @@
 // Typed event bus shared by the simulation, renderer layers and UI.
 
+import type { VersusParts, VersusSnapshot } from '../../shared/api-types';
 import type { CommandResult, SelectionRef, Tool } from './types';
 
 export interface TileRect {
@@ -60,6 +61,13 @@ export interface GameEvents {
   commandResult: CommandResult & { x?: number; z?: number };
   /** Whole world replaced (load game / new game) — views must rebuild everything. */
   worldReset: {};
+  /** Every completed versus match hour (sim). */
+  versusHour: { hour: number; snapshot: VersusSnapshot };
+  /** Visible point changes: births, losses, day close (not every guest). */
+  versusPoints: { part: 'visitors' | 'animals' | 'variety' | 'babies' | 'money' | 'lost'; delta: number; total: number; text?: string };
+  versusEnded: { reason: 'complete' | 'budget'; hour: number; total: number; parts: VersusParts };
+  /** Tutorial progress (UI); main.ts mirrors the player's tutorial state to the server on each. */
+  tutorial: { step: string; chapter: number; state: 'start' | 'done' | 'skip' | 'finish' | 'help' | 'prefs' };
 }
 
 type Handler<T> = (payload: T) => void;
