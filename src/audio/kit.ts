@@ -17,14 +17,21 @@ export type Formant = readonly [number, number, number];
 
 const noiseCache = new Map<string, AudioBuffer>();
 const COLORS: readonly NoiseColor[] = ['white', 'pink', 'brown'];
+/** Length of the shared one-shot noise buffers, s. */
+const SHARED_NOISE_S = 3;
+/** Minimum spacing between the read offsets of two sources of the same colour, s. */
+export const NOISE_SPACING = 0.25;
+const SHARED_SEEDS: Record<NoiseColor, number> = { white: 0x51ed, pink: 0x9e37, brown: 0x2f6b };
 
-/** Incremental generator of one seamlessly looping noise buffer (3 s, RMS ≈ 0.25). */
-function* noiseGen(c: BaseAudioContext, color: NoiseColor): Generator<void, AudioBuffer> {
-  const sr = c.sampleRate;
-  const n = Math.floor(3 * sr);
-  const x = Math.floor(0.05 * sr); // crossfade so the loop point is inaudible
+/**
+ * Incremental generator of seamlessly looping noise samples (RMS ≈ 0.25):
+ * `seconds` long at `sr`, deterministic for `seed`. Yields every ~16k samples.
+ */
+export function* noiseData(sr: number, color: NoiseColor, seconds: number, seed: number): Generator<void, Float32Array> {
+  const n = Math.max(1, Math.floor(seconds * sr));
+  const x = Math.min(n, Math.floor(0.05 * sr)); // crossfade so the loop point is inaudible
   const tmp = new Float32Array(n + x);
-  const r = mulberry32(color === 'white' ? 0x51ed : color === 'pink' ? 0x9e37 : 0x2f6b);
+  const r = mulberry32(seed);
   let b0 = 0,
     b1 = 0,
     b2 = 0,
@@ -56,44 +63,79 @@ function* noiseGen(c: BaseAudioContext, color: NoiseColor): Generator<void, Audi
   let mean = 0;
   for (let i = 0; i < n; i++) mean += tmp[i];
   mean /= n;
+  yield;
   let ss = 0;
   for (let i = 0; i < n; i++) ss += (tmp[i] - mean) * (tmp[i] - mean);
   yield;
   const k = 0.25 / Math.sqrt(ss / n || 1);
-  const buf = c.createBuffer(1, n, sr);
-  const d = buf.getChannelData(0);
-  for (let i = 0; i < n; i++) d[i] = (tmp[i] - mean) * k;
+  const out = tmp.subarray(0, n);
+  for (let i = 0; i < n; i++) out[i] = (tmp[i] - mean) * k;
+  return out;
+}
+
+/** Wrap generated noise samples in a buffer of this context's rate. */
+export function noiseToBuffer(c: BaseAudioContext, data: Float32Array): AudioBuffer {
+  const buf = c.createBuffer(1, data.length, c.sampleRate);
+  buf.copyToChannel(data as Float32Array<ArrayBuffer>, 0);
   return buf;
 }
 
 /**
- * Seamlessly looping noise buffer shared by every render at this sample rate.
- * AudioBuffers are not bound to a context, so one copy serves all offline renders.
+ * Seamlessly looping 3 s noise buffer shared by every one-shot render at this
+ * sample rate. AudioBuffers are not bound to a context, so one copy serves all
+ * offline renders.
  */
 export function noiseBuffer(c: BaseAudioContext, color: NoiseColor): AudioBuffer {
   const key = `${color}@${c.sampleRate}`;
   const hit = noiseCache.get(key);
   if (hit) return hit;
-  const g = noiseGen(c, color);
+  const g = noiseData(c.sampleRate, color, SHARED_NOISE_S, SHARED_SEEDS[color]);
   let res = g.next();
   while (!res.done) res = g.next();
-  noiseCache.set(key, res.value);
-  return res.value;
+  const buf = noiseToBuffer(c, res.value);
+  noiseCache.set(key, buf);
+  return buf;
 }
 
-/** Generate the noise buffers for this sample rate ahead of a render, a slice at a time. */
+/** Generate the shared noise buffers for this sample rate ahead of a render, a slice at a time. */
 export async function prepareNoise(c: BaseAudioContext, sl: { tick(): Promise<void> }): Promise<void> {
   for (const color of COLORS) {
     const key = `${color}@${c.sampleRate}`;
     if (noiseCache.has(key)) continue;
-    const g = noiseGen(c, color);
+    const g = noiseData(c.sampleRate, color, SHARED_NOISE_S, SHARED_SEEDS[color]);
     let res = g.next();
     while (!res.done) {
       await sl.tick();
       res = g.next();
     }
-    noiseCache.set(key, res.value);
+    noiseCache.set(key, noiseToBuffer(c, res.value));
   }
+}
+
+/** Drop the shared noise buffers (they are rebuilt on the next render). */
+export function releaseNoise(): void {
+  noiseCache.clear();
+}
+
+/**
+ * Read offset (s) for a new noise source: redrawn (≤ 20 tries) until it is at
+ * least NOISE_SPACING away, modulo the buffer length, from every offset already
+ * used — two sources reading nearly the same noise sum into a comb filter.
+ * The first draw is the same as a plain rng.range(0, max).
+ */
+export function pickNoiseOffset(rng: Rng, used: number[], len: number, max = len): number {
+  let off = rng.range(0, max);
+  for (let tries = 0; tries < 20 && tooClose(off, used, len); tries++) off = rng.range(0, max);
+  used.push(off);
+  return off;
+}
+
+function tooClose(off: number, used: readonly number[], len: number): boolean {
+  for (const u of used) {
+    const d = Math.abs(off - u) % len;
+    if (Math.min(d, len - d) < NOISE_SPACING) return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------- control data
@@ -226,11 +268,31 @@ const MARIMBA: readonly Partial3[] = [
 
 // ---------------------------------------------------------------- kit
 
+/** Noise sources lasting at least this long read per-render noise in loop recipes (s). */
+export const LONG_NOISE_S = 2.5;
+
+/**
+ * The noise sources of one render. Kit.noise() leaves their `buffer` unset and
+ * lists them here; the renderer assigns the buffers after the build, in time
+ * slices (assigning a buffer copies it). Long sources of loop recipes read a
+ * per-render buffer as long as the render (the 3 s repeats of the shared
+ * buffers sound frozen in a bed); everything else reads the shared 3 s buffers.
+ */
+export interface RenderNoise {
+  /** Per-render buffer length, s (≥ the render length); 0 = shared buffers only. */
+  seconds: number;
+  readonly shared: Map<NoiseColor, AudioBufferSourceNode[]>;
+  readonly own: Map<NoiseColor, AudioBufferSourceNode[]>;
+}
+
 export class Kit {
   readonly sr: number;
   readonly nyquist: number;
   private waves = new Map<string, PeriodicWave>();
   private curves = new Map<number, Float32Array<ArrayBuffer>>();
+  /** Read offsets already used per noise colour in this render (shared / per-render buffers). */
+  private readonly sharedOffsets = new Map<NoiseColor, number[]>();
+  private readonly ownOffsets = new Map<NoiseColor, number[]>();
 
   constructor(
     readonly c: BaseAudioContext,
@@ -241,6 +303,8 @@ export class Kit {
     readonly rng: Rng,
     /** Total render length in seconds. */
     readonly length: number,
+    /** Deferred noise buffers (see RenderNoise); without it noise reads the shared buffers at once. */
+    private readonly renderNoise?: RenderNoise,
   ) {
     this.sr = c.sampleRate;
     this.nyquist = c.sampleRate * 0.5;
@@ -313,9 +377,20 @@ export class Kit {
 
   noise(color: NoiseColor, t0: number, t1: number): AudioBufferSourceNode {
     const s = this.c.createBufferSource();
-    s.buffer = noiseBuffer(this.c, color);
+    const rn = this.renderNoise;
+    const own = !!rn && rn.seconds > 0 && t1 - t0 >= LONG_NOISE_S;
+    const offsets = own ? this.ownOffsets : this.sharedOffsets;
+    let used = offsets.get(color);
+    if (!used) offsets.set(color, (used = []));
+    const off = own ? pickNoiseOffset(this.rng, used, rn!.seconds) : pickNoiseOffset(this.rng, used, SHARED_NOISE_S, SHARED_NOISE_S - 0.1);
+    if (rn) {
+      const map = own ? rn.own : rn.shared;
+      const list = map.get(color);
+      if (list) list.push(s);
+      else map.set(color, [s]);
+    } else s.buffer = noiseBuffer(this.c, color);
     s.loop = true;
-    s.start(Math.max(0, t0), this.rng.range(0, 2.9));
+    s.start(Math.max(0, t0), off);
     s.stop(Math.min(this.length, Math.max(t0 + 0.01, t1)));
     return s;
   }

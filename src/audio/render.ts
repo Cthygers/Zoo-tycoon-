@@ -8,7 +8,7 @@
 // tails and level normalisation to the recipe's peak / RMS targets.
 
 import { Rng, mulberry32 } from '../core/rng';
-import { Kit, prepareNoise } from './kit';
+import { Kit, noiseBuffer, noiseData, noiseToBuffer, prepareNoise, releaseNoise, type NoiseColor, type RenderNoise } from './kit';
 
 export interface Recipe {
   /** Loop length (beds) or nominal length (one-shots), seconds. */
@@ -108,6 +108,51 @@ function impulse(c: BaseAudioContext, decay: number, length: number, bright: num
   return buf;
 }
 
+/** Early outdoor reflections (ground, nearby walls and trees): [delay s, gain]. */
+const OUTDOOR_TAPS: readonly (readonly [number, number])[] = [
+  [0.018, 0.5],
+  [0.027, 0.36],
+  [0.041, 0.26],
+  [0.06, 0.18],
+];
+
+/**
+ * Impulse response of the engine's shared outdoor reverb: four early
+ * reflections and a diffuse tail (time constant 0.145 s, RT60 ≈ 1 s) through a
+ * ~5 kHz one-pole low-pass, scaled to unit energy per channel (use with
+ * ConvolverNode.normalize = false). Stereo channels use different noise seeds
+ * and reflection signs, so the return is decorrelated left / right.
+ */
+export function outdoorImpulse(c: BaseAudioContext, seconds: number, channels: 1 | 2): AudioBuffer {
+  const sr = c.sampleRate;
+  const n = Math.max(64, Math.floor(seconds * sr));
+  const buf = c.createBuffer(channels, n, sr);
+  const a = 1 - Math.exp((-2 * Math.PI * 5000) / sr);
+  const fadeIn = Math.floor(0.012 * sr);
+  for (let ch = 0; ch < channels; ch++) {
+    const d = buf.getChannelData(ch);
+    const r = mulberry32(0x0ad5 + ch * 0x3c6ef35f);
+    let lp = 0;
+    for (let i = fadeIn; i < n; i++) {
+      const t = i / sr;
+      const env = Math.exp(-t / 0.145) * Math.min(1, (i - fadeIn) / (0.03 * sr));
+      lp += a * (r() * 2 - 1 - lp);
+      d[i] = lp * env * 0.6;
+    }
+    for (const [tt, g] of OUTDOOR_TAPS) {
+      // a little per-channel spread keeps the reflections from imaging dead centre
+      const i = Math.floor((tt + (ch ? 0.0013 : 0)) * sr);
+      if (i < n) d[i] += g * (r() < 0.5 ? -1 : 1);
+    }
+    // unit energy at every sample rate (the convolver's own normalisation depends on the rate)
+    let e = 0;
+    for (let i = 0; i < n; i++) e += d[i] * d[i];
+    const k = 1 / Math.sqrt(e || 1);
+    for (let i = 0; i < n; i++) d[i] *= k;
+  }
+  return buf;
+}
+
 function startRendering(c: OfflineAudioContext): Promise<AudioBuffer> {
   return new Promise<AudioBuffer>((resolve, reject) => {
     let done = false;
@@ -142,6 +187,12 @@ function startRendering(c: OfflineAudioContext): Promise<AudioBuffer> {
 
 /** Default main-thread budget per slice (ms) when no idle deadline is known. */
 const SLICE_MS = 3;
+/**
+ * Most of an idle period a slice may use (ms). A slice can overrun its budget
+ * by one unit of work (a recipe build step or a chunk), so this stays well
+ * under the 12 ms slice target.
+ */
+const IDLE_SLICE_MAX = 6;
 const CHUNK = 8192;
 let budgetOverride = 0;
 
@@ -164,7 +215,7 @@ export function yieldMain(): Promise<number> {
   return new Promise<number>((res) => {
     const w = globalThis as unknown as IdleWin;
     if (typeof w.requestIdleCallback === 'function')
-      w.requestIdleCallback((d) => res(budgetOverride || (d.didTimeout ? SLICE_MS : Math.max(2, Math.min(10, d.timeRemaining() - 1)))), { timeout: 250 });
+      w.requestIdleCallback((d) => res(budgetOverride || (d.didTimeout ? SLICE_MS : Math.max(2, Math.min(IDLE_SLICE_MAX, d.timeRemaining() - 1)))), { timeout: 250 });
     else setTimeout(() => res(budgetOverride || SLICE_MS), 0);
   });
 }
@@ -204,18 +255,31 @@ class Slicer {
   }
 }
 
+export interface RenderOptions {
+  /** Upper bound on the render sample rate (lowSpec: 16 kHz for everything but cues). */
+  maxRate?: number;
+}
+
+/** Per-colour seed offsets of the per-render loop noise. */
+const LOOP_NOISE_SEED: Record<NoiseColor, number> = { white: 0x1f3d5b79, pink: 0x2c4e6a88, brown: 0x3b5f7d91 };
+
+/** Length of the per-render noise of a loop recipe, s: the whole render plus a margin. */
+export function loopNoiseSeconds(r: Recipe): number {
+  return r.dur + (r.loop ?? 0) + 0.1;
+}
+
 /**
  * Render a recipe to a normalised buffer. The graph build (generator recipes
  * yield between parts) and the post-processing passes are time-sliced so a
  * render never blocks a frame for more than a few milliseconds.
  * Throws if the result is silent / invalid.
  */
-export async function renderRecipe(r: Recipe, seed: number): Promise<SoundAsset> {
+export async function renderRecipe(r: Recipe, seed: number, opts: RenderOptions = {}): Promise<SoundAsset> {
   const Ctor = offlineCtor();
   if (!Ctor) throw new Error('OfflineAudioContext unavailable');
   const t0 = performance.now();
   const sl = new Slicer();
-  const sr = r.rate ?? 22050;
+  const sr = Math.min(r.rate ?? 22050, opts.maxRate ?? Infinity);
   const fold = r.loop ?? 0;
   const total = r.dur + fold + (fold ? 0 : r.tail ?? 0.6);
   const len = Math.ceil(total * sr);
@@ -239,9 +303,12 @@ export async function renderRecipe(r: Recipe, seed: number): Promise<SoundAsset>
   }
   await sl.tick();
   await prepareNoise(c, sl);
-  const kit = new Kit(c, dry, wet, new Rng(seed), total);
+  // long noise in loops gets its own buffer as long as the render (no 3 s repeats inside the bed)
+  const noise: RenderNoise = { seconds: fold ? loopNoiseSeconds(r) : 0, shared: new Map(), own: new Map() };
+  const kit = new Kit(c, dry, wet, new Rng(seed), total, noise);
   const it = r.build(kit);
   if (it) while (!it.next().done) await sl.tick();
+  await assignNoise(c, noise, seed, sl);
   sl.pause();
   const rendered = await startRendering(c);
   sl.restart();
@@ -251,6 +318,32 @@ export async function renderRecipe(r: Recipe, seed: number): Promise<SoundAsset>
   asset.mainMs = sl.busy;
   asset.sliceMs = sl.longest;
   return asset;
+}
+
+/** Give the build's noise sources their buffers, a few per slice (each assignment copies the buffer). */
+async function assignNoise(c: BaseAudioContext, noise: RenderNoise, seed: number, sl: Slicer): Promise<void> {
+  for (const [color, srcs] of noise.shared) {
+    const buf = noiseBuffer(c, color);
+    for (const src of srcs) {
+      src.buffer = buf;
+      await sl.tick();
+    }
+  }
+  for (const [color, srcs] of noise.own) {
+    const g = noiseData(c.sampleRate, color, noise.seconds, (seed ^ LOOP_NOISE_SEED[color]) >>> 0);
+    let res = g.next();
+    while (!res.done) {
+      await sl.tick();
+      res = g.next();
+    }
+    const buf = noiseToBuffer(c, res.value);
+    for (const src of srcs) {
+      src.buffer = buf;
+      await sl.tick();
+    }
+  }
+  noise.shared.clear();
+  noise.own.clear();
 }
 
 async function postProcess(c: BaseAudioContext, buf: AudioBuffer, r: Recipe, sl: Slicer): Promise<SoundAsset> {
@@ -287,7 +380,12 @@ async function postProcess(c: BaseAudioContext, buf: AudioBuffer, r: Recipe, sl:
     });
     const floor = pk * 5e-4;
     let last = d.length - 1;
-    while (last > 0 && Math.abs(d[last]) < floor) last--;
+    while (last > 0) {
+      const stop = Math.max(0, last - CHUNK);
+      while (last > stop && Math.abs(d[last]) < floor) last--;
+      if (last > stop) break;
+      await sl.tick();
+    }
     n = Math.min(d.length, last + Math.floor(0.025 * sr));
     // short fade-out so a truncated tail never clicks
     const fo = Math.min(n, Math.floor(0.02 * sr));
@@ -362,12 +460,28 @@ async function postProcess(c: BaseAudioContext, buf: AudioBuffer, r: Recipe, sl:
 }
 
 async function weightedRmsSliced(d: Float32Array, n: number, sr: number, win: number, sl: Slicer): Promise<number> {
-  let res = 0;
-  // the filter is cheap; run it in one go over chunks by re-entering with saved state
+  // the filter is cheap; run it over chunks by re-entering with saved state
   const st = new WeightState(sr, n, win);
   await sl.each(n, (i0, i1) => st.feed(d, i0, i1));
-  res = st.result();
-  return res;
+  return st.result(sl);
+}
+
+/** Window-energy scratch, one per sample rate, reused by every render (grows as needed). */
+const energyScratch = new Map<number, Float32Array>();
+function scratchFor(sr: number, n: number): Float32Array {
+  let a = energyScratch.get(sr);
+  if (!a || a.length < n) {
+    a = new Float32Array(Math.ceil(n * 1.25));
+    energyScratch.set(sr, a);
+  }
+  return a;
+}
+
+/** Free the render caches (shared noise, reverb IRs, energy scratch); they are rebuilt on demand. */
+export function releaseRenderCaches(): void {
+  releaseNoise();
+  irCache.clear();
+  energyScratch.clear();
 }
 
 /** Streaming phone-speaker weighting (two one-pole high-passes at 300 Hz). */
@@ -387,7 +501,7 @@ class WeightState {
   ) {
     this.a = Math.exp((-2 * Math.PI * 300) / sr);
     this.w = win > 0 ? Math.max(1, Math.min(win, n)) : n;
-    this.sq = win > 0 ? new Float32Array(n) : null;
+    this.sq = win > 0 ? scratchFor(sr, n) : null;
   }
   feed(d: Float32Array, i0: number, i1: number): void {
     const a = this.a;
@@ -410,15 +524,19 @@ class WeightState {
     this.z1 = z1;
     this.total = total;
   }
-  result(): number {
+  async result(sl: Slicer): Promise<number> {
     const { sq, n, w } = this;
     if (!sq) return Math.sqrt(this.total / Math.max(1, n));
     let s = 0;
     for (let i = 0; i < w; i++) s += sq[i];
     let best = s;
-    for (let i = w; i < n; i++) {
-      s += sq[i] - sq[i - w];
-      if (s > best) best = s;
+    for (let i0 = w; i0 < n; i0 += CHUNK) {
+      const i1 = Math.min(n, i0 + CHUNK);
+      for (let i = i0; i < i1; i++) {
+        s += sq[i] - sq[i - w];
+        if (s > best) best = s;
+      }
+      await sl.tick();
     }
     return Math.sqrt(Math.max(0, best) / w);
   }

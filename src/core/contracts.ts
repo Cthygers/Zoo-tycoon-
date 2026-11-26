@@ -411,6 +411,9 @@ export interface IEntityViews {
 // Audio (src/audio)
 // ===========================================================================
 
+/** Mixer channel with its own volume ('master' scales everything). */
+export type AudioChannel = 'master' | 'ambience' | 'world' | 'ui' | 'music';
+
 export interface IAudio {
   /**
    * Per frame: ambient beds (birds, wind, crowd murmur scaled by nearby guests,
@@ -418,7 +421,12 @@ export interface IAudio {
    */
   update(dt: number, camera: THREE.Camera, focus: THREE.Vector3): void;
   /** Short UI / feedback sounds. */
-  play(cue: 'tap' | 'build' | 'bulldoze' | 'cash' | 'error' | 'select' | 'open' | 'close' | 'celebrate'): void;
+  play(cue: 'tap' | 'build' | 'bulldoze' | 'cash' | 'error' | 'deny' | 'select' | 'open' | 'close' | 'celebrate'): void;
+  /** Channel volume 0..1 (gain = v²); 'master' scales everything. */
+  setVolume?(ch: AudioChannel, v: number): void;
+  volume?(ch: AudioChannel): number;
+  /** Camera-follow hint: the followed animal's id, or null. */
+  follow?(animalId: number | null): void;
   setEnabled(on: boolean): void;
   readonly enabled: boolean;
   /** Must be called from a user gesture on mobile to unlock the AudioContext. */

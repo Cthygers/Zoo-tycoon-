@@ -10,6 +10,10 @@ export interface TileRect {
 }
 
 export type NotifyKind = 'info' | 'good' | 'warn' | 'bad';
+/** Income category of a money popup (same values as the sim's IncomeKind). */
+export type MoneyKind = 'admissions' | 'shopIncome' | 'donations' | 'other';
+/** Audio category of a notification (set by the sim; picks the event sound). */
+export type NotifySound = 'escape' | 'contain' | 'healed' | 'birth' | 'sick' | 'death' | 'hire' | 'sold' | 'debt' | 'day' | 'gate';
 
 export interface GameEvents {
   /** Terrain types (and therefore heights near water) changed in this tile rect. */
@@ -34,11 +38,20 @@ export interface GameEvents {
    * Toast message for the player, kept in the message log. `logOnly`: log it without a
    * toast, because something else on screen already shows it (e.g. the goal-complete card).
    */
-  notify: { text: string; kind: NotifyKind; focus?: { x: number; z: number }; logOnly?: boolean };
+  notify: {
+    text: string;
+    kind: NotifyKind;
+    focus?: { x: number; z: number };
+    logOnly?: boolean;
+    /** audio category, set by the sim */
+    sound?: NotifySound;
+  };
   dayChanged: { day: number };
   objectiveCompleted: { id: string; text: string; reward: number };
   /** Floating "+$12" style feedback at a world position. */
-  moneyPopup: { x: number; z: number; amount: number };
+  moneyPopup: { x: number; z: number; amount: number; kind?: MoneyKind };
+  /** A bought animal was placed by the player (emitted right after animalAdded). */
+  animalPlaced: { id: number; x: number; z: number };
   /** Fired by UI when the active tool changes. */
   toolChanged: { tool: Tool };
   /** Fired by UI when the selection changes (null = cleared). */

@@ -8,14 +8,26 @@
 // old WebViews) so callers never need to check.
 
 import type * as THREE from 'three';
-import type { IAudio, ISimulation } from '../core/contracts';
+import type { AudioChannel, IAudio, ISimulation } from '../core/contracts';
 import type { EventBus } from '../core/events';
 import { ZooAudio, savedLowSpec, type AudioEngineOptions } from './engine';
 
 class SilentAudio implements IAudio {
   enabled = true;
+  /** Remembered so the sound settings show what the player chose. */
+  private readonly volumes = new Map<AudioChannel, number>();
+  followId: number | null = null;
   update(_dt: number, _camera: THREE.Camera, _focus: THREE.Vector3): void {}
   play(_cue: Parameters<IAudio['play']>[0]): void {}
+  setVolume(ch: AudioChannel, v: number): void {
+    this.volumes.set(ch, Math.max(0, Math.min(1, Number.isFinite(v) ? v : 1)));
+  }
+  volume(ch: AudioChannel): number {
+    return this.volumes.get(ch) ?? 1;
+  }
+  follow(animalId: number | null): void {
+    this.followId = animalId;
+  }
   setEnabled(on: boolean): void {
     this.enabled = on;
   }

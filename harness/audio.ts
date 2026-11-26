@@ -501,8 +501,8 @@ function panCheck(sp: string): [number, (h: Harness) => void] {
       const cam = (h as unknown as { cam: THREE.PerspectiveCamera }).cam;
       cam.updateMatrixWorld();
       const ndc = new THREE.Vector3(a.x, a.y + 1, a.z).project(cam);
-      const voices = (h.audio as unknown as { voices: { track: number; curPan: number; src: unknown }[] }).voices;
-      const v = voices.find((x) => x.track === a.id && x.src);
+      const voices = (h.audio as unknown as { voices: { track: number; curPan: number; layers: unknown[] }[] }).voices;
+      const v = voices.find((x) => x.track === a.id && x.layers.length > 0);
       panResults.push({ species: sp, ndcX: +ndc.x.toFixed(2), pan: v ? +v.curPan.toFixed(2) : null, ok: !!v && Math.sign(v.curPan) === Math.sign(ndc.x) });
     },
   ];

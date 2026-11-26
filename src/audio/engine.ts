@@ -1,27 +1,53 @@
-// Procedural audio engine for Wildhaven Zoo (IAudio).
+// Procedural audio engine for Wildhaven Zoo (IAudio + AudioHost).
 //
 // Signal flow (one live AudioContext, created lazily on the first gesture):
 //
-//   beds  (2 looping sources each, panned L/R) ─► amb bus ─┐
-//   voices (pooled: lowpass ► panner ► gain)   ─► sfx bus ─┼─► master ─► compressor ─► soft clip ─► out
-//   UI cues (one buffer source each)           ─► ui  bus ─┘
+//   beds, keyed loops, amb pool ─► ambience ─┐
+//   voice / foley / fx pools    ─► world    ─┤  (each channel: level ► volume ► duck)
+//   shared outdoor reverb       ─► world    ─┤  world + ambience ► world filter ─┐
+//   UI cues (unpooled)          ─► ui       ─┼───────────────────────────────────┼─► master volume ► master
+//   (music: empty this round)   ─► music    ─┘                                   │      ► glue ► limiter ► soft clip ► out
+//
+// A pooled voice: source(s) ► low-pass (air) ► 3 kHz shelf ► colour peak ► gain
+// (distance) ► panner ► channel, plus a send (distance wet) to the reverb.
 //
 // Every sound is pre-rendered once (lazily, one recipe at a time, off the
 // main thread in an OfflineAudioContext — see render.ts) so the per-frame work
-// is only bookkeeping: a few distance / panning computations and occasional
-// AudioParam ramps. No nodes are created per frame; a call or cue creates a
-// single AudioBufferSourceNode.
+// is only bookkeeping: distance / panning and occasional AudioParam ramps.
+// Nodes are created only when a sound starts.
+//
+// Engine modules (src/audio/modules/*.ts) add behaviour through the AudioHost
+// contract in host.ts; a module that owns the animals or coins switches the
+// built-in versions off.
 
 import type * as THREE from 'three';
 import { MAP_H, MAP_W, QUALITY_KEY, TILE } from '../core/constants';
-import type { IAudio, ISimulation } from '../core/contracts';
+import type { AudioChannel, IAudio, ISimulation } from '../core/contracts';
 import type { EventBus } from '../core/events';
 import { Rng } from '../core/rng';
 import { Terrain, type AnimalState, type GuestState } from '../core/types';
+import { getObjectDef } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
+import {
+  DEFAULT_RADIUS,
+  DEFAULT_REF_DIST,
+  POOL_CHANNEL,
+  POOL_SIZES,
+  distanceModel,
+  type Attenuation,
+  type AudioHost,
+  type AudioModule,
+  type AudioModuleFactory,
+  type Channel,
+  type ListenerState,
+  type PlayLog,
+  type PlaySpec,
+  type Pool,
+  type VoiceHandle,
+} from './host';
 import { smoothstep } from './kit';
 import { RECIPES, SPECIES_VOICE, seedFor, voiceIdFor, type SpeciesVoice } from './recipes';
-import { offlineCtor, renderRecipe, setRenderBudget, yieldMain, type SoundAsset } from './render';
+import { offlineCtor, outdoorImpulse, releaseRenderCaches, renderRecipe, setRenderBudget, yieldMain, type SoundAsset } from './render';
 
 export type Cue = Parameters<IAudio['play']>[0];
 
@@ -29,34 +55,101 @@ export interface AudioEngineOptions {
   /** Render into this context instead of creating an AudioContext (offline harness mix). */
   context?: BaseAudioContext;
   seed?: number;
-  /** Fewer voices and single-source beds for low-end phones. */
+  /** Fewer voices, mono side beds and 16 kHz renders for low-end phones. */
   lowSpec?: boolean;
   /** Install one-shot unlock listeners (touchend / click / keydown). Default: true with a window. */
   autoUnlock?: boolean;
+  /** Engine modules by path (tests); default: every src/audio/modules/*.ts. */
+  modules?: Record<string, AudioModuleFactory>;
 }
 
-const BED_IDS = ['wind', 'birds', 'night', 'crowd', 'water', 'fountain'] as const;
+const MODULES = import.meta.glob<AudioModuleFactory>('./modules/*.ts', { eager: true, import: 'default' });
+
+const BED_IDS = ['wind', 'birds', 'night', 'crowd', 'water', 'fountain', 'savanna', 'savanna.night', 'arctic', 'humid', 'humid.night'] as const;
 type BedId = (typeof BED_IDS)[number];
-/** Static mix level of each bed relative to its normalised buffer. */
-const BED_MIX: Record<BedId, number> = { wind: 0.36, birds: 0.5, night: 0.4, crowd: 0.4, water: 0.42, fountain: 0.36 };
+/** Static mix level of each bed relative to its normalised buffer (biome beds carry theirs in the level formula). */
+const BED_MIX: Record<BedId, number> = {
+  wind: 0.36,
+  birds: 0.5,
+  night: 0.4,
+  crowd: 0.4,
+  water: 0.42,
+  fountain: 0.36,
+  savanna: 1,
+  'savanna.night': 1,
+  arctic: 1,
+  humid: 1,
+  'humid.night': 1,
+};
+/** Beds that keep their stereo pair on lowSpec (wide, enveloping layers). */
+const LOWSPEC_STEREO: ReadonlySet<BedId> = new Set(['wind', 'birds', 'night', 'crowd']);
 /** Scratch per-bed target levels (reused every update). */
-const BED_LEVELS: Record<BedId, number> = { wind: 0, birds: 0, night: 0, crowd: 0, water: 0, fountain: 0 };
-const CUE_IDS: readonly Cue[] = ['tap', 'select', 'open', 'close', 'build', 'bulldoze', 'error', 'cash', 'celebrate'];
-const MASTER = 0.9;
-/** Ambience bus level: beds sit well under calls and cues. */
-const AMB_LEVEL = 0.7;
-/** Distance (m) up to which a source plays at full level. */
-const REF_DIST = 10;
+const BED_LEVELS = Object.fromEntries(BED_IDS.map((b) => [b, 0])) as Record<BedId, number>;
+const CUE_IDS: readonly Cue[] = ['tap', 'select', 'open', 'close', 'build', 'bulldoze', 'error', 'deny', 'cash', 'celebrate'];
+const CHANNELS: readonly Channel[] = ['ambience', 'world', 'ui', 'music'];
+const VOLUME_CHANNELS: readonly AudioChannel[] = ['master', ...CHANNELS];
+/** Master gain into the glue compressor (calibrated to the loudness targets). */
+const MASTER = 1.9;
+/** Static channel levels: beds sit under calls and cues. */
+const CHANNEL_LEVEL: Record<Channel, number> = { ambience: 0.55, world: 0.4, ui: 0.8, music: 1 };
+/** Outdoor reverb return (unit-energy IR): at the full send (≥ 29 m) the tail sits ~3 dB under the dry sound. */
+const REVERB_RETURN = 1.8;
+/** Σ bed levels in a busy daytime close view: the UI channel is at full level from here up. */
+const DAY_CLOSE_REF = 1.1;
+/** Legacy animal calls: audible radius around the ear, m. */
 const CALL_RADIUS = 60;
 const AMBIENT_ONESHOTS = ['amb.songA', 'amb.songB', 'amb.songA', 'amb.wood', 'amb.crow'] as const;
+/** lowSpec render rate for everything but UI cues. */
+const LOWSPEC_RATE = 16000;
+/** Max keyed loops [normal, lowSpec] and beds playing at once. */
+const MAX_LOOPS: readonly [number, number] = [4, 2];
+const MAX_BEDS: readonly [number, number] = [7, 5];
+/** Steal / stop fade (s) and the gap before a stolen voice restarts. */
+const STEAL_FADE = 0.02;
+const STEAL_GAP = 0.025;
+const MAX_LAYERS = 2;
 
 const noop = () => {};
 
+/**
+ * Freeze a param at its current value (cancelAndHoldAtTime where available) so
+ * a ramp can start from it. The explicit setValueAtTime anchors the next ramp:
+ * Chromium starts a ramp that follows a bare cancelAndHold from the wrong
+ * point and the gain steps.
+ */
+function hold(p: AudioParam, now: number): void {
+  const v = p.value;
+  if (typeof p.cancelAndHoldAtTime === 'function') p.cancelAndHoldAtTime(now);
+  else p.cancelScheduledValues(now);
+  p.setValueAtTime(v, now);
+}
+
+/** Click-free fade to silence from the current value. */
+function fadeOut(p: AudioParam, now: number, fade: number): void {
+  hold(p, now);
+  p.linearRampToValueAtTime(0, now + fade);
+}
+
+function safeStop(s: AudioScheduledSourceNode, at: number): void {
+  try {
+    s.stop(at);
+  } catch {
+    /* already stopped */
+  }
+}
+
+/** Two-pole Butterworth sections for a 4-pole low-pass. */
+const LP4_Q = [0.541, 1.307] as const;
+
 // -------------------------------------------------------------------- beds
 
+/** A looping bed: two sources (left / right) through a 4-pole low-pass. Also used for keyed loops. */
 class Bed {
   asset: SoundAsset | null = null;
+  /** Optional second layer for the right-hand source (bed.<id>.b). */
+  assetB: SoundAsset | null = null;
   readonly out: GainNode;
+  private readonly lp: BiquadFilterNode[];
   private readonly inputs: AudioNode[];
   private readonly pans: StereoPannerNode[] = [];
   private srcs: AudioBufferSourceNode[] = [];
@@ -64,6 +157,9 @@ class Bed {
   quiet = 0;
   level = 0;
   bias = 0;
+  cut = 0;
+  /** Level changes wait until the start-up fade from silence is done. */
+  private startAt = 0;
 
   constructor(
     private readonly ctx: BaseAudioContext,
@@ -72,7 +168,16 @@ class Bed {
   ) {
     this.out = ctx.createGain();
     this.out.gain.value = 0;
-    this.out.connect(dest);
+    this.lp = LP4_Q.map((q) => {
+      const f = ctx.createBiquadFilter();
+      f.type = 'lowpass';
+      f.frequency.value = 9000;
+      f.Q.value = q;
+      return f;
+    });
+    this.out.connect(this.lp[0]);
+    this.lp[0].connect(this.lp[1]);
+    this.lp[1].connect(dest);
     if (stereo && typeof ctx.createStereoPanner === 'function') {
       this.inputs = [-0.65, 0.65].map((p) => {
         const sp = ctx.createStereoPanner();
@@ -90,39 +195,64 @@ class Bed {
     const L = buf.duration;
     const off = rng.range(0, L);
     const now = this.ctx.currentTime;
-    this.out.gain.cancelScheduledValues(now);
-    this.out.gain.setValueAtTime(0, now);
+    // from silence (a stop fade may still be running)
+    fadeOut(this.out.gain, now, STEAL_FADE);
+    const at = now + STEAL_GAP;
+    this.startAt = at;
     this.level = 0;
+    this.setCut(this.cut || 18000, 0);
     for (let i = 0; i < this.inputs.length; i++) {
       const s = this.ctx.createBufferSource();
-      s.buffer = buf;
+      const b = i === 1 ? this.assetB : null;
+      s.buffer = b ? b.buffer : buf;
       s.loop = true;
       s.connect(this.inputs[i]);
-      // the second copy runs half a loop apart and 3.5 % slower: decorrelated
-      // left / right, and the pair never lines up the same way twice
-      if (i === 1) s.playbackRate.value = 0.966;
-      s.start(now, (off + i * L * 0.5) % L);
+      if (b) s.start(at, rng.range(0, b.buffer.duration));
+      else {
+        // the second copy runs half a loop apart and 3.5 % slower: decorrelated
+        // left / right, and the pair never lines up the same way twice
+        if (i === 1) s.playbackRate.value = 0.966;
+        s.start(at, (off + i * L * 0.5) % L);
+      }
       this.srcs.push(s);
     }
     this.playing = true;
     this.quiet = 0;
   }
 
-  stop(immediate = false): void {
+  /** Fade out over 60 ms, then stop the sources. */
+  stop(): void {
     const now = this.ctx.currentTime;
+    fadeOut(this.out.gain, now, 0.06);
     for (const s of this.srcs) {
-      try {
-        s.stop(immediate ? 0 : now + 0.05);
-      } catch {
-        /* already stopped */
-      }
+      safeStop(s, now + 0.065);
       s.onended = () => s.disconnect();
     }
     this.srcs = [];
     this.playing = false;
-    this.out.gain.cancelScheduledValues(now);
-    this.out.gain.setValueAtTime(0, now);
     this.level = 0;
+  }
+
+  dispose(): void {
+    if (this.playing) this.stop();
+    const out = this.lp[1];
+    setTimeout(() => out.disconnect(), 200);
+  }
+
+  /** Low-pass cutoff, capped below the buffer's Nyquist (no resampling images at 48 kHz). */
+  setCut(hz: number, tc = 0.3): void {
+    const sr = this.asset?.buffer.sampleRate ?? 22050;
+    const f = Math.min(hz, 0.45 * sr, 0.49 * this.ctx.sampleRate);
+    if (Math.abs(f - this.cut) < this.cut * 0.04) return;
+    this.cut = f;
+    const now = this.ctx.currentTime;
+    for (const lp of this.lp) {
+      if (tc > 0) lp.frequency.setTargetAtTime(f, now, tc);
+      else {
+        lp.frequency.cancelScheduledValues(now);
+        lp.frequency.setValueAtTime(f, now);
+      }
+    }
   }
 
   /** Lean the stereo pair towards a side (-1..1) where the source of this bed is. */
@@ -137,121 +267,238 @@ class Bed {
   setLevel(v: number, tc: number): void {
     if (Math.abs(v - this.level) < 0.002) return;
     this.level = v;
-    this.out.gain.setTargetAtTime(v, this.ctx.currentTime, tc);
+    this.out.gain.setTargetAtTime(v, Math.max(this.ctx.currentTime, this.startAt), tc);
   }
+}
+
+interface LoopEmitter {
+  bed: Bed;
+  id: string;
+  ch: Channel;
+  level: number;
+  side: number;
+  quiet: number;
 }
 
 // -------------------------------------------------------------------- voices
 
+/** One source playing on a voice (a voice layers up to MAX_LAYERS of them for bouts). */
+interface Layer {
+  src: AudioBufferSourceNode;
+  gain: GainNode;
+  level: number;
+  endAt: number;
+  stopped: boolean;
+}
+
 class Voice {
-  src: AudioBufferSourceNode | null = null;
-  readonly filter: BiquadFilterNode;
-  readonly pan: StereoPannerNode | null;
+  layers: Layer[] = [];
+  readonly lp: BiquadFilterNode;
+  readonly shelf: BiquadFilterNode;
+  readonly color: BiquadFilterNode;
   readonly gain: GainNode;
+  readonly pan: StereoPannerNode | null;
+  readonly send: GainNode | null;
   endAt = 0;
   startAt = 0;
-  /** Base level (species loudness) before distance attenuation. */
-  level = 0;
   /** Priority at start (for stealing). */
   prio = 0;
-  /** Animal id to follow (-1 = fixed). */
+  /** Animal id to follow (-1 = fixed or non-positional). */
   track = -1;
+  /** Fixed world position ('at' plays), steered as the camera moves. */
+  fixed = false;
+  px = 0;
+  py = 0;
+  pz = 0;
+  refDist = DEFAULT_REF_DIST;
+  radius = DEFAULT_RADIUS;
+  group = -1;
+  /** Sample rate of the playing buffer (caps the low-pass below its Nyquist). */
+  bufRate = 22050;
   curGain = 0;
   curPan = 0;
   curCut = 0;
+  curShelf = 0;
+  curWet = 0;
 
   constructor(
     private readonly ctx: BaseAudioContext,
     dest: AudioNode,
+    reverb: AudioNode | null,
   ) {
-    this.filter = ctx.createBiquadFilter();
-    this.filter.type = 'lowpass';
-    this.filter.frequency.value = 16000;
-    this.filter.Q.value = 0.5;
+    this.lp = ctx.createBiquadFilter();
+    this.lp.type = 'lowpass';
+    this.lp.frequency.value = 9000;
+    this.lp.Q.value = 0.5;
+    this.shelf = ctx.createBiquadFilter();
+    this.shelf.type = 'highshelf';
+    this.shelf.frequency.value = 3000;
+    this.color = ctx.createBiquadFilter();
+    this.color.type = 'peaking';
+    this.color.Q.value = 1.2;
+    this.color.gain.value = 0;
     this.gain = ctx.createGain();
     this.gain.gain.value = 0;
+    this.lp.connect(this.shelf);
+    this.shelf.connect(this.color);
+    this.color.connect(this.gain);
     this.pan = typeof ctx.createStereoPanner === 'function' ? ctx.createStereoPanner() : null;
     if (this.pan) {
-      this.filter.connect(this.pan);
-      this.pan.connect(this.gain);
-    } else this.filter.connect(this.gain);
-    this.gain.connect(dest);
+      this.gain.connect(this.pan);
+      this.pan.connect(dest);
+    } else this.gain.connect(dest);
+    if (reverb) {
+      this.send = ctx.createGain();
+      this.send.gain.value = 0;
+      this.gain.connect(this.send);
+      this.send.connect(reverb);
+    } else this.send = null;
   }
 
   busy(now: number): boolean {
-    if (this.src && now >= this.endAt) this.src = null;
-    return this.src !== null;
+    if (this.layers.length && now >= this.endAt) this.layers.length = 0;
+    return this.layers.length > 0;
   }
 
-  play(buf: AudioBuffer, rate: number, gain: number, pan: number, cut: number): void {
+  /** Start a new play on this voice (stealing whatever it plays) with these distance parameters. */
+  start(buf: AudioBuffer, rate: number, level: number, when: number, att: Readonly<Attenuation>, color: { hz: number; db: number } | undefined): Layer {
     const now = this.ctx.currentTime;
-    let at = now + 0.005;
-    const g = this.gain.gain;
-    g.cancelScheduledValues(now);
-    if (this.src) {
-      // steal: quick fade of the old sound on the shared gain, then switch
-      g.setValueAtTime(this.curGain, now);
-      g.linearRampToValueAtTime(0, now + 0.025);
-      try {
-        this.src.stop(now + 0.03);
-      } catch {
-        /* ignore */
-      }
-      at = now + 0.035;
+    let at = Math.max(now, when);
+    if (this.busy(now)) {
+      for (const l of this.layers) this.fadeLayer(l, now, STEAL_FADE);
+      this.layers.length = 0;
+      at = Math.max(at, now + STEAL_GAP);
     }
+    this.bufRate = buf.sampleRate;
+    const cut = this.cutFor(att);
+    const params: [AudioParam, number][] = [
+      [this.gain.gain, att.gain],
+      [this.lp.frequency, cut],
+      [this.shelf.gain, att.shelfDb],
+      [this.color.frequency, color?.hz ?? 1000],
+      [this.color.gain, color?.db ?? 0],
+    ];
+    if (this.pan) params.push([this.pan.pan, att.pan]);
+    if (this.send) params.push([this.send.gain, att.wet]);
+    // a stolen voice is silent from now + STEAL_FADE: switch its parameters after that
+    for (const [p, v] of params) {
+      hold(p, now);
+      p.setValueAtTime(v, at);
+    }
+    this.curGain = att.gain;
+    this.curPan = att.pan;
+    this.curCut = cut;
+    this.curShelf = att.shelfDb;
+    this.curWet = att.wet;
+    this.startAt = at;
+    this.endAt = 0;
+    return this.layer(buf, rate, level, at);
+  }
+
+  /** Add a source to this voice (bout layering; at most MAX_LAYERS overlap). */
+  layer(buf: AudioBuffer, rate: number, level: number, when: number): Layer {
+    const now = this.ctx.currentTime;
+    const at = Math.max(now, when);
+    const live = this.layers.filter((l) => !l.stopped && l.endAt > now);
+    if (live.length >= MAX_LAYERS) {
+      // drop the layer that ends first, just before the new one starts
+      live.sort((a, b) => a.endAt - b.endAt);
+      const old = live[0];
+      const t0 = Math.max(now, at - STEAL_GAP);
+      if (t0 <= now) this.fadeLayer(old, now, STEAL_FADE);
+      else {
+        old.gain.gain.setValueAtTime(old.level, t0);
+        old.gain.gain.linearRampToValueAtTime(0, t0 + STEAL_FADE);
+        safeStop(old.src, t0 + STEAL_GAP);
+        old.stopped = true;
+        old.endAt = Math.min(old.endAt, t0 + STEAL_GAP);
+      }
+    }
+    this.layers = live.filter((l) => !l.stopped);
+    this.refreshEnd();
+    const g = this.ctx.createGain();
+    g.gain.value = 0;
+    g.gain.setValueAtTime(level, at);
+    g.connect(this.lp);
     const s = this.ctx.createBufferSource();
     s.buffer = buf;
     s.playbackRate.value = rate;
-    s.connect(this.filter);
-    g.setValueAtTime(gain, at);
-    this.filter.frequency.cancelScheduledValues(now);
-    this.filter.frequency.setValueAtTime(cut, at);
-    if (this.pan) {
-      this.pan.pan.cancelScheduledValues(now);
-      this.pan.pan.setValueAtTime(pan, at);
-    }
+    s.connect(g);
     s.start(at);
-    this.src = s;
-    this.startAt = at;
-    this.endAt = at + buf.duration / rate + 0.05;
-    this.curGain = gain;
-    this.curPan = pan;
-    this.curCut = cut;
+    const layer: Layer = { src: s, gain: g, level, endAt: at + buf.duration / rate + 0.05, stopped: false };
     s.onended = () => {
       s.disconnect();
-      if (this.src === s) this.src = null;
+      g.disconnect();
     };
+    this.layers.push(layer);
+    this.endAt = Math.max(this.endAt, layer.endAt);
+    return layer;
   }
 
-  /** Smoothly follow a moving source. */
-  steer(gain: number, pan: number, cut: number): void {
+  /** Click-free stop of one layer: hold, 20 ms (or `fade`) ramp, then stop. */
+  fadeLayer(l: Layer, now: number, fade: number): void {
+    if (l.stopped) return;
+    l.stopped = true;
+    fadeOut(l.gain.gain, now, fade);
+    safeStop(l.src, now + fade + 0.005);
+    l.endAt = Math.min(l.endAt, now + fade + 0.005);
+    this.refreshEnd();
+  }
+
+  private refreshEnd(): void {
+    let end = 0;
+    for (const l of this.layers) end = Math.max(end, l.endAt);
+    this.endAt = end;
+  }
+
+  /** Smoothly follow a moving source / the turning camera. */
+  steer(att: Readonly<Attenuation>): void {
     const now = this.ctx.currentTime;
-    if (Math.abs(gain - this.curGain) > 0.01) {
-      this.curGain = gain;
-      this.gain.gain.setTargetAtTime(gain, now, 0.08);
+    if (Math.abs(att.gain - this.curGain) > 0.01) {
+      this.curGain = att.gain;
+      this.gain.gain.setTargetAtTime(att.gain, now, 0.08);
     }
-    if (this.pan && Math.abs(pan - this.curPan) > 0.03) {
-      this.curPan = pan;
-      this.pan.pan.setTargetAtTime(pan, now, 0.08);
+    if (this.pan && Math.abs(att.pan - this.curPan) > 0.03) {
+      this.curPan = att.pan;
+      this.pan.pan.setTargetAtTime(att.pan, now, 0.08);
     }
+    const cut = this.cutFor(att);
     if (Math.abs(cut - this.curCut) > this.curCut * 0.08) {
       this.curCut = cut;
-      this.filter.frequency.setTargetAtTime(cut, now, 0.1);
+      this.lp.frequency.setTargetAtTime(cut, now, 0.1);
+    }
+    if (Math.abs(att.shelfDb - this.curShelf) > 0.5) {
+      this.curShelf = att.shelfDb;
+      this.shelf.gain.setTargetAtTime(att.shelfDb, now, 0.1);
+    }
+    if (this.send && Math.abs(att.wet - this.curWet) > 0.02) {
+      this.curWet = att.wet;
+      this.send.gain.setTargetAtTime(att.wet, now, 0.1);
     }
   }
 
-  stop(immediate = false): void {
-    if (!this.src) return;
-    const now = this.ctx.currentTime;
-    try {
-      this.src.stop(immediate ? 0 : now + 0.03);
-    } catch {
-      /* ignore */
-    }
-    this.gain.gain.cancelScheduledValues(now);
-    this.gain.gain.setValueAtTime(0, now + (immediate ? 0 : 0.03));
-    this.src = null;
+  /** Air-absorption cutoff, kept below the buffer's and the context's Nyquist. */
+  private cutFor(att: Readonly<Attenuation>): number {
+    return Math.min(att.cut, 0.45 * this.bufRate, 0.49 * this.ctx.sampleRate);
   }
+
+  stop(fade = STEAL_FADE): void {
+    if (!this.layers.length) return;
+    const now = this.ctx.currentTime;
+    for (const l of this.layers) this.fadeLayer(l, now, fade);
+    this.layers.length = 0;
+  }
+}
+
+interface ChannelNodes {
+  /** Static level (and, for ui, the ambience-relative scale). */
+  input: GainNode;
+  /** Player volume, v². */
+  vol: GainNode;
+  /** Ducking, separate from the volume. */
+  duck: GainNode;
+  duckDb: number;
+  duckUntil: number;
 }
 
 interface SpeciesInfo {
@@ -260,21 +507,51 @@ interface SpeciesInfo {
   voice: SpeciesVoice;
 }
 
+interface ModuleEntry {
+  name: string;
+  m: AudioModule;
+  failed: boolean;
+}
+
+/** Owl bouts come from one tree for a while, then it moves (A1-25). */
+interface OwlPerch {
+  x: number;
+  y: number;
+  z: number;
+  /** Engine time at which the owl moves on. */
+  until: number;
+}
+
 // -------------------------------------------------------------------- engine
 
 export class ZooAudio implements IAudio {
+  /** Contract for engine modules (also used by tests and probes). */
+  readonly host: AudioHost;
+  /** Set to [] to record every started sound (host.play, cues and legacy). */
+  debugLog: PlayLog[] | null = null;
+
   private _enabled = true;
   private appSuspended = false;
   private disposed = false;
   private readonly injected: BaseAudioContext | null;
   private ctx: BaseAudioContext | null = null;
   private master!: GainNode;
+  private masterVol!: GainNode;
+  private chan!: Record<Channel, ChannelNodes>;
+  private worldFilter!: BiquadFilterNode;
+  private worldGain!: GainNode;
+  /** Probe names: ambience / world (reverb included) / ui channel outputs. */
   private ambBus!: GainNode;
   private sfxBus!: GainNode;
   private uiBus!: GainNode;
+  private reverbIn!: GainNode;
   private readonly beds = new Map<BedId, Bed>();
-  private voices: Voice[] = [];
-  private fxVoices: Voice[] = [];
+  private readonly loops = new Map<string, LoopEmitter>();
+  private readonly pools: Record<Exclude<Pool, 'ui'>, Voice[]> = { voice: [], foley: [], fx: [], amb: [] };
+  /** Probe names for the animal and fx pools. */
+  private voices: Voice[] = this.pools.voice;
+  private fxVoices: Voice[] = this.pools.fx;
+  private uiLive = 0;
   private readonly sounds = new Map<string, SoundAsset>();
   private readonly pending = new Set<string>();
   private readonly failed = new Set<string>();
@@ -283,6 +560,8 @@ export class ZooAudio implements IAudio {
   private idleWaiters: (() => void)[] = [];
   private warned = false;
   private offTimer: ReturnType<typeof setTimeout> | null = null;
+  private suspendTimer: ReturnType<typeof setTimeout> | null = null;
+  private releaseTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly rng: Rng;
   private readonly lowSpec: boolean;
   private readonly unsub: (() => void)[] = [];
@@ -290,25 +569,24 @@ export class ZooAudio implements IAudio {
   private warmTimer: ReturnType<typeof setTimeout> | null = null;
   /** Background pre-rendering has been queued (warmup or context boot). */
   private warmed = false;
+  /** The context stopped on its own (Android interruption): retry resume. */
+  private needsResume = false;
+  private resumeRetryT = 0;
+  private readonly volumes: Record<AudioChannel, number> = { master: 1, ambience: 1, world: 1, ui: 1, music: 1 };
+  private followId = -1;
+  private readonly modules: ModuleEntry[] = [];
+  private readonly ownsAnimals: boolean;
+  private readonly ownsCoins: boolean;
 
   // listener (updated every frame)
-  private lx = 0;
-  private ly = 30;
-  private lz = 0;
+  private readonly ear: ListenerState = { x: 0, y: 30, z: 0, fx: 0, fz: 0, camDist: 60, zoomNear: 0.5 };
   private rx = 1;
   private ry = 0;
   private rz = 0;
   private fwx = 0;
   private fwy = 0;
   private fwz = -1;
-  private fx = 0;
-  private fz = 0;
-  private camDist = 60;
-  private zoomNear = 0.5;
-  // attenuation scratch output
-  private aGain = 0;
-  private aPan = 0;
-  private aCut = 16000;
+  private readonly att: Attenuation = { gain: 0, pan: 0, cut: 18000, shelfDb: 0, wet: 0.05, dist: 0 };
 
   // environment
   private time = 0;
@@ -316,8 +594,8 @@ export class ZooAudio implements IAudio {
   private animT = 0;
   private voiceT = 0;
   private gNear = 0;
-  private gTotal = 0;
   private gSide = 0;
+  private gVisible = 0;
   private waterSide = 0;
   private fountainSide = 0;
   private crowdNear = 0;
@@ -327,8 +605,14 @@ export class ZooAudio implements IAudio {
   private openness = 1;
   private nightness = 0;
   private birdsDay = 1;
+  private readonly biome = { savanna: 0, arctic: 0, humid: 0 };
+  private readonly biomeSide = { savanna: 0, arctic: 0, humid: 0 };
+  /** Per habitat id: 1 = holds a desert species, 2 = holds a tropical / wetland species. */
+  private readonly habitatBiome = new Map<number, number>();
+  private habitatsDirty = true;
   private fountains: number[] = [];
-  private fountainsDirty = true;
+  private trees: number[] = [];
+  private objectsDirty = true;
   private readonly calling = new Set<number>();
   private readonly near = new Int32Array(256);
   private nearCount = 0;
@@ -337,6 +621,7 @@ export class ZooAudio implements IAudio {
   private readonly lastCue = new Map<Cue, number>();
   private readonly spInfo = new Map<string, SpeciesInfo>();
   private owlT = 20;
+  private owl: OwlPerch | null = null;
   private birdT = 6;
   private coinTokens = 3;
   private coinRefill = 0;
@@ -350,45 +635,97 @@ export class ZooAudio implements IAudio {
     this.injected = opts.context ?? null;
     this.rng = new Rng(opts.seed ?? 0x5eed);
     this.lowSpec = opts.lowSpec ?? false;
+    this.host = this.makeHost();
+    const factories = opts.modules ?? MODULES;
+    for (const path of Object.keys(factories).sort()) {
+      const name = path.replace(/^.*\//, '').replace(/\.ts$/, '');
+      try {
+        this.modules.push({ name, m: factories[path](this.host), failed: false });
+      } catch (err) {
+        console.warn(`[audio] module ${name} disabled:`, err);
+      }
+    }
+    this.ownsAnimals = this.modules.some((e) => e.m.ownsAnimals);
+    this.ownsCoins = this.modules.some((e) => e.m.ownsCoins);
     this.unsub.push(
-      events.on('moneyPopup', (m) => this.onCoin(m.x, m.z, m.amount)),
       events.on('objectiveCompleted', () => this.play('celebrate')),
-      events.on('animalAdded', (e) => {
-        const a = this.sim.animals.get(e.id);
-        if (a && this.warmed) this.requestSpecies(a.speciesId);
-      }),
       events.on('animalRemoved', (e) => this.calling.delete(e.id)),
-      events.on('objectAdded', () => (this.fountainsDirty = true)),
-      events.on('objectRemoved', () => (this.fountainsDirty = true)),
+      events.on('objectAdded', () => (this.objectsDirty = true)),
+      events.on('objectRemoved', () => (this.objectsDirty = true)),
+      events.on('habitatsChanged', () => (this.habitatsDirty = true)),
       events.on('worldReset', () => {
-        this.fountainsDirty = true;
+        this.objectsDirty = true;
+        this.habitatsDirty = true;
         this.calling.clear();
-        if (this.warmed) this.requestAllSpecies();
+        this.owl = null;
+        if (this.warmed && !this.ownsAnimals) this.requestAllSpecies();
+      }),
+    );
+    if (!this.ownsCoins) this.unsub.push(events.on('moneyPopup', (m) => this.onCoin(m.x, m.z, m.amount)));
+    this.unsub.push(
+      events.on('animalAdded', (e) => {
+        this.habitatsDirty = true;
+        const a = this.sim.animals.get(e.id);
+        if (a && this.warmed && !this.ownsAnimals) this.requestSpecies(a.speciesId);
       }),
     );
     if (this.injected) {
       this.boot(this.injected);
     } else if ((opts.autoUnlock ?? true) && typeof window !== 'undefined') {
-      // Android: touch `pointerdown` is not a user activation; the first
-      // touchend / click is. Unlock on whichever comes first.
-      const fn = () => {
-        if (!this._enabled) return;
-        this.resume();
-        const c = this.ctx as AudioContext | null;
-        if (c && c.state === 'running') this.removeUnlock();
-      };
-      this.unlockBound = fn;
-      for (const ev of ['touchend', 'pointerup', 'click', 'keydown']) window.addEventListener(ev, fn, { capture: true, passive: true });
+      this.installUnlock();
       // Pre-render in the background (no gesture needed for offline rendering)
       // once the first frames are out, so sounds are ready at the first tap.
       this.warmTimer = setTimeout(() => this.warmup(), 1200);
     }
   }
 
+  private makeHost(): AudioHost {
+    const self = this;
+    return {
+      sim: this.sim,
+      events: this.events,
+      lowSpec: this.lowSpec,
+      get time() {
+        return self.time;
+      },
+      now: () => self.ctx?.currentTime ?? 0,
+      get active() {
+        return self.active();
+      },
+      listener: this.ear,
+      get hour() {
+        return self.sim.minuteOfDay / 60;
+      },
+      get nightness() {
+        return self.nightness;
+      },
+      get followId() {
+        return self.followId;
+      },
+      attenuate: (x, y, z, refDist, radius) => this.attenuate(x, y, z, refDist, radius),
+      has: (id) => this.sounds.has(id),
+      request: (id, urgent) => this.request(id, urgent),
+      duration: (id) => this.sounds.get(id)?.duration ?? 0,
+      play: (spec) => this.playSpec(spec),
+      loop: (key, id, level, side, ch) => this.loop(key, id, level, side, ch),
+      duck: (ch, db, holdS) => this.duck(ch, db, holdS),
+      setWorldFilter: (cut, db, tc) => this.setWorldFilter(cut, db, tc),
+      playing: (pool) => this.playing(pool),
+    };
+  }
+
   /** Queue the sounds the current scene needs; start audio if the page already had a tap. */
   private warmup(): void {
     this.warmTimer = null;
-    if (this.disposed || !this._enabled || this.warmed) return;
+    if (this.disposed || !this._enabled) return;
+    this.queueWarm();
+    // the player tapped through the menu: the context may start without another gesture
+    if (userActivation() === true) this.resume();
+  }
+
+  /** Render order: cues, the current beds (urgent), module warm-up ids, then legacy calls. */
+  private queueWarm(): void {
+    if (this.warmed) return;
     this.warmed = true;
     for (const cue of CUE_IDS) this.request(cueId(cue));
     this.request('cue.coin');
@@ -396,9 +733,14 @@ export class ZooAudio implements IAudio {
     this.request(h < 5.5 || h > 20 ? 'bed.night' : 'bed.birds', true);
     this.request('bed.wind', true);
     if (this.sim.guests.size) this.request('bed.crowd');
-    this.requestAllSpecies();
-    // the player tapped through the menu: the context may start without another gesture
-    if (userActivation() === true) this.resume();
+    for (const e of this.modules) {
+      try {
+        for (const id of e.m.warm?.() ?? []) this.request(id);
+      } catch (err) {
+        this.moduleFailed(e, err);
+      }
+    }
+    if (!this.ownsAnimals) this.requestAllSpecies();
   }
 
   // ================================================================ IAudio
@@ -415,8 +757,7 @@ export class ZooAudio implements IAudio {
     if (!c) return;
     const now = c.currentTime;
     const g = this.master.gain;
-    g.cancelScheduledValues(now);
-    g.setValueAtTime(g.value, now);
+    hold(g, now);
     if (this.offTimer !== null) {
       clearTimeout(this.offTimer);
       this.offTimer = null;
@@ -431,7 +772,7 @@ export class ZooAudio implements IAudio {
       this.offTimer = setTimeout(() => {
         this.offTimer = null;
         if (this._enabled || !this.ctx) return;
-        this.stopAll(true);
+        this.stopAll();
         if (!this.injected) (this.ctx as AudioContext).suspend().catch(noop);
       }, 150);
     }
@@ -439,6 +780,7 @@ export class ZooAudio implements IAudio {
 
   resume(): void {
     if (this.disposed) return;
+    const wasSuspended = this.appSuspended;
     this.appSuspended = false;
     if (!this._enabled) return;
     if (!this.ctx) {
@@ -449,18 +791,37 @@ export class ZooAudio implements IAudio {
       if (!c) return;
       this.boot(c);
     }
+    if (this.suspendTimer !== null) {
+      clearTimeout(this.suspendTimer);
+      this.suspendTimer = null;
+    }
     this.resumeContext();
+    if (wasSuspended) {
+      // fade back in from the silence suspend() left
+      const now = this.ctx!.currentTime;
+      hold(this.master.gain, now);
+      this.master.gain.linearRampToValueAtTime(MASTER, now + 0.3);
+    }
     void this.pump();
   }
 
   suspend(): void {
+    if (this.appSuspended) return;
     this.appSuspended = true;
     if (!this.ctx) return;
-    this.stopVoices(true);
-    if (!this.injected) {
-      const c = this.ctx as AudioContext;
-      if (c.state === 'running') c.suspend().catch(noop);
-    }
+    // 40 ms fade first: suspending mid-waveform pops
+    const now = this.ctx.currentTime;
+    fadeOut(this.master.gain, now, 0.04);
+    if (this.suspendTimer !== null) clearTimeout(this.suspendTimer);
+    this.suspendTimer = setTimeout(() => {
+      this.suspendTimer = null;
+      if (!this.appSuspended || !this.ctx) return;
+      this.stopVoices();
+      if (!this.injected) {
+        const c = this.ctx as AudioContext;
+        if (c.state === 'running') c.suspend().catch(noop);
+      }
+    }, 60);
   }
 
   play(cue: Cue): void {
@@ -468,52 +829,76 @@ export class ZooAudio implements IAudio {
     // a UI cue runs right after a tap: a good moment to unlock / resume
     if (!this.ctx || (!this.injected && (this.ctx as AudioContext).state !== 'running')) this.resume();
     if (!this.active()) return;
-    const c = this.ctx!;
-    const a = this.sounds.get(cueId(cue));
-    if (!a) {
-      this.request(cueId(cue), true);
-      return;
-    }
-    const now = c.currentTime;
+    const now = this.ctx!.currentTime;
     const last = this.lastCue.get(cue) ?? -1;
     if (now - last < 0.045) return;
+    const id = cue === 'deny' && !RECIPES['cue.deny'] ? 'cue.error' : cueId(cue);
+    // tiny pitch and onset variation: repeated taps never sound machine-identical
+    const jitter = cue === 'tap' || cue === 'select' || cue === 'cash';
+    const h = this.playSpec({
+      id,
+      pool: 'ui',
+      rate: jitter ? 1 + this.rng.range(-0.004, 0.004) : 1,
+      when: jitter ? now + this.rng.range(0, 0.008) : now,
+    });
+    if (!h) return;
     this.lastCue.set(cue, now);
-    const s = c.createBufferSource();
-    s.buffer = a.buffer;
-    if (cue === 'tap' || cue === 'select' || cue === 'cash') s.playbackRate.value = 1 + this.rng.range(-0.025, 0.025);
-    s.connect(this.uiBus);
-    s.start(now);
-    s.onended = () => s.disconnect();
-    if (cue === 'celebrate') {
-      // let the jingle breathe: duck the ambience briefly
-      const g = this.ambBus.gain;
-      g.cancelScheduledValues(now);
-      g.setTargetAtTime(AMB_LEVEL * 0.5, now, 0.06);
-      g.setTargetAtTime(AMB_LEVEL, now + 1.3, 0.5);
-    }
+    // let the jingle breathe
+    if (cue === 'celebrate') this.duck('ambience', -6, 1.3);
+  }
+
+  setVolume(ch: AudioChannel, v: number): void {
+    v = Math.max(0, Math.min(1, Number.isFinite(v) ? v : 1));
+    const was = this.volumes[ch];
+    this.volumes[ch] = v;
+    if (!this.ctx) return;
+    const g = ch === 'master' ? this.masterVol.gain : this.chan[ch].vol.gain;
+    const now = this.ctx.currentTime;
+    hold(g, now);
+    g.linearRampToValueAtTime(v * v, now + 0.05);
+    if (v === 0 && was > 0) this.stopChannel(ch);
+  }
+
+  volume(ch: AudioChannel): number {
+    return this.volumes[ch];
+  }
+
+  follow(animalId: number | null): void {
+    this.followId = animalId ?? -1;
   }
 
   update(dt: number, camera: THREE.Camera, focus: THREE.Vector3): void {
+    if (this.needsResume) this.retryResume(dt);
     if (!this.active()) return;
     this.time += dt;
     this.updateListener(camera, focus);
+    this.nightness = nightnessAt(this.sim.minuteOfDay / 60);
     this.envT -= dt;
     if (this.envT <= 0) {
       this.envT = 0.25;
-      this.sampleEnvironment();
+      this.sampleEnvironment(0.25);
       this.updateBeds(0.25);
     }
     this.animT -= dt;
     if (this.animT <= 0) {
       this.animT = 0.1;
-      this.scanAnimals();
+      if (!this.ownsAnimals) this.scanAnimals();
     }
     this.voiceT -= dt;
     if (this.voiceT <= 0) {
       this.voiceT = 0.1;
       this.steerVoices();
     }
+    this.updateLoops(dt);
     this.ambientOneShots(dt);
+    for (const e of this.modules) {
+      if (e.failed) continue;
+      try {
+        e.m.update(dt);
+      } catch (err) {
+        this.moduleFailed(e, err);
+      }
+    }
   }
 
   dispose(): void {
@@ -521,11 +906,17 @@ export class ZooAudio implements IAudio {
     this.disposed = true;
     for (const u of this.unsub) u();
     this.unsub.length = 0;
+    for (const e of this.modules) {
+      try {
+        e.m.dispose();
+      } catch (err) {
+        console.warn(`[audio] module ${e.name} dispose failed:`, err);
+      }
+    }
     this.removeUnlock();
-    if (this.offTimer !== null) clearTimeout(this.offTimer);
-    if (this.warmTimer !== null) clearTimeout(this.warmTimer);
+    for (const t of [this.offTimer, this.warmTimer, this.suspendTimer, this.releaseTimer]) if (t !== null) clearTimeout(t);
     if (this.ctx) {
-      this.stopAll(true);
+      this.stopAll();
       if (!this.injected) (this.ctx as AudioContext).close().catch(noop);
     }
     this.ctx = null;
@@ -549,6 +940,24 @@ export class ZooAudio implements IAudio {
     setRenderBudget(ms);
   }
 
+  /** Debug / probes: force a sound for an animal (first module that handles it; else the built-in call). */
+  debugForce(animalId: number, kind: string): boolean {
+    for (const e of this.modules) {
+      if (e.failed || !e.m.force) continue;
+      try {
+        if (e.m.force(animalId, kind)) return true;
+      } catch (err) {
+        this.moduleFailed(e, err);
+      }
+    }
+    if (this.ownsAnimals || !this.active()) return false;
+    const a = this.sim.animals.get(animalId);
+    if (!a) return false;
+    const isCall = kind !== 'idle';
+    (isCall ? this.lastCall : this.lastIdle).delete(a.speciesId);
+    return this.tryVoice(a, isCall);
+  }
+
   /** Snapshot of the mixer state (for debugging / automated checks). */
   debugState(): Record<string, unknown> {
     const beds: Record<string, number> = {};
@@ -557,7 +966,19 @@ export class ZooAudio implements IAudio {
       beds[id] = b.playing ? Math.round(b.level * 1000) / 1000 : -1;
       if (b.bias) bias[id] = Math.round(b.bias * 100) / 100;
     }
-    const now = this.ctx?.currentTime ?? 0;
+    const loops: Record<string, number> = {};
+    for (const [k, e] of this.loops) loops[k] = e.bed.playing ? Math.round(e.level * 1000) / 1000 : -1;
+    const pools = { voice: 0, foley: 0, fx: 0, amb: 0, ui: 0 } as Record<Pool, number>;
+    if (this.ctx) for (const p of ['voice', 'foley', 'fx', 'amb', 'ui'] as const) pools[p] = this.playing(p);
+    const modules: Record<string, Record<string, unknown>> = {};
+    for (const e of this.modules) {
+      try {
+        modules[e.name] = { ...(e.m.debug?.() ?? {}), ...(e.failed ? { failed: true } : {}) };
+      } catch {
+        modules[e.name] = { failed: true };
+      }
+    }
+    const r2 = (v: number) => +v.toFixed(2);
     return {
       state: this.injected ? 'offline' : ((this.ctx as AudioContext | null)?.state ?? 'none'),
       enabled: this._enabled,
@@ -567,17 +988,29 @@ export class ZooAudio implements IAudio {
       failed: [...this.failed],
       beds,
       bias,
-      voices: this.voices.filter((v) => v.busy(now)).length,
+      voices: pools.voice,
+      pools,
+      loops,
+      volumes: { ...this.volumes },
+      biome: { savanna: r2(this.biome.savanna), arctic: r2(this.biome.arctic), humid: r2(this.biome.humid) },
+      followId: this.followId,
+      modules,
       env: {
-        crowdNear: +this.crowdNear.toFixed(2),
-        crowdFar: +this.crowdFar.toFixed(2),
-        water: +this.waterNear.toFixed(2),
-        fountain: +this.fountainNear.toFixed(2),
-        night: +this.nightness.toFixed(2),
-        zoomNear: +this.zoomNear.toFixed(2),
+        crowdNear: r2(this.crowdNear),
+        crowdFar: r2(this.crowdFar),
+        water: r2(this.waterNear),
+        fountain: r2(this.fountainNear),
+        night: r2(this.nightness),
+        zoomNear: r2(this.ear.zoomNear),
         near: this.nearCount,
       },
     };
+  }
+
+  private moduleFailed(e: ModuleEntry, err: unknown): void {
+    if (e.failed) return;
+    e.failed = true;
+    console.warn(`[audio] module ${e.name} stopped:`, err);
   }
 
   // ================================================================ context
@@ -607,40 +1040,84 @@ export class ZooAudio implements IAudio {
 
   private boot(c: BaseAudioContext): void {
     this.ctx = c;
+    // master at its level from the start (the first cue must not be swallowed
+    // by a fade-in); the beds fade in on their own
     this.master = c.createGain();
-    this.master.gain.value = 0;
-    const comp = c.createDynamicsCompressor();
-    comp.threshold.value = -10;
-    comp.knee.value = 6;
-    comp.ratio.value = 5;
-    comp.attack.value = 0.004;
-    comp.release.value = 0.22;
+    this.master.gain.value = this._enabled && !this.appSuspended ? MASTER : 0;
+    this.masterVol = c.createGain();
+    this.masterVol.gain.value = this.volumes.master ** 2;
+    const glue = c.createDynamicsCompressor();
+    glue.threshold.value = -18;
+    glue.knee.value = 8;
+    glue.ratio.value = 2.5;
+    glue.attack.value = 0.015;
+    glue.release.value = 0.3;
+    const limiter = c.createDynamicsCompressor();
+    limiter.threshold.value = -3;
+    limiter.knee.value = 0;
+    limiter.ratio.value = 20;
+    limiter.attack.value = 0.001;
+    limiter.release.value = 0.08;
     const clip = c.createWaveShaper();
     clip.curve = softClipCurve();
-    this.master.connect(comp);
-    comp.connect(clip);
+    this.masterVol.connect(this.master);
+    this.master.connect(glue);
+    glue.connect(limiter);
+    limiter.connect(clip);
     clip.connect(c.destination);
-    this.ambBus = c.createGain();
-    this.ambBus.gain.value = AMB_LEVEL;
-    this.sfxBus = c.createGain();
-    this.sfxBus.gain.value = 0.8;
-    this.uiBus = c.createGain();
-    this.uiBus.gain.value = 0.9;
-    this.ambBus.connect(this.master);
-    this.sfxBus.connect(this.master);
-    this.uiBus.connect(this.master);
-    const stereo = !this.lowSpec;
-    for (const id of BED_IDS) this.beds.set(id, new Bed(c, this.ambBus, stereo));
-    const nv = this.lowSpec ? 4 : 6;
-    for (let i = 0; i < nv; i++) this.voices.push(new Voice(c, this.sfxBus));
-    for (let i = 0; i < (this.lowSpec ? 1 : 2); i++) this.fxVoices.push(new Voice(c, this.uiBus));
-    if (this._enabled) this.master.gain.setTargetAtTime(MASTER, c.currentTime + 0.05, 0.6);
-    // UI cues first (tiny), then calls for the animals in the zoo; beds are
-    // requested (with priority) by the first environment update.
-    this.warmed = true;
-    for (const cue of CUE_IDS) this.request(cueId(cue));
-    this.request('cue.coin');
-    this.requestAllSpecies();
+    // pause "time freeze": one low-pass + gain shared by world and ambience
+    this.worldFilter = c.createBiquadFilter();
+    this.worldFilter.type = 'lowpass';
+    this.worldFilter.frequency.value = Math.min(20000, c.sampleRate * 0.49);
+    this.worldFilter.Q.value = 0.5;
+    this.worldGain = c.createGain();
+    this.worldFilter.connect(this.worldGain);
+    this.worldGain.connect(this.masterVol);
+    const chan = {} as Record<Channel, ChannelNodes>;
+    for (const ch of CHANNELS) {
+      const input = c.createGain();
+      input.gain.value = CHANNEL_LEVEL[ch];
+      const vol = c.createGain();
+      vol.gain.value = this.volumes[ch] ** 2;
+      const duck = c.createGain();
+      input.connect(vol);
+      vol.connect(duck);
+      duck.connect(ch === 'world' || ch === 'ambience' ? this.worldFilter : this.masterVol);
+      chan[ch] = { input, vol, duck, duckDb: 0, duckUntil: 0 };
+    }
+    this.chan = chan;
+    this.ambBus = chan.ambience.duck;
+    this.sfxBus = chan.world.duck;
+    this.uiBus = chan.ui.duck;
+    // one shared outdoor reverb, returned into the world channel
+    const conv = c.createConvolver();
+    conv.normalize = false;
+    // the convolver's FFT set-up runs on the main thread: not inside the unlocking gesture
+    void yieldMain().then(() => {
+      if (!this.disposed) conv.buffer = outdoorImpulse(c, this.lowSpec ? 0.8 : 1.2, this.lowSpec ? 1 : 2);
+    });
+    this.reverbIn = c.createGain();
+    this.reverbIn.gain.value = REVERB_RETURN;
+    this.reverbIn.connect(conv);
+    conv.connect(chan.world.input);
+    for (const id of BED_IDS) this.beds.set(id, new Bed(c, chan.ambience.input, !this.lowSpec || LOWSPEC_STEREO.has(id)));
+    const tier = this.lowSpec ? 1 : 0;
+    for (const p of ['voice', 'foley', 'fx', 'amb'] as const) {
+      const dest = chan[POOL_CHANNEL[p]].input;
+      const rev = POOL_CHANNEL[p] === 'world' ? this.reverbIn : null;
+      for (let i = 0; i < POOL_SIZES[p][tier]; i++) this.pools[p].push(new Voice(c, dest, rev));
+    }
+    if (!this.injected) {
+      // Android can stop the context on its own (calls, other apps): retry
+      (c as AudioContext).onstatechange = () => {
+        const st = (c as AudioContext).state as string;
+        if ((st === 'suspended' || st === 'interrupted') && this._enabled && !this.appSuspended && !this.disposed) {
+          this.needsResume = true;
+          this.installUnlock();
+        }
+      };
+    }
+    this.queueWarm();
   }
 
   private resumeContext(): void {
@@ -649,9 +1126,40 @@ export class ZooAudio implements IAudio {
     if (c.state === 'suspended' || (c.state as string) === 'interrupted') c.resume().catch(noop);
   }
 
+  /** After an unexpected suspend: try resume about once a second from update(). */
+  private retryResume(dt: number): void {
+    const c = this.ctx as AudioContext | null;
+    if (!c || this.injected || c.state === 'running' || !this._enabled || this.appSuspended || this.disposed) {
+      // running again, or setEnabled / resume() own the restart now
+      this.needsResume = false;
+      return;
+    }
+    this.resumeRetryT -= dt;
+    if (this.resumeRetryT > 0) return;
+    this.resumeRetryT = 1;
+    this.resumeContext();
+  }
+
   private active(): boolean {
     if (!this.ctx || !this._enabled || this.appSuspended || this.disposed) return false;
     return this.injected !== null || (this.ctx as AudioContext).state === 'running';
+  }
+
+  private installUnlock(): void {
+    if (this.unlockBound || typeof window === 'undefined') return;
+    // Android: touch `pointerdown` is not a user activation; the first
+    // touchend / click is. Unlock on whichever comes first.
+    const fn = () => {
+      if (!this._enabled) return;
+      this.resume();
+      const c = this.ctx as AudioContext | null;
+      if (c && c.state === 'running') {
+        this.needsResume = false;
+        this.removeUnlock();
+      }
+    };
+    this.unlockBound = fn;
+    for (const ev of ['touchend', 'pointerup', 'click', 'keydown']) window.addEventListener(ev, fn, { capture: true, passive: true });
   }
 
   private removeUnlock(): void {
@@ -660,14 +1168,31 @@ export class ZooAudio implements IAudio {
     this.unlockBound = null;
   }
 
-  private stopVoices(immediate: boolean): void {
-    for (const v of this.voices) v.stop(immediate);
-    for (const v of this.fxVoices) v.stop(immediate);
+  private stopVoices(): void {
+    for (const pool of Object.values(this.pools)) for (const v of pool) v.stop();
   }
 
-  private stopAll(immediate: boolean): void {
-    this.stopVoices(immediate);
-    for (const b of this.beds.values()) if (b.playing) b.stop(immediate);
+  private stopAll(): void {
+    this.stopVoices();
+    for (const b of this.beds.values()) if (b.playing) b.stop();
+    for (const e of this.loops.values()) e.bed.dispose();
+    this.loops.clear();
+  }
+
+  /** Volume 0: stop what plays on that channel (beds restart on their own when it comes back). */
+  private stopChannel(ch: AudioChannel): void {
+    if (ch === 'master') return this.stopAll();
+    for (const p of ['voice', 'foley', 'fx', 'amb'] as const) if (POOL_CHANNEL[p] === ch) for (const v of this.pools[p]) v.stop();
+    if (ch === 'ambience') for (const b of this.beds.values()) if (b.playing) b.stop();
+    for (const [k, e] of this.loops)
+      if (e.ch === ch) {
+        e.bed.dispose();
+        this.loops.delete(k);
+      }
+  }
+
+  private channelOn(ch: Channel): boolean {
+    return this.volumes[ch] > 0 && this.volumes.master > 0;
   }
 
   // ================================================================ render queue
@@ -677,27 +1202,39 @@ export class ZooAudio implements IAudio {
     if (this.pending.has(id)) {
       if (urgent) {
         const i = this.queue.indexOf(id);
-        if (i > 0) {
+        if (i > this.urgentSlot()) {
           this.queue.splice(i, 1);
-          this.queue.unshift(id);
+          this.queue.splice(this.urgentSlot(), 0, id);
         }
       }
       return;
     }
     this.pending.add(id);
-    if (urgent) this.queue.unshift(id);
+    if (urgent) this.queue.splice(this.urgentSlot(), 0, id);
     else this.queue.push(id);
     void this.pump();
+  }
+
+  /** Urgent renders go right after any queued UI cues (cues stay first: they are tiny and wanted at the first tap). */
+  private urgentSlot(): number {
+    let i = 0;
+    while (i < this.queue.length && this.queue[i].startsWith('cue.')) i++;
+    return i;
   }
 
   private async pump(): Promise<void> {
     if (this.working) return;
     this.working = true;
+    if (this.releaseTimer !== null) {
+      clearTimeout(this.releaseTimer);
+      this.releaseTimer = null;
+    }
     try {
       while (this.queue.length && !this.disposed && this._enabled && !this.appSuspended) {
         const id = this.queue.shift()!;
         try {
-          const a = await renderRecipe(RECIPES[id], seedFor(id));
+          const lowRate = this.lowSpec && !id.startsWith('cue.');
+          const a = await renderRecipe(RECIPES[id], seedFor(id), lowRate ? { maxRate: LOWSPEC_RATE } : undefined);
           if (this.disposed) return;
           this.sounds.set(id, a);
         } catch (err) {
@@ -717,6 +1254,12 @@ export class ZooAudio implements IAudio {
         const w = this.idleWaiters;
         this.idleWaiters = [];
         for (const f of w) f();
+        // nothing left to render for a while: free the render-only caches
+        if (!this.disposed)
+          this.releaseTimer = setTimeout(() => {
+            this.releaseTimer = null;
+            if (!this.working && !this.queue.length) releaseRenderCaches();
+          }, 5000);
       }
     }
   }
@@ -746,22 +1289,227 @@ export class ZooAudio implements IAudio {
     });
   }
 
+  // ================================================================ host: play / loop / duck
+
+  private playSpec(spec: PlaySpec): VoiceHandle | null {
+    if (!this.active()) return null;
+    const pool = spec.pool ?? 'voice';
+    const ch = POOL_CHANNEL[pool];
+    if (!this.channelOn(ch)) return null;
+    const asset = this.sounds.get(spec.id);
+    if (!asset) {
+      this.request(spec.id, pool === 'ui');
+      return null;
+    }
+    const c = this.ctx!;
+    const now = c.currentTime;
+    const when = Math.max(now, spec.when ?? now);
+    const level = spec.gain ?? 1;
+    const rate = spec.rate ?? 1;
+    if (pool === 'ui') return this.playUi(asset.buffer, spec.id, level, rate, when);
+
+    let px = 0,
+      py = 0,
+      pz = 0,
+      positional = false;
+    const track = spec.track ?? -1;
+    const an = track >= 0 ? this.sim.animals.get(track) : undefined;
+    // a tracked animal that is gone must not play as a centred, full-level sound
+    if (track >= 0 && !an && !spec.at) return null;
+    if (an) {
+      px = an.x;
+      py = an.y + 1;
+      pz = an.z;
+      positional = true;
+    } else if (spec.at) {
+      px = spec.at.x;
+      py = spec.at.y;
+      pz = spec.at.z;
+      positional = true;
+    }
+    const refDist = spec.refDist ?? DEFAULT_REF_DIST;
+    const radius = spec.radius ?? DEFAULT_RADIUS;
+    const att = positional ? this.attenuate(px, py, pz, refDist, radius) : this.centred();
+    const final = level * att.gain;
+    if (final < 0.01) return null;
+    const pv = this.pools[pool];
+    let v: Voice | null = null;
+    let layer: Layer;
+    if (spec.group !== undefined) v = pv.find((x) => x.group === spec.group && x.busy(now)) ?? null;
+    if (v) layer = v.layer(asset.buffer, rate, level, when);
+    else {
+      v = this.allocVoice(pv, spec.prio ?? final);
+      if (!v) return null;
+      v.prio = spec.prio ?? final;
+      v.track = an ? track : -1;
+      v.fixed = !an && positional;
+      v.px = px;
+      v.py = py;
+      v.pz = pz;
+      v.refDist = refDist;
+      v.radius = radius;
+      v.group = spec.group ?? -1;
+      layer = v.start(asset.buffer, rate, level, when, att, spec.color);
+    }
+    if (spec.duck ?? (pool === 'voice' && final > 0.3)) this.duck('ambience', -3, layer.endAt - now);
+    this.log(spec.id, pool, final, rate, positional ? att.dist : 0, track, px, pz, spec.group ?? -1, when);
+    const voice = v;
+    return {
+      get endAt() {
+        return layer.endAt;
+      },
+      stop: (fade = 0.05) => {
+        if (!this.ctx || layer.stopped) return;
+        voice.fadeLayer(layer, this.ctx.currentTime, fade);
+      },
+    };
+  }
+
+  /** Non-positional UI cue: one unpooled source into the ui channel. */
+  private playUi(buf: AudioBuffer, id: string, level: number, rate: number, when: number): VoiceHandle | null {
+    const c = this.ctx!;
+    const s = c.createBufferSource();
+    s.buffer = buf;
+    s.playbackRate.value = rate;
+    const g = c.createGain();
+    g.gain.value = level;
+    s.connect(g);
+    g.connect(this.chan.ui.input);
+    s.start(when);
+    this.uiLive++;
+    const end = { at: when + buf.duration / rate, stopped: false };
+    s.onended = () => {
+      this.uiLive--;
+      s.disconnect();
+      g.disconnect();
+    };
+    this.log(id, 'ui', level, rate, 0, -1, 0, 0, -1, when);
+    return {
+      get endAt() {
+        return end.at;
+      },
+      stop: (fade = 0.05) => {
+        if (!this.ctx || end.stopped) return;
+        end.stopped = true;
+        const now = this.ctx.currentTime;
+        fadeOut(g.gain, now, fade);
+        safeStop(s, now + fade + 0.005);
+        end.at = Math.min(end.at, now + fade + 0.005);
+      },
+    };
+  }
+
+  private log(id: string, pool: Pool, gain: number, rate: number, dist: number, track: number, x: number, z: number, group: number, t: number): void {
+    if (!this.debugLog) return;
+    const r = (v: number, k = 1000) => Math.round(v * k) / k;
+    this.debugLog.push({ t: r(t), id, pool, gain: r(gain), rate: r(rate), dist: r(dist, 10), track, x: r(x, 10), z: r(z, 10), group });
+  }
+
+  private playing(pool: Pool): number {
+    if (!this.ctx) return 0;
+    if (pool === 'ui') return this.uiLive;
+    const now = this.ctx.currentTime;
+    let n = 0;
+    for (const v of this.pools[pool]) if (v.busy(now)) n++;
+    return n;
+  }
+
+  private loop(key: string, id: string, level: number, side = 0, ch: Channel = 'ambience'): void {
+    if (!this.active()) return;
+    level = Number.isFinite(level) ? Math.max(0, level) : 0;
+    let e = this.loops.get(key);
+    if (!e) {
+      if (level <= 0.004 || !this.channelOn(ch) || !RECIPES[id]) return;
+      const max = MAX_LOOPS[this.lowSpec ? 1 : 0];
+      if (this.loops.size >= max) {
+        // full: the quietest loop (possibly this new one) loses
+        let qk = '';
+        let ql = Infinity;
+        for (const [k, o] of this.loops)
+          if (o.level < ql) {
+            ql = o.level;
+            qk = k;
+          }
+        if (ql >= level) return;
+        this.loops.get(qk)!.bed.dispose();
+        this.loops.delete(qk);
+      }
+      e = { bed: new Bed(this.ctx!, this.chan[ch].input, true), id, ch, level: 0, side: 0, quiet: 0 };
+      this.loops.set(key, e);
+    }
+    if (e.id !== id) {
+      e.bed.stop();
+      e.bed.asset = null;
+      e.id = id;
+    }
+    e.level = level;
+    e.side = side;
+    if (level > 0.004) e.quiet = 0;
+    if (!e.bed.asset) {
+      const a = this.sounds.get(id);
+      if (a) e.bed.asset = a;
+      else this.request(id, true);
+    }
+    if (e.bed.asset && !e.bed.playing && level > 0.004) e.bed.start(this.rng);
+    if (e.bed.playing) {
+      e.bed.setLevel(level, 0.9);
+      e.bed.setBias(side);
+    }
+  }
+
+  /** Quiet loops stop after 4 s. */
+  private updateLoops(dt: number): void {
+    for (const [k, e] of this.loops) {
+      if (e.level > 0.004) continue;
+      e.quiet += dt;
+      if (e.quiet > 4) {
+        e.bed.dispose();
+        this.loops.delete(k);
+      }
+    }
+  }
+
+  private duck(ch: Channel, db: number, holdS: number): void {
+    if (!this.active()) return;
+    const c = this.chan[ch];
+    const now = this.ctx!.currentTime;
+    const activeDb = now < c.duckUntil ? c.duckDb : 0;
+    const depth = Math.min(db, activeDb);
+    const until = Math.max(now + 0.08 + Math.max(0, holdS), now < c.duckUntil ? c.duckUntil : 0);
+    if (depth === activeDb && until <= c.duckUntil) return;
+    c.duckDb = depth;
+    c.duckUntil = until;
+    const g = c.duck.gain;
+    hold(g, now);
+    g.setTargetAtTime(Math.pow(10, depth / 20), now, 0.027); // ≈ 80 ms attack
+    g.setTargetAtTime(1, until, 0.4); // ≈ 1.2 s release
+  }
+
+  private setWorldFilter(cutHz: number, gainDb: number, tc: number): void {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const t = Math.max(0.001, tc);
+    this.worldFilter.frequency.setTargetAtTime(Math.min(cutHz, this.ctx.sampleRate * 0.49), now, t);
+    this.worldGain.gain.setTargetAtTime(Math.pow(10, gainDb / 20), now, t);
+  }
+
   // ================================================================ listener & environment
 
   private updateListener(camera: THREE.Camera, focus: THREE.Vector3): void {
     const p = camera.position;
     const q = camera.quaternion;
-    this.fx = focus.x;
-    this.fz = focus.z;
+    const e = this.ear;
+    e.fx = focus.x;
+    e.fz = focus.z;
     const dx = p.x - focus.x,
       dy = p.y - focus.y,
       dz = p.z - focus.z;
-    this.camDist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    this.zoomNear = 1 - smoothstep(18, 120, this.camDist);
+    e.camDist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    e.zoomNear = 1 - smoothstep(18, 120, e.camDist);
     // the ear sits a third of the way from the focus point towards the camera
-    this.lx = focus.x + dx * 0.35;
-    this.ly = focus.y + dy * 0.35;
-    this.lz = focus.z + dz * 0.35;
+    e.x = focus.x + dx * 0.35;
+    e.y = focus.y + dy * 0.35;
+    e.z = focus.z + dz * 0.35;
     // camera right (+X) and forward (−Z) axes from its quaternion
     const x = q.x,
       y = q.y,
@@ -775,87 +1523,172 @@ export class ZooAudio implements IAudio {
     this.fwz = -(1 - 2 * (x * x + y * y));
   }
 
-  /** Distance gain / stereo pan / air-absorption cutoff for a world point → aGain, aPan, aCut. */
-  private attenuate(x: number, y: number, z: number): void {
-    const dx = x - this.lx,
-      dy = y - this.ly,
-      dz = z - this.lz;
+  /** Probe name: camera distance to the focus. */
+  private get camDist(): number {
+    return this.ear.camDist;
+  }
+
+  /** Distance model for a world point (shared scratch result). */
+  private attenuate(x: number, y: number, z: number, refDist = DEFAULT_REF_DIST, radius = DEFAULT_RADIUS): Readonly<Attenuation> {
+    const e = this.ear;
+    const dx = x - e.x,
+      dy = y - e.y,
+      dz = z - e.z;
     const r = Math.sqrt(dx * dx + dy * dy + dz * dz) + 1e-3;
-    this.aGain = (REF_DIST / Math.max(REF_DIST, r)) * (1 - smoothstep(55, 95, r));
     const side = (dx * this.rx + dy * this.ry + dz * this.rz) / r;
     const front = (dx * this.fwx + dy * this.fwy + dz * this.fwz) / r;
-    this.aPan = Math.max(-0.85, Math.min(0.85, side * 0.9));
-    let cut = Math.max(1500, Math.min(16000, 17000 * Math.exp(-r / 38)));
-    if (front < 0) cut *= 0.6 + 0.4 * (1 + front);
-    this.aCut = cut;
+    return distanceModel(r, side, front, refDist, radius, this.att);
+  }
+
+  /** Attenuation of a non-positional world sound: full level, centred, dry. */
+  private centred(): Readonly<Attenuation> {
+    const a = this.att;
+    a.gain = 1;
+    a.pan = 0;
+    a.cut = 18000;
+    a.shelfDb = 0;
+    a.wet = 0.05;
+    a.dist = 0;
+    return a;
   }
 
   private readonly scanGuest = (g: GuestState): void => {
     if (g.hidden) return;
-    this.gTotal++;
-    const dx = g.x - this.fx,
-      dz = g.z - this.fz;
-    const w = 1 / (1 + (dx * dx + dz * dz) / 225);
+    const e = this.ear;
+    // density around the ear's ground point: a guest at 10 m counts 0.5, at 30 m 0.002
+    const dx = g.x - e.x,
+      dz = g.z - e.z;
+    const w = Math.exp(-(dx * dx + dz * dz) / 144);
     this.gNear += w;
-    this.gSide += w * this.side(g.x, g.z);
+    if (w > 1e-3) this.gSide += w * this.side(g.x, g.z);
+    const fx = g.x - e.fx,
+      fz = g.z - e.fz;
+    const vis = Math.max(40, e.camDist * 1.3);
+    if (fx * fx + fz * fz < vis * vis) this.gVisible++;
   };
 
   /** Left / right position (-1..1) of a ground point as heard from the listener. */
   private side(x: number, z: number): number {
-    const dx = x - this.lx,
-      dy = -this.ly,
-      dz = z - this.lz;
+    const e = this.ear;
+    const dx = x - e.x,
+      dy = -e.y,
+      dz = z - e.z;
     const r = Math.sqrt(dx * dx + dy * dy + dz * dz) + 1e-3;
     return (dx * this.rx + dy * this.ry + dz * this.rz) / r;
   }
 
-  private sampleEnvironment(): void {
+  private refreshHabitatBiomes(): void {
+    this.habitatsDirty = false;
+    this.habitatBiome.clear();
+    this.sim.animals.forEach((a) => {
+      if (a.habitatId === null) return;
+      const b = SPECIES_BY_ID[a.speciesId]?.biome;
+      const f = b === 'desert' ? 1 : b === 'tropical' || b === 'wetland' ? 2 : 0;
+      if (f) this.habitatBiome.set(a.habitatId, (this.habitatBiome.get(a.habitatId) ?? 0) | f);
+    });
+  }
+
+  private refreshObjects(): void {
+    this.objectsDirty = false;
+    this.fountains.length = 0;
+    this.trees.length = 0;
+    const world = this.sim.world;
+    world.objects.forEach((o) => {
+      const isFountain = o.defId === 'fountain';
+      let isTree = false;
+      if (!isFountain) {
+        try {
+          isTree = getObjectDef(o.defId).category === 'tree';
+        } catch {
+          return;
+        }
+      }
+      if (!isFountain && !isTree) return;
+      const c = world.objectCenter(o);
+      (isFountain ? this.fountains : this.trees).push(c.x, c.z);
+    });
+  }
+
+  private sampleEnvironment(dt: number): void {
+    const e = this.ear;
     this.gNear = 0;
-    this.gTotal = 0;
     this.gSide = 0;
+    this.gVisible = 0;
     this.sim.guests.forEach(this.scanGuest);
-    this.crowdNear = 1 - Math.exp(-this.gNear / 4);
-    this.crowdFar = 1 - Math.exp(-this.gTotal / 50);
-    // water tiles around the focus
+    this.crowdNear = crowdNearLevel(this.gNear);
+    this.crowdFar = crowdFarLevel(this.gVisible);
+    // water and biome tiles around the focus
+    if (this.habitatsDirty) this.refreshHabitatBiomes();
     const world = this.sim.world;
     const R = 7;
-    const tx0 = Math.floor(this.fx / TILE),
-      tz0 = Math.floor(this.fz / TILE);
-    let w = 0;
-    let ws = 0;
+    const tx0 = Math.floor(e.fx / TILE),
+      tz0 = Math.floor(e.fz / TILE);
+    let w = 0,
+      ws = 0,
+      sav = 0,
+      savS = 0,
+      arc = 0,
+      arcS = 0,
+      rock = 0,
+      rockS = 0,
+      hum = 0,
+      humS = 0;
     for (let dz = -R; dz <= R; dz++) {
       const z = tz0 + dz;
       if (z < 0 || z >= MAP_H) continue;
       for (let dx = -R; dx <= R; dx++) {
         const x = tx0 + dx;
         if (x < 0 || x >= MAP_W) continue;
-        const t = world.terrain[z * MAP_W + x];
-        if (t !== Terrain.Water && t !== Terrain.DeepWater) continue;
         const d = Math.sqrt(dx * dx + dz * dz) / R;
-        if (d < 1) {
-          const k = (1 - d) * (1 - d);
+        if (d >= 1) continue;
+        const k = (1 - d) * (1 - d);
+        const i = z * MAP_W + x;
+        const t = world.terrain[i];
+        const hb = world.habitatOf[i] ? (this.habitatBiome.get(world.habitatOf[i]) ?? 0) : 0;
+        if (t === Terrain.Water || t === Terrain.DeepWater) {
           w += k;
           ws += k * this.side((x + 0.5) * TILE, (z + 0.5) * TILE);
+        }
+        if (t === Terrain.DryGrass || t === Terrain.Sand || hb & 1) {
+          sav += k;
+          savS += k * this.side((x + 0.5) * TILE, (z + 0.5) * TILE);
+        }
+        if (t === Terrain.Snow) {
+          arc += k;
+          arcS += k * this.side((x + 0.5) * TILE, (z + 0.5) * TILE);
+        } else if (t === Terrain.Rock) {
+          rock += k;
+          rockS += k * this.side((x + 0.5) * TILE, (z + 0.5) * TILE);
+        }
+        if (t === Terrain.Mud || hb & 2) {
+          hum += k;
+          humS += k * this.side((x + 0.5) * TILE, (z + 0.5) * TILE);
         }
       }
     }
     this.waterNear = 1 - Math.exp(-w / 5);
     this.waterSide = w > 0 ? ws / w : 0;
-    // fountains
-    if (this.fountainsDirty) {
-      this.fountainsDirty = false;
-      this.fountains.length = 0;
-      world.objects.forEach((o) => {
-        if (o.defId !== 'fountain') return;
-        const c = world.objectCenter(o);
-        this.fountains.push(c.x, c.z);
-      });
+    // rock counts as arctic scree only next to snow
+    if (arc > 0) {
+      arc += rock * 0.3;
+      arcS += rockS * 0.3;
     }
+    const k = 1 - Math.exp(-dt / 2);
+    const b = this.biome,
+      bs = this.biomeSide;
+    b.savanna += (biomeWeight(sav) - b.savanna) * k;
+    b.arctic += (biomeWeight(arc) - b.arctic) * k;
+    b.humid += (biomeWeight(hum) - b.humid) * k;
+    bs.savanna = sav > 0 ? savS / sav : 0;
+    bs.arctic = arc > 0 ? arcS / arc : 0;
+    bs.humid = hum > 0 ? humS / hum : 0;
+    // fountains
+    if (this.objectsDirty) this.refreshObjects();
     let best = 1e12;
     let bi = -1;
     for (let i = 0; i < this.fountains.length; i += 2) {
-      const dx = this.fountains[i] - this.fx,
-        dz = this.fountains[i + 1] - this.fz;
+      const dx = this.fountains[i] - e.fx,
+        dz = this.fountains[i + 1] - e.fz;
       const d2 = dx * dx + dz * dz;
       if (d2 < best) {
         best = d2;
@@ -869,58 +1702,109 @@ export class ZooAudio implements IAudio {
 
   private updateBeds(dt: number): void {
     const h = this.sim.minuteOfDay / 60;
-    const zn = this.zoomNear;
-    this.nightness = h < 12 ? 1 - smoothstep(4.6, 5.9, h) : smoothstep(19.6, 21.2, h);
+    const zn = this.ear.zoomNear;
+    const night = this.nightness;
     this.birdsDay = smoothstep(4.9, 5.9, h) * (1 - smoothstep(19.8, 20.9, h));
     const chorus = Math.max(Math.exp(-(((h - 6.4) / 1.1) ** 2)), 0.8 * Math.exp(-(((h - 19.0) / 0.8) ** 2)));
     this.openness += ((this.sim.isOpen() ? 1 : 0.55) - this.openness) * Math.min(1, dt * 0.5);
-    const levels = BED_LEVELS;
-    levels.birds = this.birdsDay * (0.55 + 0.45 * chorus) * (0.55 + 0.45 * zn);
-    levels.night = this.nightness * (0.7 + 0.3 * zn);
-    levels.wind = (0.5 + 0.55 * (1 - zn)) * (1 - 0.25 * this.nightness);
-    levels.crowd = this.openness * (this.crowdNear * (0.35 + 0.65 * zn) + this.crowdFar * 0.4 * (1 - zn));
-    levels.water = this.waterNear * (0.3 + 0.7 * zn);
-    levels.fountain = this.fountainNear * (0.25 + 0.75 * zn);
+    const bio = this.biome;
+    const L = BED_LEVELS;
+    L.birds = this.birdsDay * (0.55 + 0.45 * chorus) * (0.4 + 0.6 * zn) * (1 - 0.8 * bio.arctic);
+    L.night = night * (0.7 + 0.3 * zn) * 0.7 * (1 - 0.8 * bio.arctic);
+    L.wind = 0.62 * (1 + 0.41 * (1 - zn)) * windByHour(h) * (1 - 0.25 * night);
+    // close: the guests around the ear; overview: the whole visible crowd, muffled
+    L.crowd = this.openness * (zn * this.crowdNear + (1 - zn) * 0.55 * this.crowdFar);
+    L.water = this.waterNear * (0.3 + 0.7 * zn);
+    L.fountain = this.fountainNear * (0.25 + 0.75 * zn);
+    for (const bm of ['savanna', 'humid'] as const) {
+      const nightId = `${bm}.night` as const;
+      if (RECIPES[`bed.${nightId}`]) {
+        L[bm] = bio[bm] * (1 - night) * (0.5 + 0.5 * zn) * 0.45;
+        L[nightId] = bio[bm] * night * (0.6 + 0.4 * zn) * 0.4;
+      } else {
+        L[bm] = bio[bm] * (1 - 0.7 * night) * (0.5 + 0.5 * zn) * 0.45;
+        L[nightId] = 0;
+      }
+    }
+    L.arctic = bio.arctic * (0.5 + 0.5 * zn) * 0.45;
+    // the ear rises with the camera: every bed recedes a little from above (−3 dB at overview)
+    const alt = 0.7 + 0.3 * zn;
+    // the loudest beds win when more would play than the tier allows
+    const cap = MAX_BEDS[this.lowSpec ? 1 : 0];
+    const ambOn = this.channelOn('ambience');
+    let sum = 0;
+    for (const id of BED_IDS) {
+      const tgt = ambOn && RECIPES[`bed.${id}`] ? L[id] * BED_MIX[id] * alt : 0;
+      L[id] = tgt;
+      sum += tgt;
+    }
     for (const id of BED_IDS) {
       const bed = this.beds.get(id)!;
-      const tgt = levels[id] * BED_MIX[id];
+      let tgt = L[id];
+      if (tgt > 0.004) {
+        let louder = 0;
+        for (const o of BED_IDS) if (L[o] > tgt || (L[o] === tgt && o < id)) louder++;
+        if (louder >= cap) tgt = 0;
+      }
       if (tgt > 0.004) {
         if (!bed.asset) {
           const a = this.sounds.get(`bed.${id}`);
           if (a) bed.asset = a;
           else this.request(`bed.${id}`, true);
         }
-        if (bed.asset && !bed.playing) bed.start(this.rng);
+        const bId = `bed.${id}.b`;
+        const wantB = !!RECIPES[bId] && !this.failed.has(bId);
+        if (wantB && !bed.assetB) {
+          const a = this.sounds.get(bId);
+          if (a) bed.assetB = a;
+          else this.request(bId, true);
+        }
+        if (bed.asset && !bed.playing && (bed.assetB || !wantB)) bed.start(this.rng);
         bed.quiet = 0;
       } else if (bed.playing) {
         bed.quiet += dt;
-        if (bed.quiet > 4) bed.stop();
+        // over the cap: make room now; otherwise let it fade for 4 s first
+        if (bed.quiet > 4 || L[id] > 0.004) bed.stop();
       }
       if (bed.playing) bed.setLevel(tgt, 0.9);
     }
+    // camera height: the crowd and the leaves are muffled from above (the wind keeps its body)
+    this.beds.get('crowd')!.setCut(1200 + 4800 * zn);
+    this.beds.get('wind')!.setCut(3000 + 15000 * zn);
+    for (const id of BED_IDS) if (id !== 'crowd' && id !== 'wind') this.beds.get(id)!.setCut(18000);
     // localised beds lean towards their source
     const crowdSide = this.gNear > 0.05 ? this.gSide / this.gNear : 0;
     this.beds.get('crowd')!.setBias(0.35 * crowdSide * zn);
     this.beds.get('water')!.setBias(0.4 * this.waterSide * zn);
     this.beds.get('fountain')!.setBias(0.5 * this.fountainSide * zn);
+    for (const bm of ['savanna', 'arctic', 'humid'] as const) {
+      const bias = 0.3 * this.biomeSide[bm] * zn;
+      this.beds.get(bm)!.setBias(bias);
+      if (bm !== 'arctic') this.beds.get(`${bm}.night`)!.setBias(bias);
+    }
+    // UI cues sit relative to the ambience: about −4 dB in a quiet night overview
+    const ui = this.chan.ui.input.gain;
+    ui.setTargetAtTime(CHANNEL_LEVEL.ui * (0.62 + 0.38 * Math.min(1, sum / DAY_CLOSE_REF)), this.ctx!.currentTime, 1.5);
   }
 
-  // ================================================================ animals
+  // ================================================================ animals (built-in; off when a module owns them)
 
   private readonly scanAnimal = (a: AnimalState): void => {
+    const e = this.ear;
     if (a.action === 'call') {
       if (!this.calling.has(a.id)) {
         this.calling.add(a.id);
         if (a.actionTime < 1.5) {
-          const dx = a.x - this.fx,
-            dz = a.z - this.fz;
-          if (dx * dx + dz * dz < CALL_RADIUS * CALL_RADIUS) this.tryVoice(a, true);
+          const dx = a.x - e.x,
+            dy = a.y - e.y,
+            dz = a.z - e.z;
+          if (dx * dx + dy * dy + dz * dz < CALL_RADIUS * CALL_RADIUS) this.tryVoice(a, true);
         }
       }
     } else if (this.calling.size !== 0) this.calling.delete(a.id);
     if (a.action !== 'sleep' && this.nearCount < this.near.length) {
-      const dx = a.x - this.fx,
-        dz = a.z - this.fz;
+      const dx = a.x - e.fx,
+        dz = a.z - e.fz;
       if (dx * dx + dz * dz < 2500) this.near[this.nearCount++] = a.id;
     }
   };
@@ -941,28 +1825,19 @@ export class ZooAudio implements IAudio {
   private tryVoice(a: AnimalState, isCall: boolean): boolean {
     const info = this.speciesInfo(a.speciesId);
     const id = isCall ? info.callId : info.idleId;
-    const asset = this.sounds.get(id);
-    if (!asset) {
+    if (!this.sounds.has(id)) {
       this.request(id, true);
       return false;
     }
     const lastMap = isCall ? this.lastCall : this.lastIdle;
     const last = lastMap.get(a.speciesId) ?? -1e9;
     if (this.time - last < (isCall ? 2.5 : 9)) return false;
-    this.attenuate(a.x, a.y + 1, a.z);
     const young = a.growth < 0.95;
     const level = (isCall ? info.voice.call : info.voice.idle) * (young ? 0.7 : 1);
-    const g = this.aGain * level;
-    if (g < 0.02) return false;
-    const v = this.allocVoice(this.voices, g);
-    if (!v) return false;
     let rate = 1 + this.rng.range(-0.05, 0.05);
     if (young) rate *= 1 + (1 - a.growth) * 0.6;
     if (a.sex === 'F') rate *= 1.06;
-    v.track = a.id;
-    v.level = level;
-    v.prio = g;
-    v.play(asset.buffer, rate, g, this.aPan, this.aCut);
+    if (!this.playSpec({ id, track: a.id, pool: 'voice', gain: level, rate })) return false;
     lastMap.set(a.speciesId, this.time);
     return true;
   }
@@ -986,13 +1861,18 @@ export class ZooAudio implements IAudio {
 
   private steerVoices(): void {
     const now = this.ctx!.currentTime;
-    for (const v of this.voices) {
-      if (!v.busy(now) || v.track < 0) continue;
-      const a = this.sim.animals.get(v.track);
-      if (!a) continue;
-      this.attenuate(a.x, a.y + 1, a.z);
-      v.steer(this.aGain * v.level, this.aPan, this.aCut);
-    }
+    for (const pool of Object.values(this.pools))
+      for (const v of pool) {
+        if (!v.busy(now)) continue;
+        if (v.track >= 0) {
+          const a = this.sim.animals.get(v.track);
+          if (!a) continue;
+          v.px = a.x;
+          v.py = a.y + 1;
+          v.pz = a.z;
+        } else if (!v.fixed) continue;
+        v.steer(this.attenuate(v.px, v.py, v.pz, v.refDist, v.radius));
+      }
   }
 
   // ================================================================ ambient one-shots & coins
@@ -1000,8 +1880,9 @@ export class ZooAudio implements IAudio {
   private ambientOneShots(dt: number): void {
     this.owlT -= dt;
     if (this.owlT <= 0) {
-      this.owlT = this.rng.range(25, 70);
-      if (this.nightness > 0.6) this.playAmbient('amb.owl', 1);
+      this.owlT = this.rng.range(20, 40);
+      if (this.nightness > 0.6) this.owlBout();
+      else this.owl = null;
     }
     this.birdT -= dt;
     if (this.birdT <= 0) {
@@ -1010,21 +1891,66 @@ export class ZooAudio implements IAudio {
     }
   }
 
+  /** A songbird / woodpecker somewhere around the ear: a fixed point, steered as the camera moves. */
   private playAmbient(id: string, level: number): void {
-    const a = this.sounds.get(id);
-    if (!a) {
-      this.request(id);
-      return;
-    }
+    const e = this.ear;
     const ang = this.rng.range(0, Math.PI * 2);
-    const d = id === 'amb.owl' ? this.rng.range(14, 32) : this.rng.range(12, 45);
-    const g = level * (REF_DIST / Math.max(REF_DIST, d)) * (0.6 + 0.4 * this.zoomNear);
-    const v = this.allocVoice(this.voices, g * 0.5);
-    if (!v) return;
-    v.track = -1;
-    v.level = g;
-    v.prio = g * 0.5;
-    v.play(a.buffer, 1 + this.rng.range(-0.04, 0.04), g, Math.sin(ang) * 0.8, Math.max(2500, 16000 * Math.exp(-d / 30)));
+    const d = this.rng.range(12, 45);
+    this.playSpec({
+      id,
+      pool: 'amb',
+      at: { x: e.x + Math.cos(ang) * d, y: e.y, z: e.z + Math.sin(ang) * d },
+      gain: level * (0.6 + 0.4 * e.zoomNear),
+      rate: 1 + this.rng.range(-0.04, 0.04),
+    });
+  }
+
+  /**
+   * Night owl: it perches in a real tree 15–40 m from the ear and calls from it
+   * every 20–40 s for 2–5 min, then moves; 30 % of bouts get a distant answer.
+   */
+  private owlBout(): void {
+    const e = this.ear;
+    const now = this.ctx!.currentTime;
+    if (!this.owl || this.time > this.owl.until || Math.hypot(this.owl.x - e.x, this.owl.z - e.z) > 60) this.owl = this.pickOwlTree();
+    const p = this.owl;
+    const gain = 0.9 * (0.6 + 0.4 * e.zoomNear);
+    this.playSpec({ id: 'amb.owl', pool: 'amb', at: p, gain, rate: 1 + this.rng.range(-0.015, 0.015), radius: 120 });
+    if (this.rng.float() < 0.3) {
+      const ang = this.rng.range(0, Math.PI * 2);
+      const d = this.rng.range(60, 120);
+      this.playSpec({
+        id: 'amb.owl',
+        pool: 'amb',
+        at: { x: p.x + Math.cos(ang) * d, y: p.y, z: p.z + Math.sin(ang) * d },
+        gain,
+        rate: 0.97,
+        radius: 160,
+        when: now + this.rng.range(2.5, 5),
+      });
+    }
+  }
+
+  private pickOwlTree(): OwlPerch {
+    if (this.objectsDirty) this.refreshObjects();
+    const e = this.ear;
+    const t = this.trees;
+    const n = t.length / 2;
+    // random start, first tree in the 15–40 m ring (horizontal distance from the ear)
+    const s = n ? this.rng.int(0, n - 1) : 0;
+    for (let k = 0; k < n; k++) {
+      const i = ((s + k) % n) * 2;
+      const d = Math.hypot(t[i] - e.x, t[i + 1] - e.z);
+      if (d >= 15 && d <= 40) {
+        const x = t[i],
+          z = t[i + 1];
+        return { x, y: this.sim.world.heightAt(x, z) + 6, z, until: this.time + this.rng.range(120, 300) };
+      }
+    }
+    // no tree in reach: an owl somewhere out of sight in the outer forest
+    const ang = this.rng.range(0, Math.PI * 2);
+    const d = this.rng.range(25, 40);
+    return { x: e.x + Math.cos(ang) * d, y: e.y, z: e.z + Math.sin(ang) * d, until: this.time + this.rng.range(120, 300) };
   }
 
   private onCoin(x: number, z: number, amount: number): void {
@@ -1033,23 +1959,39 @@ export class ZooAudio implements IAudio {
     this.coinTokens = Math.min(3, this.coinTokens + (t - this.coinRefill) * 2);
     this.coinRefill = t;
     if (t - this.coinLast < 0.12 || this.coinTokens < 1) return;
-    const a = this.sounds.get('cue.coin');
-    if (!a) {
-      this.request('cue.coin', true);
-      return;
-    }
-    this.attenuate(x, 1, z);
-    const g = this.aGain * (0.3 + 0.7 * this.zoomNear) * (amount >= 50 ? 1 : amount >= 10 ? 0.8 : 0.6);
-    if (g < 0.04) return;
-    const v = this.allocVoice(this.fxVoices, g);
-    if (!v) return;
+    const gain = (0.3 + 0.7 * this.ear.zoomNear) * (amount >= 50 ? 1 : amount >= 10 ? 0.8 : 0.6);
+    if (!this.playSpec({ id: 'cue.coin', pool: 'fx', at: { x, y: 1, z }, gain, rate: 1 + this.rng.range(-0.04, 0.06), duck: false })) return;
     this.coinTokens -= 1;
     this.coinLast = t;
-    v.track = -1;
-    v.level = g;
-    v.prio = g;
-    v.play(a.buffer, 1 + this.rng.range(-0.04, 0.06), g, this.aPan, 16000);
   }
+}
+
+/** 0 day .. 1 night. */
+function nightnessAt(h: number): number {
+  return h < 12 ? 1 - smoothstep(4.6, 5.9, h) : smoothstep(19.6, 21.2, h);
+}
+
+/** Wind by hour: calm nights (0.6), gusty afternoons (1.15 from 13 to 17 h). */
+export function windByHour(h: number): number {
+  if (h < 6 || h >= 22) return 0.6;
+  if (h < 13) return 0.6 + (0.55 * (h - 6)) / 7;
+  if (h < 17) return 1.15;
+  return 1.15 - (0.55 * (h - 17)) / 5;
+}
+
+/** Crowd density near the ear → 0..1, logarithmic (1 guest ≈ 0.2, 7 ≈ 0.6, 30+ = 1). */
+export function crowdNearLevel(g: number): number {
+  return Math.min(1, Math.log2(1 + g) / Math.log2(31));
+}
+
+/** Visible guests → overview crowd 0..1 (10 ≈ 0.35, 100 ≈ 0.7, 300 = 1). */
+export function crowdFarLevel(n: number): number {
+  return Math.min(1, Math.log2(1 + n / 2) / Math.log2(151));
+}
+
+/** Weighted biome tile sum → 0..1 (a full 15×15 scan of one biome ≈ 0.92). */
+export function biomeWeight(sum: number): number {
+  return 1 - Math.exp(-sum / 10);
 }
 
 /** Sticky user activation of the page (null when the browser cannot tell). */
@@ -1068,14 +2010,14 @@ function cueId(c: string): string {
   return s;
 }
 
-/** Transparent below 0.8, then a smooth knee towards ±0.98 (never hard clips). */
+/** Transparent below 0.8, then a smooth knee towards ±0.885 (−1.06 dBFS: never hard clips, never over −1 dBFS). */
 function softClipCurve(): Float32Array<ArrayBuffer> {
   const n = 2048;
   const c = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     const x = (i / (n - 1)) * 2 - 1;
     const a = Math.abs(x);
-    const y = a < 0.8 ? a : 0.8 + 0.18 * Math.tanh((a - 0.8) / 0.18);
+    const y = a < 0.8 ? a : 0.8 + 0.085 * Math.tanh((a - 0.8) / 0.085);
     c[i] = Math.sign(x) * y;
   }
   return c;
