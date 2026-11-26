@@ -198,22 +198,10 @@ export function tract(k: Kit, input: AudioNode, f: readonly Formant3[], t: numbe
 }
 
 /**
- * Peak of the static tract response to `data` (the band-passes run in JS
- * with Web Audio's biquad formulas). Used to scale the tract output to ≈ ±1
- * before the drive shaper, so `drive` and turbulence levels mean the same
- * thing for every voice.
+ * Static tract in JS: the band-passes of tract() (Web Audio's biquad
+ * formulas) over data[i0, i1), summed with their gains.
  */
-function tractPeak(data: Float32Array, f: readonly Formant3[], sr: number, amp: readonly Pt[]): number {
-  // the peak sits where the amp contour does: analyse ±0.12 s around it
-  let tMax = 0;
-  let aMax = -1;
-  for (const [t, a] of amp)
-    if (a > aMax) {
-      aMax = a;
-      tMax = t;
-    }
-  const i0 = Math.max(0, Math.round((tMax - 0.12) * sr));
-  const i1 = Math.min(data.length, Math.round((tMax + 0.12) * sr));
+function tractPcm(data: Float32Array, f: readonly Formant3[], sr: number, i0: number, i1: number): Float32Array {
   const n = Math.max(0, i1 - i0);
   const sum = new Float32Array(n);
   for (const [hz, bw, db] of f) {
@@ -239,9 +227,29 @@ function tractPeak(data: Float32Array, f: readonly Formant3[], sr: number, amp: 
       sum[i] += g * y;
     }
   }
+  return sum;
+}
+
+function peakOf(x: Float32Array): number {
   let pk = 0;
-  for (let i = 0; i < n; i++) pk = Math.max(pk, Math.abs(sum[i]));
+  for (let i = 0; i < x.length; i++) pk = Math.max(pk, Math.abs(x[i]));
   return pk;
+}
+
+/**
+ * Peak of the static tract response around the loudest point of the amp
+ * contour (±0.12 s). Used to scale the tract output to ≈ ±1 before the drive
+ * shaper, so `drive` and turbulence levels mean the same for every voice.
+ */
+function tractPeak(data: Float32Array, f: readonly Formant3[], sr: number, amp: readonly Pt[]): number {
+  let tMax = 0;
+  let aMax = -1;
+  for (const [t, a] of amp)
+    if (a > aMax) {
+      aMax = a;
+      tMax = t;
+    }
+  return peakOf(tractPcm(data, f, sr, Math.max(0, Math.round((tMax - 0.12) * sr)), Math.min(data.length, Math.round((tMax + 0.12) * sr))));
 }
 
 /** A complete voiced call: pulse source → tract → drive → turbulence → filters → send. */
@@ -297,4 +305,58 @@ export function voice(k: Kit, s: VoiceSpec): void {
   if (s.hp) out = k.chain(out, k.bq('highpass', s.hp));
   if (s.lp) out = k.chain(out, k.bq('lowpass', s.lp));
   k.send(out, s.level ?? 1, s.wet ?? 0.05, s.dest);
+}
+
+/**
+ * voice() rendered in plain JS and added into `out` at s.t: pulse source →
+ * static tract → drive → turbulence → level. For dense layers (colony
+ * murmurs), where tens of overlapping node graphs would make the offline
+ * render slow. fmove, bias, hp, lp, wet and dest are not applied: the
+ * caller's bus filters and sends the mix.
+ */
+export function voicePcm(s: VoiceSpec, sr: number, rng: Rng, out: Float32Array): void {
+  const data = glottalSource(s, sr, rng);
+  const y = tractPcm(data, s.formants, sr, 0, data.length);
+  const pk = peakOf(y);
+  const pre = pk > 1e-6 ? 1 / pk : 1;
+  const drive = s.drive ?? 0;
+  const dn = drive ? Math.tanh(drive) : 1;
+  const level = s.level ?? 1;
+  // turbulence: white noise through a band-pass lo..hi, scaled to unit RMS
+  let nb0 = 0,
+    na1 = 0,
+    na2 = 0,
+    ng = 0;
+  if (s.noise && s.noise.level > 0) {
+    const lo = s.noise.lo;
+    const hi = Math.min(s.noise.hi, sr * 0.45);
+    const fc = Math.sqrt(lo * hi);
+    const w0 = (2 * Math.PI * fc) / sr;
+    const alpha = Math.sin(w0) / (2 * (fc / Math.max(1, hi - lo)));
+    nb0 = alpha / (1 + alpha);
+    na1 = (-2 * Math.cos(w0)) / (1 + alpha);
+    na2 = (1 - alpha) / (1 + alpha);
+    // RMS of a band-pass over unit white noise ≈ sqrt(π·bw / sr)
+    ng = s.noise.level / Math.sqrt((Math.PI * (hi - lo)) / sr);
+  }
+  let x1 = 0,
+    x2 = 0,
+    y1 = 0,
+    y2 = 0;
+  const at = Math.round(s.t * sr);
+  const n = Math.min(y.length, out.length - at);
+  for (let i = Math.max(0, -at); i < n; i++) {
+    let v = y[i] * pre;
+    if (drive) v = Math.tanh(drive * v) / dn;
+    if (ng) {
+      const w = (rng.float() - 0.5) * 3.464;
+      const b = nb0 * (w - x2) - na1 * y1 - na2 * y2;
+      x2 = x1;
+      x1 = w;
+      y2 = y1;
+      y1 = b;
+      v += ng * b * contourAt(s.amp, i / sr, false);
+    }
+    out[at + i] += v * level;
+  }
 }

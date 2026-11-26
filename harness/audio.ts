@@ -388,7 +388,8 @@ async function runScenario(sc: Script): Promise<ScenarioReport> {
   const { sim, events, animals } = makeSim();
   (sim as unknown as { minuteOfDay: number }).minuteOfDay = sc.minute;
   const audio = new ZooAudio(sim, events, { context: off, seed: 11 });
-  await audio.prefetch(Object.keys(RECIPES));
+  // lazily played syllable variants render on first use, as in the game: only the #0 sets up front
+  await audio.prefetch(Object.keys(RECIPES).filter((id) => !id.startsWith('syl.') || id.endsWith('#0')));
   const nodesBoot = nodes;
   const sourcesBoot = sources;
   const cam = new THREE.PerspectiveCamera(50, 16 / 9, 0.5, 2000);

@@ -2,10 +2,11 @@
 // recent messages and settings (graphics quality, sound, save, new game).
 // Refreshes at ~2 Hz while open.
 
+import { AUDIO_PREFS_KEY, parsePrefs, serializePrefs, type AudioPrefs } from '../audio/prefs';
 import { QUALITY_KEY, SOUND_KEY } from '../core/constants';
-import type { IAudio, IRenderContext, ISimulation, QualityLevel, RunningCostEstimate } from '../core/contracts';
+import type { AudioChannel, IAudio, IRenderContext, ISimulation, QualityLevel, RunningCostEstimate } from '../core/contracts';
 import type { LedgerEntry } from '../core/types';
-import { button, el, escapeHtml, fmtClock, fmtMoney, fmtPct, setText, storageSet, swallowPointer, toggleClass } from './dom';
+import { button, el, escapeHtml, fmtClock, fmtMoney, fmtPct, setText, storageGet, storageSet, swallowPointer, toggleClass } from './dom';
 import { goalFraction, goalProgressText } from './coach';
 import { guestChip } from './hud';
 import { icon, type IconName } from './icons';
@@ -388,6 +389,65 @@ export class ZooPanel {
   }
 
   // ------------------------------------------------------------ settings
+  /** 'Sound mix' expander: one slider per mixer channel, saved apart from the game (debounced). */
+  private soundMix(audio: IAudio): HTMLElement {
+    const prefs: AudioPrefs = parsePrefs(storageGet(AUDIO_PREFS_KEY));
+    let saveTimer: ReturnType<typeof setTimeout> | undefined;
+    const write = () => {
+      clearTimeout(saveTimer);
+      storageSet(AUDIO_PREFS_KEY, serializePrefs(prefs));
+    };
+    // while dragging: debounced; on release: at once (a busy frame must not delay the write)
+    const save = () => {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(write, 300);
+    };
+    const channels: [Exclude<AudioChannel, 'music'>, string][] = [
+      ['master', 'Master'],
+      ['ambience', 'Ambience'],
+      ['world', 'Animals & effects'],
+      ['ui', 'Interface'],
+    ];
+    const rows = channels.map(([ch, label]) => {
+      const pct = Math.round((audio.volume?.(ch) ?? prefs[ch]) * 100);
+      const input = el('input', { attrs: { type: 'range', min: '0', max: '100', step: '5', value: String(pct), 'aria-label': `${label} volume` } });
+      input.style.cssText = 'flex: 1; min-width: 0; height: 44px; margin: 0; accent-color: var(--wh-leaf);';
+      const val = el('span', { text: `${pct}%` });
+      val.style.cssText = 'width: 40px; text-align: right; font-size: 12px; color: var(--wh-muted); font-variant-numeric: tabular-nums;';
+      input.addEventListener('input', () => {
+        const v = Number(input.value) / 100;
+        prefs[ch] = v;
+        audio.setVolume?.(ch, v);
+        setText(val, `${Math.round(v * 100)}%`);
+        save();
+      });
+      input.addEventListener('change', () => {
+        write();
+        // releasing the Interface slider previews its new level
+        if (ch === 'ui') cue('tap');
+      });
+      const name = el('span', { text: label });
+      name.style.cssText = 'width: 38%; max-width: 150px; font-size: 13px;';
+      const r = el('div', { class: 'wh-mix-row' }, [name, input, val]);
+      r.style.cssText = 'display: flex; align-items: center; gap: 10px; min-height: 44px;';
+      return r;
+    });
+    const list = el('div', { class: 'wh-mix', attrs: { id: 'wh-sound-mix' } }, rows);
+    list.style.cssText = 'padding: 0 0 8px; border-bottom: 1px solid var(--wh-line);';
+    list.hidden = true;
+    const toggle = button('wh-btn-ghost', 'chevronDown', 'Adjust', () => {
+      list.hidden = !list.hidden;
+      toggle.setAttribute('aria-expanded', String(!list.hidden));
+    }, 'Sound mix');
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-controls', 'wh-sound-mix');
+    const head = el('div', 'wh-setting', [
+      el('div', { class: 'wh-setting-t', html: '<b>Sound mix</b><span>Volumes for ambience, animals and the interface.</span>' }),
+      toggle,
+    ]);
+    return el('div', '', [head, list]);
+  }
+
   private settingsTab(): () => void {
     const ctx = this.host.ctx;
     const seg = el('div', 'wh-segtext');
@@ -423,6 +483,7 @@ export class ZooPanel {
     this.body.append(
       quality,
       row('Sound', 'Ambient sounds and effects.', sw),
+      this.soundMix(audio),
       row(
         'Save game',
         'Your zoo also saves automatically every few minutes.',

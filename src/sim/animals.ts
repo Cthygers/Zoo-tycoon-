@@ -649,6 +649,8 @@ export class AnimalSystem {
           : `${a.name} the ${sp.name} has died. Keep your animals fed, watered and healthy.`,
         'bad',
         { x: a.x, z: a.z },
+        undefined,
+        old ? undefined : 'death',
       );
       this.remove(a.id);
     }
@@ -658,7 +660,7 @@ export class AnimalSystem {
         const sp = SPECIES_BY_ID[a.speciesId];
         if (this.returnHome(a)) {
           sim.spend('animalPurchases', RESCUE_FEE);
-          sim.notify(null, `An animal rescue team returned ${a.name} the ${sp.name} (fee ${fmtMoney(RESCUE_FEE)}). Hire a vet or keeper to handle escapes.`, 'warn', { x: a.x, z: a.z });
+          sim.notify(null, `An animal rescue team returned ${a.name} the ${sp.name} (fee ${fmtMoney(RESCUE_FEE)}). Hire a vet or keeper to handle escapes.`, 'warn', { x: a.x, z: a.z }, undefined, 'contain');
         } else {
           this.warnNoHome(a, sp);
           // nowhere to take it yet: once there is, staff get a minute before the paid team steps in
@@ -896,7 +898,7 @@ export class AnimalSystem {
     // a species' first baby here is news; later births only go in the log
     const first = !sim.progress.bredSpecies.has(sp.id);
     sim.progress.bredSpecies.add(sp.id);
-    if (first) sim.notify(null, text, 'good', { x: mother.x, z: mother.z });
+    if (first) sim.notify(null, text, 'good', { x: mother.x, z: mother.z }, undefined, 'birth');
     else sim.logMessage(text, 'good', { x: mother.x, z: mother.z });
   }
 
@@ -1020,6 +1022,8 @@ export class AnimalSystem {
       `Keepers rescued a frightened ${singularName(psp.id)} (${prey.name}) from the ${pluralName(sp.id)} and sent it to a sanctuary. Predators and prey must not share a habitat!`,
       'bad',
       { x: prey.x, z: prey.z },
+      undefined,
+      'death',
     );
     this.remove(prey.id);
     pred.moving = false;

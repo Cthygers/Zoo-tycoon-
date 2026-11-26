@@ -90,8 +90,12 @@ const CHANNELS: readonly Channel[] = ['ambience', 'world', 'ui', 'music'];
 const VOLUME_CHANNELS: readonly AudioChannel[] = ['master', ...CHANNELS];
 /** Master gain into the glue compressor (calibrated to the loudness targets). */
 const MASTER = 1.9;
-/** Static channel levels: beds sit under calls and cues. */
-const CHANNEL_LEVEL: Record<Channel, number> = { ambience: 0.55, world: 0.4, ui: 0.8, music: 1 };
+/**
+ * Static channel levels, calibrated with MASTER on the demo zoo: day close
+ * views −16 LUFS, a lion roar within its reference distance −10…−13 LUFS
+ * momentary; UI cues stay at 0.8 × the world level.
+ */
+const CHANNEL_LEVEL: Record<Channel, number> = { ambience: 0.55, world: 0.4, ui: 0.32, music: 1 };
 /** Outdoor reverb return (unit-energy IR): at the full send (≥ 29 m) the tail sits ~3 dB under the dry sound. */
 const REVERB_RETURN = 1.8;
 /** Σ bed levels in a busy daytime close view: the UI channel is at full level from here up. */
@@ -171,7 +175,7 @@ class Bed {
     this.lp = LP4_Q.map((q) => {
       const f = ctx.createBiquadFilter();
       f.type = 'lowpass';
-      f.frequency.value = 9000;
+      f.frequency.value = Math.min(9000, 0.45 * ctx.sampleRate);
       f.Q.value = q;
       return f;
     });
@@ -328,7 +332,7 @@ class Voice {
   ) {
     this.lp = ctx.createBiquadFilter();
     this.lp.type = 'lowpass';
-    this.lp.frequency.value = 9000;
+    this.lp.frequency.value = Math.min(9000, 0.45 * ctx.sampleRate);
     this.lp.Q.value = 0.5;
     this.shelf = ctx.createBiquadFilter();
     this.shelf.type = 'highshelf';
@@ -569,6 +573,8 @@ export class ZooAudio implements IAudio {
   private warmTimer: ReturnType<typeof setTimeout> | null = null;
   /** Background pre-rendering has been queued (warmup or context boot). */
   private warmed = false;
+  /** Pending build of the shared reverb's impulse response (runs in the render queue after the cues). */
+  private reverbBuild: (() => Promise<void>) | null = null;
   /** The context stopped on its own (Android interruption): retry resume. */
   private needsResume = false;
   private resumeRetryT = 0;
@@ -605,6 +611,8 @@ export class ZooAudio implements IAudio {
   private openness = 1;
   private nightness = 0;
   private birdsDay = 1;
+  /** UI level relative to its channel level (follows how busy the ambience is). */
+  private uiScale = 1;
   private readonly biome = { savanna: 0, arctic: 0, humid: 0 };
   private readonly biomeSide = { savanna: 0, arctic: 0, humid: 0 };
   /** Per habitat id: 1 = holds a desert species, 2 = holds a tropical / wetland species. */
@@ -622,6 +630,7 @@ export class ZooAudio implements IAudio {
   private readonly spInfo = new Map<string, SpeciesInfo>();
   private owlT = 20;
   private owl: OwlPerch | null = null;
+  private owlMate: { x: number; y: number; z: number } | null = null;
   private birdT = 6;
   private coinTokens = 3;
   private coinRefill = 0;
@@ -657,7 +666,7 @@ export class ZooAudio implements IAudio {
         this.objectsDirty = true;
         this.habitatsDirty = true;
         this.calling.clear();
-        this.owl = null;
+        this.owl = this.owlMate = null;
         if (this.warmed && !this.ownsAnimals) this.requestAllSpecies();
       }),
     );
@@ -728,7 +737,7 @@ export class ZooAudio implements IAudio {
     if (this.warmed) return;
     this.warmed = true;
     for (const cue of CUE_IDS) this.request(cueId(cue));
-    this.request('cue.coin');
+    if (!this.ownsCoins) for (let k = 0; k < 4; k++) this.request(`cue.coin#${k}`);
     const h = this.sim.minuteOfDay / 60;
     this.request(h < 5.5 || h > 20 ? 'bed.night' : 'bed.birds', true);
     this.request('bed.wind', true);
@@ -832,7 +841,7 @@ export class ZooAudio implements IAudio {
     const now = this.ctx!.currentTime;
     const last = this.lastCue.get(cue) ?? -1;
     if (now - last < 0.045) return;
-    const id = cue === 'deny' && !RECIPES['cue.deny'] ? 'cue.error' : cueId(cue);
+    const id = cueId(cue);
     // tiny pitch and onset variation: repeated taps never sound machine-identical
     const jitter = cue === 'tap' || cue === 'select' || cue === 'cash';
     const h = this.playSpec({
@@ -1065,6 +1074,13 @@ export class ZooAudio implements IAudio {
     glue.connect(limiter);
     limiter.connect(clip);
     clip.connect(c.destination);
+    // compressors start out fully compressed and recover at their release rate:
+    // release fast for the first moments so a cue right after the unlock is not swallowed
+    for (const comp of [glue, limiter]) {
+      const rel = comp.release.value;
+      comp.release.setValueAtTime(0.001, c.currentTime);
+      comp.release.setValueAtTime(rel, c.currentTime + 0.05);
+    }
     // pause "time freeze": one low-pass + gain shared by world and ambience
     this.worldFilter = c.createBiquadFilter();
     this.worldFilter.type = 'lowpass';
@@ -1092,10 +1108,11 @@ export class ZooAudio implements IAudio {
     // one shared outdoor reverb, returned into the world channel
     const conv = c.createConvolver();
     conv.normalize = false;
-    // the convolver's FFT set-up runs on the main thread: not inside the unlocking gesture
-    void yieldMain().then(() => {
-      if (!this.disposed) conv.buffer = outdoorImpulse(c, this.lowSpec ? 0.8 : 1.2, this.lowSpec ? 1 : 2);
-    });
+    // built by the render queue right after the UI cues, in idle slices (never inside the unlocking gesture)
+    this.reverbBuild = async () => {
+      const ir = await outdoorImpulse(c, this.lowSpec ? 0.8 : 1.2, this.lowSpec ? 1 : 2);
+      if (!this.disposed) conv.buffer = ir;
+    };
     this.reverbIn = c.createGain();
     this.reverbIn.gain.value = REVERB_RETURN;
     this.reverbIn.connect(conv);
@@ -1231,6 +1248,7 @@ export class ZooAudio implements IAudio {
     }
     try {
       while (this.queue.length && !this.disposed && this._enabled && !this.appSuspended) {
+        if (this.reverbBuild && !this.queue[0].startsWith('cue.')) await this.buildReverb();
         const id = this.queue.shift()!;
         try {
           const lowRate = this.lowSpec && !id.startsWith('cue.');
@@ -1248,6 +1266,7 @@ export class ZooAudio implements IAudio {
         // give the main thread a breather between renders
         await yieldMain();
       }
+      if (this.reverbBuild && !this.disposed && this._enabled && !this.appSuspended) await this.buildReverb();
     } finally {
       this.working = false;
       if (!this.queue.length) {
@@ -1262,6 +1281,12 @@ export class ZooAudio implements IAudio {
           }, 5000);
       }
     }
+  }
+
+  private async buildReverb(): Promise<void> {
+    const build = this.reverbBuild!;
+    this.reverbBuild = null;
+    await build();
   }
 
   private speciesInfo(speciesId: string): SpeciesInfo {
@@ -1727,8 +1752,8 @@ export class ZooAudio implements IAudio {
       }
     }
     L.arctic = bio.arctic * (0.5 + 0.5 * zn) * 0.45;
-    // the ear rises with the camera: every bed recedes a little from above (−3 dB at overview)
-    const alt = 0.7 + 0.3 * zn;
+    // the ear rises with the camera: every bed recedes a little from above (−2.5 dB at overview)
+    const alt = 0.75 + 0.25 * zn;
     // the loudest beds win when more would play than the tier allows
     const cap = MAX_BEDS[this.lowSpec ? 1 : 0];
     const ambOn = this.channelOn('ambience');
@@ -1782,9 +1807,12 @@ export class ZooAudio implements IAudio {
       this.beds.get(bm)!.setBias(bias);
       if (bm !== 'arctic') this.beds.get(`${bm}.night`)!.setBias(bias);
     }
-    // UI cues sit relative to the ambience: about −4 dB in a quiet night overview
-    const ui = this.chan.ui.input.gain;
-    ui.setTargetAtTime(CHANNEL_LEVEL.ui * (0.62 + 0.38 * Math.min(1, sum / DAY_CLOSE_REF)), this.ctx!.currentTime, 1.5);
+    // UI cues sit relative to the ambience: about −3 dB in a quiet night overview
+    const uiScale = 0.62 + 0.38 * Math.min(1, sum / DAY_CLOSE_REF);
+    if (Math.abs(uiScale - this.uiScale) > 0.01) {
+      this.uiScale = uiScale;
+      this.chan.ui.input.gain.setTargetAtTime(CHANNEL_LEVEL.ui * uiScale, this.ctx!.currentTime, 1.5);
+    }
   }
 
   // ================================================================ animals (built-in; off when a module owns them)
@@ -1882,7 +1910,7 @@ export class ZooAudio implements IAudio {
     if (this.owlT <= 0) {
       this.owlT = this.rng.range(20, 40);
       if (this.nightness > 0.6) this.owlBout();
-      else this.owl = null;
+      else this.owl = this.owlMate = null;
     }
     this.birdT -= dt;
     if (this.birdT <= 0) {
@@ -1917,17 +1945,14 @@ export class ZooAudio implements IAudio {
     const gain = 0.9 * (0.6 + 0.4 * e.zoomNear);
     this.playSpec({ id: 'amb.owl', pool: 'amb', at: p, gain, rate: 1 + this.rng.range(-0.015, 0.015), radius: 120 });
     if (this.rng.float() < 0.3) {
-      const ang = this.rng.range(0, Math.PI * 2);
-      const d = this.rng.range(60, 120);
-      this.playSpec({
-        id: 'amb.owl',
-        pool: 'amb',
-        at: { x: p.x + Math.cos(ang) * d, y: p.y, z: p.z + Math.sin(ang) * d },
-        gain,
-        rate: 0.97,
-        radius: 160,
-        when: now + this.rng.range(2.5, 5),
-      });
+      // the neighbour answers from its own territory, 60–120 m away
+      let m = this.owlMate;
+      if (!m || Math.hypot(m.x - e.x, m.z - e.z) > 150) {
+        const ang = this.rng.range(0, Math.PI * 2);
+        const d = this.rng.range(60, 120);
+        m = this.owlMate = { x: p.x + Math.cos(ang) * d, y: p.y, z: p.z + Math.sin(ang) * d };
+      }
+      this.playSpec({ id: 'amb.owl', pool: 'amb', at: m, gain, rate: 0.97, radius: 160, when: now + this.rng.range(2.5, 5) });
     }
   }
 
@@ -1960,7 +1985,8 @@ export class ZooAudio implements IAudio {
     this.coinRefill = t;
     if (t - this.coinLast < 0.12 || this.coinTokens < 1) return;
     const gain = (0.3 + 0.7 * this.ear.zoomNear) * (amount >= 50 ? 1 : amount >= 10 ? 0.8 : 0.6);
-    if (!this.playSpec({ id: 'cue.coin', pool: 'fx', at: { x, y: 1, z }, gain, rate: 1 + this.rng.range(-0.04, 0.06), duck: false })) return;
+    // built-in fallback (no module owns coins): the feedback module's coin variants
+    if (!this.playSpec({ id: `cue.coin#${this.rng.int(0, 3)}`, pool: 'fx', at: { x, y: 1, z }, gain, rate: 1 + this.rng.range(-0.04, 0.06), duck: false })) return;
     this.coinTokens -= 1;
     this.coinLast = t;
   }

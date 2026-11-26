@@ -208,6 +208,24 @@ describe('AudioHost play', () => {
   });
 });
 
+describe('night owl', () => {
+  it('calls from a real tree, and its neighbour always answers from one place', async () => {
+    const sim = fakeSim();
+    sim.minuteOfDay = 23 * 60;
+    sim.world.objects.set(1, { defId: 'tree_oak', x: 25, z: 9 });
+    const { audio, ctx } = engine(sim);
+    await audio.prefetch(['amb.owl']);
+    audio.debugLog = [];
+    run(audio, ctx, view(0, 0), 240);
+    const owls = audio.debugLog.filter((l) => l.id === 'amb.owl');
+    expect(owls.length).toBeGreaterThanOrEqual(5);
+    const spots = new Set(owls.map((l) => `${l.x},${l.z}`));
+    expect(spots.has('25,9')).toBe(true);
+    expect(spots.size).toBeLessThanOrEqual(2);
+    for (const o of owls) expect(o.pool).toBe('amb');
+  });
+});
+
 describe('keyed loops', () => {
   it('starts once per key and stops after 4 s at level 0', async () => {
     const sim = fakeSim();

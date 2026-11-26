@@ -5,6 +5,7 @@
 import { App } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import { createAudio } from './audio';
+import { AUDIO_PREFS_KEY, applyPrefs, parsePrefs } from './audio/prefs';
 import { CLOSE_HOUR, OPEN_HOUR, QUALITY_KEY, SAVE_KEY, SOUND_KEY } from './core/constants';
 import type { QualityLevel } from './core/contracts';
 import { EventBus } from './core/events';
@@ -176,6 +177,7 @@ async function boot() {
 
   const audio = createAudio(sim, events, { lowSpec: ctx.quality.level === 'low' });
   audio.setEnabled(storageGet(SOUND_KEY) !== '0');
+  applyPrefs(audio, parsePrefs(storageGet(AUDIO_PREFS_KEY)));
   // Mobile browsers only start audio from a user gesture.
   const unlockAudio = () => audio.resume();
   window.addEventListener('pointerdown', unlockAudio, { passive: true });
@@ -365,7 +367,13 @@ async function boot() {
       save();
       void App.minimizeApp();
     });
-    void App.addListener('pause', () => save());
+    void App.addListener('pause', () => {
+      save();
+      // also covers interruptions that leave the page visible (Capacitor never pauses the WebView);
+      // idempotent with the visibilitychange handling above
+      audio.suspend();
+    });
+    void App.addListener('resume', () => audio.resume());
   }
 
   const resize = () => ctx.resize(window.innerWidth, window.innerHeight);

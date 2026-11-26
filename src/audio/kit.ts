@@ -23,67 +23,79 @@ const SHARED_NOISE_S = 3;
 export const NOISE_SPACING = 0.25;
 const SHARED_SEEDS: Record<NoiseColor, number> = { white: 0x51ed, pink: 0x9e37, brown: 0x2f6b };
 
+/** Sample count of a noise buffer. */
+export function noiseLength(sr: number, seconds: number): number {
+  return Math.max(1, Math.floor(seconds * sr));
+}
+
 /**
  * Incremental generator of seamlessly looping noise samples (RMS ≈ 0.25):
- * `seconds` long at `sr`, deterministic for `seed`. Yields every ~16k samples.
+ * `seconds` long at `sr`, deterministic for `seed`. Writes into `out` when
+ * given (e.g. an AudioBuffer's channel data: no extra copy or allocation).
+ * Yields every ~16k samples.
  */
-export function* noiseData(sr: number, color: NoiseColor, seconds: number, seed: number): Generator<void, Float32Array> {
-  const n = Math.max(1, Math.floor(seconds * sr));
+export function* noiseData(sr: number, color: NoiseColor, seconds: number, seed: number, out?: Float32Array): Generator<void, Float32Array> {
+  const n = noiseLength(sr, seconds);
   const x = Math.min(n, Math.floor(0.05 * sr)); // crossfade so the loop point is inaudible
-  const tmp = new Float32Array(n + x);
+  const d = out && out.length >= n ? out.subarray(0, n) : new Float32Array(n);
+  // the x samples past the end, folded into the head below
+  const tail = new Float32Array(x);
   const r = mulberry32(seed);
   let b0 = 0,
     b1 = 0,
     b2 = 0,
     last = 0;
   const STEP = 16384;
-  for (let s = 0; s < tmp.length; s += STEP) {
-    const e = Math.min(tmp.length, s + STEP);
+  const total = n + x;
+  for (let s = 0; s < total; s += STEP) {
+    const e = Math.min(total, s + STEP);
     for (let i = s; i < e; i++) {
       const w = r() * 2 - 1;
-      if (color === 'white') tmp[i] = w;
+      let v: number;
+      if (color === 'white') v = w;
       else if (color === 'pink') {
         // Paul Kellet's economy pink filter (±0.5 dB above 40 Hz)
         b0 = 0.99765 * b0 + w * 0.099046;
         b1 = 0.963 * b1 + w * 0.2965164;
         b2 = 0.57 * b2 + w * 1.0526913;
-        tmp[i] = b0 + b1 + b2 + w * 0.1848;
+        v = b0 + b1 + b2 + w * 0.1848;
       } else {
         last = (last + 0.02 * w) / 1.02;
-        tmp[i] = last;
+        v = last;
       }
+      if (i < n) d[i] = v;
+      else tail[i - n] = v;
     }
     yield;
   }
   for (let i = 0; i < x; i++) {
     const a = Math.sin((i / x) * Math.PI * 0.5);
     const b = Math.cos((i / x) * Math.PI * 0.5);
-    tmp[i] = tmp[i] * a + tmp[n + i] * b;
+    d[i] = d[i] * a + tail[i] * b;
   }
   let mean = 0;
   for (let s = 0; s < n; s += STEP) {
-    for (let i = s, e = Math.min(n, s + STEP); i < e; i++) mean += tmp[i];
+    for (let i = s, e = Math.min(n, s + STEP); i < e; i++) mean += d[i];
     yield;
   }
   mean /= n;
   let ss = 0;
   for (let s = 0; s < n; s += STEP) {
-    for (let i = s, e = Math.min(n, s + STEP); i < e; i++) ss += (tmp[i] - mean) * (tmp[i] - mean);
+    for (let i = s, e = Math.min(n, s + STEP); i < e; i++) ss += (d[i] - mean) * (d[i] - mean);
     yield;
   }
   const k = 0.25 / Math.sqrt(ss / n || 1);
-  const out = tmp.subarray(0, n);
   for (let s = 0; s < n; s += STEP) {
-    for (let i = s, e = Math.min(n, s + STEP); i < e; i++) out[i] = (tmp[i] - mean) * k;
+    for (let i = s, e = Math.min(n, s + STEP); i < e; i++) d[i] = (d[i] - mean) * k;
     yield;
   }
-  return out;
+  return d;
 }
 
-/** Wrap generated noise samples in a buffer of this context's rate. */
-export function noiseToBuffer(c: BaseAudioContext, data: Float32Array): AudioBuffer {
-  const buf = c.createBuffer(1, data.length, c.sampleRate);
-  buf.copyToChannel(data as Float32Array<ArrayBuffer>, 0);
+/** Noise generator that fills a new buffer of this context's rate in place (the buffer is the result). */
+export function* noiseBufferGen(c: BaseAudioContext, color: NoiseColor, seconds: number, seed: number): Generator<void, AudioBuffer> {
+  const buf = c.createBuffer(1, noiseLength(c.sampleRate, seconds), c.sampleRate);
+  yield* noiseData(c.sampleRate, color, seconds, seed, buf.getChannelData(0));
   return buf;
 }
 
@@ -96,12 +108,11 @@ export function noiseBuffer(c: BaseAudioContext, color: NoiseColor): AudioBuffer
   const key = `${color}@${c.sampleRate}`;
   const hit = noiseCache.get(key);
   if (hit) return hit;
-  const g = noiseData(c.sampleRate, color, SHARED_NOISE_S, SHARED_SEEDS[color]);
+  const g = noiseBufferGen(c, color, SHARED_NOISE_S, SHARED_SEEDS[color]);
   let res = g.next();
   while (!res.done) res = g.next();
-  const buf = noiseToBuffer(c, res.value);
-  noiseCache.set(key, buf);
-  return buf;
+  noiseCache.set(key, res.value);
+  return res.value;
 }
 
 /** Generate the shared noise buffers for this sample rate ahead of a render, a slice at a time. */
@@ -109,13 +120,13 @@ export async function prepareNoise(c: BaseAudioContext, sl: { tick(): Promise<vo
   for (const color of COLORS) {
     const key = `${color}@${c.sampleRate}`;
     if (noiseCache.has(key)) continue;
-    const g = noiseData(c.sampleRate, color, SHARED_NOISE_S, SHARED_SEEDS[color]);
+    const g = noiseBufferGen(c, color, SHARED_NOISE_S, SHARED_SEEDS[color]);
     let res = g.next();
     while (!res.done) {
       await sl.tick();
       res = g.next();
     }
-    noiseCache.set(key, noiseToBuffer(c, res.value));
+    noiseCache.set(key, res.value);
   }
 }
 

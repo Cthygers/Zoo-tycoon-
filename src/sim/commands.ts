@@ -820,6 +820,7 @@ export class Commands {
     const a = sim.animalSys.create(speciesId, wx, wz, { adult: true, sex: this.adoptSex(sp, w.habitatOf[w.idx(Math.floor(wx / TILE), Math.floor(wz / TILE))]) });
     sim.spend('animalPurchases', sp.cost);
     sim.events.emit('animalAdded', { id: a.id });
+    sim.events.emit('animalPlaced', { id: a.id, x: a.x, z: a.z });
     sim.markPopulationDirty();
     return this.result(true, sp.cost, undefined, false, at, spot.warning, extra);
   }
@@ -930,7 +931,7 @@ export class Commands {
     if (dryRun) return this.result(true, -value, undefined, true, { x: a.x, z: a.z });
     sim.animalSys.remove(animalId);
     sim.earn('other', value);
-    sim.notify(null, `${a.name} the ${sp?.name ?? 'animal'} was sold to another zoo for ${fmtMoney(value)}.`, 'info', { x: a.x, z: a.z });
+    sim.notify(null, `${a.name} the ${sp?.name ?? 'animal'} was sold to another zoo for ${fmtMoney(value)}.`, 'info', { x: a.x, z: a.z }, undefined, 'sold');
     return this.result(true, -value, undefined, false, { x: a.x, z: a.z });
   }
 
@@ -953,7 +954,7 @@ export class Commands {
     const s = sim.staffSys.create(role, tile);
     sim.events.emit('staffAdded', { id: s.id });
     sim.markPopulationDirty();
-    sim.notify(null, `${s.name} joined as ${role === 'keeper' ? 'a keeper' : role === 'vet' ? 'a vet' : 'a groundskeeper'} (${fmtMoney(salary)}/day, paid at day end).`, 'good', { x: s.x, z: s.z });
+    sim.notify(null, `${s.name} joined as ${role === 'keeper' ? 'a keeper' : role === 'vet' ? 'a vet' : 'a groundskeeper'} (${fmtMoney(salary)}/day, paid at day end).`, 'good', { x: s.x, z: s.z }, undefined, 'hire');
     return this.result(true, 0, undefined, false, { x: s.x, z: s.z });
   }
 

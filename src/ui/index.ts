@@ -124,6 +124,7 @@ class GameUI implements GameUIHandle {
     this.camera.onFollowEnd = () => {
       this.followSel = null;
       this.info.syncFollow();
+      deps.audio?.follow?.(null);
     };
 
     // ---- services
@@ -535,6 +536,8 @@ class GameUI implements GameUIHandle {
     this.followSel = sel;
     this.keepFollowClear();
     this.camera.follow(get, 20);
+    // the followed animal sounds closer and more alive (fauna module)
+    this.deps.audio?.follow?.(sel.kind === 'animal' ? sel.id : null);
   }
 
   // ------------------------------------------------------------ tools

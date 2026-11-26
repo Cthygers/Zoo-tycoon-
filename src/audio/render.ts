@@ -8,7 +8,7 @@
 // tails and level normalisation to the recipe's peak / RMS targets.
 
 import { Rng, mulberry32 } from '../core/rng';
-import { Kit, noiseData, noiseToBuffer, prepareNoise, releaseNoise, type NoiseColor, type RenderNoise } from './kit';
+import { Kit, noiseBufferGen, prepareNoise, releaseNoise, type NoiseColor, type RenderNoise } from './kit';
 
 export interface Recipe {
   /** Loop length (beds) or nominal length (one-shots), seconds. */
@@ -117,27 +117,34 @@ const OUTDOOR_TAPS: readonly (readonly [number, number])[] = [
 ];
 
 /**
- * Impulse response of the engine's shared outdoor reverb: four early
+ * Impulse response of the engine's shared outdoor reverb (built in idle
+ * slices): four early
  * reflections and a diffuse tail (time constant 0.145 s, RT60 ≈ 1 s) through a
  * ~5 kHz one-pole low-pass, scaled to unit energy per channel (use with
  * ConvolverNode.normalize = false). Stereo channels use different noise seeds
  * and reflection signs, so the return is decorrelated left / right.
  */
-export function outdoorImpulse(c: BaseAudioContext, seconds: number, channels: 1 | 2): AudioBuffer {
+export async function outdoorImpulse(c: BaseAudioContext, seconds: number, channels: 1 | 2): Promise<AudioBuffer> {
   const sr = c.sampleRate;
   const n = Math.max(64, Math.floor(seconds * sr));
   const buf = c.createBuffer(channels, n, sr);
   const a = 1 - Math.exp((-2 * Math.PI * 5000) / sr);
   const fadeIn = Math.floor(0.012 * sr);
+  // per sample decay factor of the 0.145 s envelope
+  const decay = Math.exp(-1 / (0.145 * sr));
   for (let ch = 0; ch < channels; ch++) {
     const d = buf.getChannelData(ch);
     const r = mulberry32(0x0ad5 + ch * 0x3c6ef35f);
     let lp = 0;
-    for (let i = fadeIn; i < n; i++) {
-      const t = i / sr;
-      const env = Math.exp(-t / 0.145) * Math.min(1, (i - fadeIn) / (0.03 * sr));
-      lp += a * (r() * 2 - 1 - lp);
-      d[i] = lp * env * 0.6;
+    let env = Math.exp(-fadeIn / sr / 0.145);
+    // built a chunk per idle slice: this runs right after the context starts
+    for (let i0 = fadeIn; i0 < n; i0 += CHUNK) {
+      for (let i = i0, e = Math.min(n, i0 + CHUNK); i < e; i++) {
+        lp += a * (r() * 2 - 1 - lp);
+        d[i] = lp * env * Math.min(1, (i - fadeIn) / (0.03 * sr));
+        env *= decay;
+      }
+      await yieldMain();
     }
     for (const [tt, g] of OUTDOOR_TAPS) {
       // a little per-channel spread keeps the reflections from imaging dead centre
@@ -192,7 +199,7 @@ const SLICE_MS = 3;
  * by one unit of work (a recipe build step or a chunk), so this stays well
  * under the 12 ms slice target.
  */
-const IDLE_SLICE_MAX = 6;
+const IDLE_SLICE_MAX = 10;
 const CHUNK = 8192;
 let budgetOverride = 0;
 
@@ -323,14 +330,13 @@ export async function renderRecipe(r: Recipe, seed: number, opts: RenderOptions 
 /** Generate a loop's per-render noise (one buffer per colour, sliced) and hand it to the waiting sources. */
 async function assignLoopNoise(c: BaseAudioContext, noise: RenderNoise, seed: number, sl: Slicer): Promise<void> {
   for (const [color, srcs] of noise.sources) {
-    const g = noiseData(c.sampleRate, color, noise.seconds, (seed ^ LOOP_NOISE_SEED[color]) >>> 0);
+    const g = noiseBufferGen(c, color, noise.seconds, (seed ^ LOOP_NOISE_SEED[color]) >>> 0);
     let res = g.next();
     while (!res.done) {
       await sl.tick();
       res = g.next();
     }
-    const buf = noiseToBuffer(c, res.value);
-    for (const src of srcs) src.buffer = buf;
+    for (const src of srcs) src.buffer = res.value;
     await sl.tick();
   }
   noise.sources.clear();

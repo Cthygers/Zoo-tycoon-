@@ -88,8 +88,11 @@ export const SPECIES_AUDIO: Readonly<Record<string, SpeciesAudio>> = {
     refDist: 25,
     radius: 250,
     chatty: 0.4,
-    activity: hours(0.15, [22, 2, 0.6], [19, 21, 1], [3, 5, 1]),
-    boutsPerMin: 0.3,
+    // day base 0.1 (plan 0.15) keeps night ≥ 4× day now that bouts are more frequent
+    activity: hours(0.1, [22, 2, 0.6], [19, 21, 1], [3, 5, 1]),
+    // an in-game night lasts ~3.7 real minutes at 1×: 0.5 (plan 0.3) gives a pride about 1.5
+    // scheduled roaring bouts per night, plus contagion joins (0.8 roared almost non-stop)
+    boutsPerMin: 0.5,
     callsWhileAsleep: true,
     contagion: { p: 0.6, delay: [2, 8], radius: 80 },
     syllables: banks('lion'),
@@ -224,7 +227,7 @@ export const SPECIES_AUDIO: Readonly<Record<string, SpeciesAudio>> = {
     radius: 250,
     chatty: 0.3,
     activity: hours(0.3, [23, 3, 0.4], [18, 22, 1], [4, 6, 1]),
-    boutsPerMin: 0.5,
+    boutsPerMin: 0.8,
     callsWhileAsleep: true,
     contagion: { p: 0.7, delay: [1, 5], radius: 120 },
     syllables: banks('hippo'),

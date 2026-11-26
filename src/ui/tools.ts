@@ -437,8 +437,8 @@ export class ToolManager implements ToolInput {
     this.applyPointer();
     this.gesture = false;
     this.refresh();
-    // audible feedback when the spot the player just picked cannot be used
-    if (this.pending && !this.pending.ok) cue('error');
+    // a soft knock when the spot the player just picked cannot be used ('error' is for confirm attempts)
+    if (this.pending && !this.pending.ok) cue('deny');
   }
 
   cancel(): void {

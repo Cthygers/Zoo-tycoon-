@@ -6,9 +6,9 @@
 
 import type { IAudio } from '../core/contracts';
 
-export type UiCue = 'tap' | 'open' | 'close' | 'select' | 'build' | 'bulldoze' | 'error';
+export type UiCue = 'tap' | 'deny' | 'open' | 'close' | 'select' | 'build' | 'bulldoze' | 'error';
 
-const PRIORITY: Record<UiCue, number> = { tap: 1, close: 2, open: 3, select: 4, error: 5, build: 6, bulldoze: 6 };
+const PRIORITY: Record<UiCue, number> = { tap: 1, deny: 1.5, close: 2, open: 3, select: 4, error: 5, build: 6, bulldoze: 6 };
 
 let audio: IAudio | null = null;
 let pending: UiCue | null = null;

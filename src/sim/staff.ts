@@ -564,7 +564,7 @@ export class StaffSystem {
           if (sim.animalSys.returnHome(a)) {
             s.today.recaptured++;
             const where = w.habitats.get(a.home)?.name ?? 'its habitat';
-            sim.notify(null, `${s.name} safely returned ${a.name} the ${singularName(sp.id)} to ${where}.`, 'good', { x: a.x, z: a.z });
+            sim.notify(null, `${s.name} safely returned ${a.name} the ${singularName(sp.id)} to ${where}.`, 'good', { x: a.x, z: a.z }, undefined, 'contain');
           }
         }
         break;

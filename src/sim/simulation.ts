@@ -29,7 +29,7 @@ import {
   type SuitabilityOptions,
   type ZooStats,
 } from '../core/contracts';
-import type { EventBus, GameEvents, NotifyKind, TileRect } from '../core/events';
+import type { EventBus, GameEvents, NotifyKind, NotifySound, TileRect } from '../core/events';
 import { fmtMoney } from '../core/format';
 import {
   TERRAIN_COUNT,
@@ -398,7 +398,7 @@ export class Simulation implements ISimulation {
     this.debtWarned = false;
     this.events.emit('dayChanged', { day: this.day });
     const summary = daySummary(done, turnedAway);
-    this.notify(null, summary.text, summary.kind);
+    this.notify(null, summary.text, summary.kind, undefined, undefined, 'day');
     if (this.money < 0) {
       this.notify('debt', `You are ${fmtMoney(-this.money)} in debt! Building is blocked until you earn money — raise income or sell something.`, 'bad', undefined, 0);
     }
@@ -426,7 +426,7 @@ export class Simulation implements ISimulation {
     this.addMoney(amount);
     this.today.income += amount;
     this.today[kind] += amount;
-    if (popup) this.events.emit('moneyPopup', { x: popup.x, z: popup.z, amount });
+    if (popup) this.events.emit('moneyPopup', { x: popup.x, z: popup.z, amount, kind });
   }
   /** Spend (positive) or refund (negative) money in an expense category. */
   spend(kind: ExpenseKind, amount: number) {
@@ -448,11 +448,12 @@ export class Simulation implements ISimulation {
 
   /**
    * Toast for the player. `key` throttles repeats: the same key is not shown
-   * again for `cooldown` simulated seconds (null = never throttled).
+   * again for `cooldown` simulated seconds (null = never throttled). `sound`
+   * picks the event sound; by default it follows the key (see soundForKey).
    */
-  notify(key: string | null, text: string, kind: NotifyKind, focus?: { x: number; z: number }, cooldown = 90) {
+  notify(key: string | null, text: string, kind: NotifyKind, focus?: { x: number; z: number }, cooldown = 90, sound?: NotifySound) {
     if (key && !this.claimNotify(key, cooldown)) return;
-    this.emitNotify(text, kind, focus, false);
+    this.emitNotify(key, text, kind, focus, false, sound);
   }
 
   /**
@@ -463,19 +464,19 @@ export class Simulation implements ISimulation {
   remind(key: string, text: string, kind: NotifyKind, focus?: { x: number; z: number }, cooldown = 90, lasting = 2 * cooldown) {
     const last = this.notifyLast.get(key);
     if (!this.claimNotify(key, cooldown)) return;
-    this.emitNotify(text, kind, focus, last !== undefined && this.time - last < lasting);
+    this.emitNotify(key, text, kind, focus, last !== undefined && this.time - last < lasting);
   }
 
   /** A toast the first time this zoo meets `key` (remembered in the save), log-only after that. */
   notifyFirst(key: string, text: string, kind: NotifyKind, focus?: { x: number; z: number }) {
     const seen = this.progress.announced.has(key);
     this.progress.announced.add(key);
-    this.emitNotify(text, kind, focus, seen);
+    this.emitNotify(key, text, kind, focus, seen);
   }
 
   /** A message for the log only, no toast: something on screen already shows it. */
   logMessage(text: string, kind: NotifyKind, focus?: { x: number; z: number }) {
-    this.emitNotify(text, kind, focus, true);
+    this.emitNotify(null, text, kind, focus, true);
   }
 
   /** Throttle by key: false if `key` was sent less than `cooldown` simulated seconds ago. */
@@ -485,9 +486,11 @@ export class Simulation implements ISimulation {
     return true;
   }
 
-  private emitNotify(text: string, kind: NotifyKind, focus: { x: number; z: number } | undefined, logOnly: boolean) {
+  private emitNotify(key: string | null, text: string, kind: NotifyKind, focus: { x: number; z: number } | undefined, logOnly: boolean, sound?: NotifySound) {
     const n: GameEvents['notify'] = focus ? { text, kind, focus: { x: focus.x, z: focus.z } } : { text, kind };
     if (logOnly) n.logOnly = true;
+    const s = sound ?? soundForKey(key);
+    if (s) n.sound = s;
     this.events.emit('notify', n);
   }
 
@@ -1191,6 +1194,14 @@ export class Simulation implements ISimulation {
 /** The day's running result: tickets, shops and donations less wages, food and upkeep. */
 export function runningResult(d: LedgerEntry): number {
   return d.admissions + d.shopIncome + d.donations - (d.salaries + d.food + d.upkeep);
+}
+
+/** Event sound of a notification by its throttle key's prefix (escape:<id>, sick:<id>, debt, gate…). */
+const KEY_SOUNDS: Readonly<Record<string, NotifySound>> = { escape: 'escape', contain: 'contain', healed: 'healed', sick: 'sick', debt: 'debt', gate: 'gate' };
+export function soundForKey(key: string | null): NotifySound | undefined {
+  if (!key) return undefined;
+  const i = key.indexOf(':');
+  return KEY_SOUNDS[i < 0 ? key : key.slice(0, i)];
 }
 
 /**
