@@ -212,7 +212,7 @@ async function e2e6(browser) {
     check('no wh2:* key is written', !ls.keys.some((k) => k.startsWith('wh2:')), ls.keys);
     check('cloud disabled and no badge in game', ls.cloudEnabled === false && !ls.badge, ls);
     const foreign = P.requests.filter((r) => !r.url.startsWith(st.ORIGIN) && !r.url.startsWith('data:') && !r.url.startsWith('blob:'));
-    const apiLike = P.requests.filter((r) => /\/v1\//.test(r.url) || r.url.includes(':8787') || r.url.includes(':8799'));
+    const apiLike = P.requests.filter((r) => /\/v1\//.test(r.url) || r.url.startsWith(st.API) || r.url.startsWith(st.GOOGLE));
     check('zero requests to any non-asset URL (menu, New Zoo, saves, hide/show)', foreign.length === 0 && apiLike.length === 0, { foreign: foreign.slice(0, 5), apiLike: apiLike.slice(0, 5) });
     await shot(P, 'e2e6-game-nocloud');
     check('no page errors', P.errors.length === 0, P.errors.slice(0, 5));

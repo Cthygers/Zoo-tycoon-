@@ -9,7 +9,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const REPO = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 export const SERVER_DIR = join(REPO, 'server');
-export const PORTS = { vite: 5199, api: 8787, google: 8799 };
+// Overridable so several stacks can run side by side (e.g. E2E_VITE_PORT=5611 E2E_API_PORT=8811 E2E_GOOGLE_PORT=8821).
+const portFrom = (name, fallback) => Number(process.env[name] || fallback);
+export const PORTS = { vite: portFrom('E2E_VITE_PORT', 5199), api: portFrom('E2E_API_PORT', 8787), google: portFrom('E2E_GOOGLE_PORT', 8799) };
 export const ORIGIN = `http://127.0.0.1:${PORTS.vite}`;
 export const API = `http://127.0.0.1:${PORTS.api}`;
 export const GOOGLE = `http://127.0.0.1:${PORTS.google}`;
@@ -93,7 +95,7 @@ function track(name, child, logLines) {
   log(name, 'pid', child.pid);
 }
 
-/** The built API server on 127.0.0.1:8787 with a fresh temp DB. Returns { dbPath, logs, pid }. */
+/** The built API server on 127.0.0.1:PORTS.api (default 8787) with a fresh temp DB. Returns { dbPath, logs, pid }. */
 export async function startApi(google, extraEnv = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'wh-e2e-db-'));
   onStop(() => rmSync(dir, { recursive: true, force: true }));
@@ -125,7 +127,7 @@ export async function startApi(google, extraEnv = {}) {
 }
 
 /**
- * Vite (dev) on 127.0.0.1:5199 with a private cacheDir. `cloud` = the e2e cloud env (API base, the
+ * Vite (dev) on 127.0.0.1:PORTS.vite (default 5199) with a private cacheDir. `cloud` = the e2e cloud env (API base, the
  * fake Google, the test versus length); otherwise every VITE_* variable is removed.
  */
 export async function startVite({ cloud, cacheDir }) {

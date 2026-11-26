@@ -1,6 +1,6 @@
 // Playwright helpers for driving the real game (menu, loading, in-game UI) in the e2e scenarios.
 import { createRequire } from 'node:module';
-import { ORIGIN } from './stack.mjs';
+import { API, ORIGIN } from './stack.mjs';
 
 const require = createRequire(import.meta.url);
 function loadPlaywright() {
@@ -37,7 +37,7 @@ export async function phone(browser, name, opts = {}) {
   page.on('request', (r) => p.requests.push({ url: r.url(), type: r.resourceType(), method: r.method() }));
   page.on('response', async (r) => {
     const u = r.url();
-    if (!u.includes(':8787/v1/')) return;
+    if (!u.startsWith(`${API}/v1/`)) return;
     let body = null;
     try {
       const ct = r.headers()['content-type'] ?? '';
