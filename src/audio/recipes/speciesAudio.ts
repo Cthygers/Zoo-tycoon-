@@ -272,7 +272,7 @@ export const SPECIES_AUDIO: Readonly<Record<string, SpeciesAudio>> = {
   },
   giraffe: {
     voice: 'giraffe',
-    levels: { call: -10, night: -14, idle: -14 },
+    levels: { call: -10, night: -11, idle: -14 },
     refDist: 10,
     radius: 80,
     chatty: 0.03,
@@ -325,7 +325,8 @@ export const SPECIES_AUDIO: Readonly<Record<string, SpeciesAudio>> = {
       {
         kind: 'call',
         steps: [
-          { syl: 'cycle', n: [4, 8], ioi: [0.3, 0.3], grow: 1.07, ioiMax: 0.45, rateStep: 0.98 },
+          // onsets 0.42 s or more apart: a cycle (≤ 0.34 s, slower with the rate spread) never overlaps the next
+          { syl: 'cycle', n: [4, 8], ioi: [0.42, 0.46], grow: 1.04, ioiMax: 0.55, rateStep: 0.98 },
           { ...once('final'), gap: [0.05, 0.15] },
         ],
       },
@@ -396,7 +397,8 @@ export const SPECIES_AUDIO: Readonly<Record<string, SpeciesAudio>> = {
       {
         kind: 'call',
         steps: [
-          { syl: 'pair', n: [2, 5], ioi: [0.4, 0.55], grow: 1.03, rateStep: 1.02 },
+          // pairs (≤ 0.45 s) start at least 0.58 s apart: each inhaled whistle is heard
+          { syl: 'pair', n: [2, 5], ioi: [0.58, 0.64], grow: 1.03, rateStep: 1.02 },
           { ...once('final'), gap: [0.05, 0.15] },
         ],
       },

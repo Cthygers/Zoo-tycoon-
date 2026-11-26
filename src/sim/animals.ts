@@ -652,6 +652,7 @@ export class AnimalSystem {
         undefined,
         old ? undefined : 'death',
       );
+      if (!old) sim.versus?.onLost(`${a.name} the ${singularName(sp.id)} died — hire keepers!`);
       this.remove(a.id);
     }
     // escaped animals unattended for too long are brought back by a rescue team
@@ -900,6 +901,7 @@ export class AnimalSystem {
     sim.progress.bredSpecies.add(sp.id);
     if (first) sim.notify(null, text, 'good', { x: mother.x, z: mother.z }, undefined, 'birth');
     else sim.logMessage(text, 'good', { x: mother.x, z: mother.z });
+    sim.versus?.onBirth(sp.id);
   }
 
   private dropDung(a: AnimalSim, sp: SpeciesDef) {
@@ -1025,6 +1027,7 @@ export class AnimalSystem {
       undefined,
       'death',
     );
+    sim.versus?.onLost(`${prey.name} the ${singularName(psp.id)} went to a sanctuary — keep predators apart!`);
     this.remove(prey.id);
     pred.moving = false;
     pred.goal = 'rest';

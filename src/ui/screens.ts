@@ -1,10 +1,26 @@
 // Full-screen loading screen and title menu, plus the Wildhaven emblem.
 // Everything is drawn with inline SVG/CSS (no image assets).
+//
+// The title menu (spec §7.1): a landscape card (brand left, actions right) with the player chip
+// top-right in cloud builds. What the buttons say and return comes from the pure menuModel
+// (src/ui/account/menuModel.ts); the sign-in sheet, "Who's playing?", first-player setup and
+// "Whose zoo is this?" are pages from src/ui/account.
 
-import type { QualityLevel } from '../core/contracts';
+import type { CloudHandle, SyncPrompts } from '../core/cloud-types';
+import type { MenuResult, PlayerInfo, PlayerRef, QualityLevel } from '../core/contracts';
+import { readActiveSlot, type KV, type TutorialProfileState } from '../core/player-state';
+import { GUEST, KEYS, matchIdOf, slotKey } from '../core/storage-keys';
+import { versusNeedsAttention } from '../versus/record';
+import { avatarEl, closeTopModal, closeTopPage, confirmBox, modalOpen } from './account/dialog';
+import { activeMatchFrom, cloudModeOf, menuModel, needsFirstPlayer, openPickerFirst, startPlayer, type MenuButton, type MenuInput, type MenuModel } from './account/menuModel';
+import { showPicker } from './account/picker';
+import { PICKER_FLAG_KEY } from './account/settings';
+import { addPlayer } from './account/setup';
+import { signInSheet } from './account/signin';
+import { ensureAccountStyles } from './account/styles';
+import { whoseZooFlow } from './account/whosezoo';
 import { button, el, setText, swallowPointer, toggleClass } from './dom';
 import { icon } from './icons';
-import { showDialog } from './panels';
 import { ensureStyles } from './styles';
 
 let uid = 0;
@@ -147,67 +163,330 @@ function savannaBackdrop(): string {
 </svg>`;
 }
 
-export function showMainMenu(
-  root: HTMLElement,
-  opts: { hasSave: boolean; quality: QualityLevel; onQuality(q: QualityLevel): void },
-): Promise<'continue' | 'new'> {
+export interface MainMenuOptions {
+  cloud: CloudHandle;
+  prompts: SyncPrompts;
+  quality: QualityLevel;
+  onQuality(q: QualityLevel): void;
+  /** The player to start with (BootIntent.player, e.g. back from a match); skips "Who's playing?". */
+  preselect?: PlayerRef;
+  /** The Versus hub (signed-in profiles only); resolves with what to boot, or null for Back. */
+  openVersus?(root: HTMLElement, player: PlayerInfo): Promise<MenuResult | null>;
+  tutorialState(p: PlayerRef): TutorialProfileState;
+  /** Storage for the active slot and versus records (default: localStorage). */
+  storage?: KV;
+}
+
+/** The pre-round-14 options (no cloud): Continue / New Zoo only. */
+export interface LegacyMenuOptions {
+  hasSave: boolean;
+  quality: QualityLevel;
+  onQuality(q: QualityLevel): void;
+}
+
+function defaultStorage(): KV {
+  try {
+    return localStorage;
+  } catch {
+    const m = new Map<string, string>();
+    return { getItem: (k) => m.get(k) ?? null, setItem: (k, v) => void m.set(k, v), removeItem: (k) => void m.delete(k) };
+  }
+}
+
+function consumePickerFlag(): boolean {
+  try {
+    const v = sessionStorage.getItem(PICKER_FLAG_KEY);
+    if (v !== null) sessionStorage.removeItem(PICKER_FLAG_KEY);
+    return v === '1';
+  } catch {
+    return false;
+  }
+}
+
+/** Everything menuModel needs, read from the cloud handle and local storage. */
+export function menuInputOf(cloud: CloudHandle, player: PlayerRef, store: KV): MenuInput {
+  const mode = cloudModeOf(cloud.auth.state.get());
+  const signed = mode === 'signed-in' || mode === 'needs-signin';
+  const p = signed && player !== GUEST ? (cloud.profiles.list().find((x) => x.id === player) ?? null) : null;
+  const ref = p ? p.id : GUEST;
+  const activeSlot = readActiveSlot(store, ref);
+  let activeMatch: { matchId: string } | null = null;
+  let versusDot = false;
+  if (p) {
+    const mid = matchIdOf(activeSlot);
+    try {
+      activeMatch = mid ? activeMatchFrom(store.getItem(KEYS.vs(p.id, mid)), mid) : null;
+    } catch {
+      activeMatch = null;
+    }
+    try {
+      versusDot = versusNeedsAttention(store, p.id);
+    } catch {
+      versusDot = false;
+    }
+  }
+  return {
+    cloud: mode,
+    player: ref,
+    name: p?.name ?? null,
+    avatar: p?.avatar ?? null,
+    hasZoo: cloud.local.has(slotKey(ref, 'main')) || !!p?.main,
+    activeSlot,
+    hasPractice: cloud.local.has(slotKey(ref, 'practice')),
+    activeMatch,
+    versusDot,
+  };
+}
+
+/** Android back for the title menu's pages and dialogs (main.ts may call it before the game UI exists). */
+export function menuHandleBack(): boolean {
+  return closeTopModal() || closeTopPage();
+}
+
+interface MenuView {
+  screen: HTMLElement;
+  card: HTMLElement;
+  btns: HTMLElement;
+  q: HTMLElement;
+  foot: HTMLElement;
+  chipSlot: HTMLElement;
+  seg: HTMLElement;
+}
+
+function buildMenu(root: HTMLElement, quality: QualityLevel, onQuality: (q: QualityLevel) => void): MenuView {
+  let current = quality;
+  const levels: QualityLevel[] = ['low', 'medium', 'high'];
+  const seg = el('div', { class: 'wh-segtext', attrs: { role: 'radiogroup', 'aria-label': 'Graphics' } });
+  const qBtns = levels.map((q) =>
+    button(q === current ? 'on' : '', null, q[0].toUpperCase() + q.slice(1), () => {
+      current = q;
+      qBtns.forEach((b, i) => toggleClass(b, 'on', levels[i] === q));
+      onQuality(q);
+    }, `Graphics: ${q}`),
+  );
+  seg.append(...qBtns);
+  const btns = el('div', 'wh-menu-btns');
+  const q = el('div', 'wh-menu-q wh-ac-q');
+  const foot = el('div', { class: 'wh-menu-foot', text: 'An original zoo-building game' });
+  const card = el('div', 'wh-menu-card wh-glass-2', [
+    el('div', 'wh-menu-brand', [
+      el('div', { html: logoSvg() }),
+      el('h1', { class: 'wh-title', html: 'Wildhaven <em>Zoo</em>' }),
+      el('div', { class: 'wh-tagline', text: 'Build · Care · Explore' }),
+    ]),
+    el('div', 'wh-menu-actions', [btns, q, foot]),
+  ]);
+  const chipSlot = el('div', { class: 'wh-ac-chipslot' });
+  const screen = el('div', 'wh-screen wh-menu', [el('div', { html: savannaBackdrop() }), el('div', 'wh-menu-shade'), card, chipSlot]);
+  swallowPointer(screen);
+  root.append(screen);
+  return { screen, card, btns, q, foot, chipSlot, seg };
+}
+
+function menuButton(b: MenuButton, cls: string, onClick: () => void): HTMLButtonElement {
+  const ico = b.id === 'versus' ? 'swords' : b.id === 'new' ? 'plus' : b.id === 'learn' ? 'info' : b.id === 'backToMain' || b.id === 'myZoo' ? 'home' : 'play1';
+  const el2 = button(`${b.style === 'primary' ? 'wh-btn-primary' : 'wh-btn-ghost'} ${cls}`, ico, b.label, onClick);
+  el2.dataset.menu = b.id;
+  if (b.dot) el2.append(el('span', { class: 'wh-ac-dot', attrs: { 'aria-label': 'Something new' } }));
+  return el2;
+}
+
+/** Draw the menu rows for a model; `act` runs a button. */
+function drawRows(v: MenuView, m: MenuModel, act: (b: MenuButton) => void, opts: { learn: boolean; signinAgain?: () => void }): void {
+  const primary = menuButton(m.primary, 'wh-ac-primary', () => act(m.primary));
+  const rows: HTMLElement[] = [primary];
+  if (m.row2.length) rows.push(el('div', 'wh-menu-row2', m.row2.map((b) => menuButton(b, '', () => act(b)))));
+  v.btns.replaceChildren(...rows);
+  const learn = opts.learn ? el('button', { class: 'wh-btn wh-ac-learn', attrs: { type: 'button', 'data-menu': 'learn' }, onClick: () => act(m.learn) }, [el('span', { class: 'wh-btn-label', text: m.learn.label })]) : el('span');
+  v.q.replaceChildren(learn, el('div', 'wh-ac-gfx', [el('span', { text: 'Graphics' }), v.seg]));
+  if (m.signinAgain && opts.signinAgain) {
+    const again = el('button', { class: 'wh-btn wh-ac-foot-btn', attrs: { type: 'button', 'data-menu': 'signinAgain' }, onClick: () => opts.signinAgain?.() }, [
+      el('span', { html: icon('cloudOff') }),
+      el('span', { class: 'wh-btn-label', text: 'Sign in again to keep your zoos safe online' }),
+    ]);
+    v.foot.replaceChildren(again);
+    v.foot.className = '';
+  } else {
+    v.foot.className = 'wh-menu-foot';
+    v.foot.textContent = 'An original zoo-building game';
+  }
+}
+
+function drawChip(v: MenuView, m: MenuModel, onTap: () => void): void {
+  const c = m.chip;
+  toggleClass(v.screen, 'wh-ac-has-chip', !!c);
+  if (!c) {
+    v.chipSlot.replaceChildren();
+    return;
+  }
+  let chip: HTMLElement;
+  if (c.kind === 'signin') {
+    chip = el('button', { class: 'wh-btn wh-glass-2 wh-ac-chip signin', attrs: { type: 'button', 'data-chip': 'signin', 'aria-label': 'Sign in' }, onClick: onTap }, [
+      el('span', { html: icon('cloud') }),
+      el('span', { class: 'wh-ac-chip-name', text: c.label }),
+    ]);
+  } else {
+    const name = c.kind === 'player' ? c.name : c.label;
+    chip = el('button', { class: 'wh-btn wh-glass-2 wh-ac-chip', attrs: { type: 'button', 'data-chip': c.kind, 'aria-label': `Playing as ${name}. Change player` }, onClick: onTap }, [
+      avatarEl(c.kind === 'player' ? c.avatar : null, 36),
+      el('span', { class: 'wh-ac-chip-name', text: name }),
+      c.kind === 'player' && c.needsSignin ? el('span', { class: 'wh-ac-chip-warn', html: icon('cloudOff') }) : null,
+      el('span', { html: icon('chevronDown') }),
+    ]);
+  }
+  v.chipSlot.replaceChildren(chip);
+}
+
+/** The title menu; resolves with what to boot. */
+export function showMainMenu(root: HTMLElement, opts: MainMenuOptions): Promise<MenuResult>;
+/** @deprecated pre-round-14 call (no cloud): resolves 'continue' or 'new'. */
+export function showMainMenu(root: HTMLElement, opts: LegacyMenuOptions): Promise<'continue' | 'new'>;
+export function showMainMenu(root: HTMLElement, opts: MainMenuOptions | LegacyMenuOptions): Promise<MenuResult | 'continue' | 'new'> {
   ensureStyles();
+  ensureAccountStyles();
+  if (!('cloud' in opts)) return legacyMenu(root, opts);
+  const { cloud } = opts;
+  const store = opts.storage ?? defaultStorage();
   return new Promise((resolve) => {
-    let quality = opts.quality;
-    const levels: QualityLevel[] = ['low', 'medium', 'high'];
-    const seg = el('div', 'wh-segtext');
-    const qBtns = levels.map((q) =>
-      button(q === quality ? 'on' : '', null, q[0].toUpperCase() + q.slice(1), () => {
-        quality = q;
-        qBtns.forEach((b, i) => toggleClass(b, 'on', levels[i] === q));
-        opts.onQuality(q);
-      }),
-    );
-    seg.append(...qBtns);
+    const v = buildMenu(root, opts.quality, opts.onQuality);
+    let current: PlayerRef = GUEST;
+    let ready = false;
+    let busy = false;
     let done = false;
-    const finish = (choice: 'continue' | 'new') => {
+    let model: MenuModel | null = null;
+
+    const finish = (r: MenuResult) => {
       if (done) return;
       done = true;
-      screen.classList.add('fade');
-      window.setTimeout(() => screen.remove(), 700);
-      resolve(choice);
+      window.removeEventListener('keydown', onKey);
+      v.screen.classList.add('fade');
+      window.setTimeout(() => v.screen.remove(), 700);
+      resolve(r);
     };
-    const btns = el('div', 'wh-menu-btns');
-    if (opts.hasSave) btns.append(button('wh-btn-primary', 'play1', 'Continue', () => finish('continue')));
-    btns.append(
-      button(opts.hasSave ? 'wh-btn-ghost' : 'wh-btn-primary', 'plus', 'New Zoo', async () => {
-        if (opts.hasSave) {
-          const ok = await showDialog(screen, {
-            title: 'Start a new zoo?',
-            text: 'Your saved zoo will be replaced the next time the game saves.',
-            ok: 'New zoo',
-            danger: true,
-          });
-          if (!ok) return;
+    const withBusy = async <T>(fn: () => Promise<T>): Promise<T> => {
+      busy = true;
+      try {
+        return await fn();
+      } finally {
+        busy = false;
+      }
+    };
+    const signedIn = () => {
+      const k = cloud.auth.state.get().kind;
+      return k === 'signed-in' || k === 'needs-signin';
+    };
+    const render = () => {
+      if (done || !ready) return;
+      // the current player may have gone (removed on another device, signed out)
+      if (current !== GUEST && !(signedIn() && cloud.profiles.list().some((p) => p.id === current))) {
+        current = startPlayer({ mode: cloudModeOf(cloud.auth.state.get()), profiles: cloud.profiles.list(), last: cloud.profiles.last() });
+      }
+      model = menuModel(menuInputOf(cloud, current, store));
+      drawRows(v, model, (b) => void act(b), { learn: true, signinAgain: () => void signInAgain() });
+      drawChip(v, model, () => void chipTap());
+    };
+    const signInAgain = () =>
+      withBusy(async () => {
+        await signInSheet(root, cloud, { text: 'Sign in again with the same Google account to keep your zoos safe online.' });
+        render();
+      });
+    const newPlayer = async (first: boolean) => (await addPlayer(v.screen, cloud, { first }))?.id ?? null;
+    /** After a sign-in (or at start when signed in): first player, whose zoo, who's playing. */
+    const playersFlow = async (o: { preselect?: PlayerRef; forced: boolean }): Promise<PlayerRef> => {
+      const mode = cloudModeOf(cloud.auth.state.get());
+      if (mode === 'disabled' || mode === 'guest') return GUEST;
+      let first: string | null = null;
+      if (needsFirstPlayer(mode, cloud.profiles.list().length)) first = await newPlayer(true);
+      const adopted = await whoseZooFlow(v.screen, cloud, () => newPlayer(false));
+      if (adopted) return adopted;
+      if (first) return first;
+      const list = cloud.profiles.list();
+      if (openPickerFirst({ mode, profiles: list.length, preselect: o.preselect, forced: o.forced })) {
+        const r = await showPicker({ cloud, container: v.screen, dialogRoot: root, highlight: cloud.profiles.last(), closable: false, signInAgain: () => signInAgain() });
+        if (r) return r;
+      }
+      return startPlayer({ mode, profiles: list, preselect: o.preselect, last: cloud.profiles.last() });
+    };
+    const chipTap = () =>
+      withBusy(async () => {
+        if (!model?.chip) return;
+        if (model.chip.kind === 'signin') {
+          const out = await signInSheet(root, cloud);
+          if (out?.kind === 'ok') current = await playersFlow({ forced: false });
+        } else {
+          const r = await showPicker({ cloud, container: v.screen, dialogRoot: root, highlight: current, closable: true, signInAgain: () => signInAgain() });
+          if (r) current = r;
         }
-        finish('new');
-      }),
-    );
-    const card = el('div', 'wh-menu-card wh-glass-2', [
-      el('div', 'wh-menu-brand', [
-        el('div', { html: logoSvg() }),
-        el('h1', { class: 'wh-title', html: 'Wildhaven <em>Zoo</em>' }),
-        el('div', { class: 'wh-tagline', text: 'Build · Care · Explore' }),
-      ]),
-      el('div', 'wh-menu-actions', [btns, el('div', 'wh-menu-q', [el('span', { text: 'Graphics' }), seg]), el('div', { class: 'wh-menu-foot', text: 'An original zoo-building game' })]),
-    ]);
-    const screen = el('div', 'wh-screen wh-menu', [el('div', { html: savannaBackdrop() }), el('div', 'wh-menu-shade'), card]);
-    swallowPointer(screen);
-    root.append(screen);
+        render();
+      });
+    const act = (b: MenuButton) =>
+      withBusy(async () => {
+        if (b.action.kind === 'versus') {
+          if (!opts.openVersus) return;
+          const r = await opts.openVersus(root, cloud.profiles.player(current));
+          if (r) finish(r);
+          else render();
+          return;
+        }
+        const a = b.action;
+        if (a.confirm && !(await confirmBox(root, { title: a.confirm.title, text: a.confirm.text, ok: a.confirm.ok, danger: true }))) return;
+        finish(a.result);
+      });
     const onKey = (e: KeyboardEvent) => {
-      if (done) {
-        window.removeEventListener('keydown', onKey);
-        return;
+      if (done || busy || !model || modalOpen() || v.screen.querySelector('.wh-ac-page')) return;
+      if (e.code === 'Enter' || e.code === 'NumpadEnter') {
+        e.preventDefault();
+        void act(model.primary);
       }
-      if (e.code === 'Enter' && !screen.querySelector('.wh-dialog')) {
-        window.removeEventListener('keydown', onKey);
-        finish(opts.hasSave ? 'continue' : 'new');
+    };
+    window.addEventListener('keydown', onKey);
+
+    void (async () => {
+      const mode = cloudModeOf(cloud.auth.state.get());
+      if (mode === 'signed-in') {
+        // fresh names, removed players and summaries; also pushes dirty zoos and stashes (spec §3.10)
+        void cloud.profiles
+          .refresh()
+          .then(() => render())
+          .catch(() => undefined);
       }
+      try {
+        current = await withBusy(() => playersFlow({ preselect: opts.preselect, forced: consumePickerFlag() }));
+      } catch (e) {
+        console.warn('[menu] players', e);
+        current = GUEST;
+      }
+      ready = true;
+      render();
+    })();
+  });
+}
+
+/** The old two-button menu for callers without a cloud handle. */
+function legacyMenu(root: HTMLElement, opts: LegacyMenuOptions): Promise<'continue' | 'new'> {
+  return new Promise((resolve) => {
+    const v = buildMenu(root, opts.quality, opts.onQuality);
+    let done = false;
+    const m = menuModel({ cloud: 'disabled', player: GUEST, name: null, avatar: null, hasZoo: opts.hasSave, activeSlot: 'main', hasPractice: false, activeMatch: null });
+    const finish = (r: 'continue' | 'new') => {
+      if (done) return;
+      done = true;
+      window.removeEventListener('keydown', onKey);
+      v.screen.classList.add('fade');
+      window.setTimeout(() => v.screen.remove(), 700);
+      resolve(r);
+    };
+    const act = async (b: MenuButton) => {
+      if (b.action.kind !== 'result') return;
+      const a = b.action;
+      if (a.confirm && !(await confirmBox(root, { title: a.confirm.title, text: a.confirm.text, ok: a.confirm.ok, danger: true }))) return;
+      finish(a.result.kind === 'continue' ? 'continue' : 'new');
+    };
+    drawRows(v, m, (b) => void act(b), { learn: false });
+    drawChip(v, m, () => {});
+    const onKey = (e: KeyboardEvent) => {
+      if (done || modalOpen()) return;
+      if (e.code === 'Enter') void act(m.primary);
     };
     window.addEventListener('keydown', onKey);
   });

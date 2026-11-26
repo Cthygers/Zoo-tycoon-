@@ -60,6 +60,8 @@ export interface SylDef {
   idle?: boolean;
   /** Final high-pass, Hz. */
   hp?: number;
+  /** Soft saturation before normalisation (Recipe.squash): tames the crest factor of pulsed calls. */
+  squash?: number;
 }
 
 /** Golden-ratio spread in [0, 1): variants 0, 1, 2... land far apart. */
@@ -217,6 +219,13 @@ function shift(f: readonly Formant3[], s: number): Formant3[] {
   return f.map(([hz, bw, db]) => [hz * s, bw * s, db] as const);
 }
 
+/**
+ * Chest resonance under a big cat's or bear's call: with the syllable
+ * high-pass below the fundamental, headphones get the body of the voice (the
+ * phone-weighted level normalisation all but ignores it).
+ */
+const CHEST: Formant3 = [130, 90, -6];
+
 // ------------------------------------------------------------------ lion
 
 const F_LION: Formant3[] = [
@@ -237,7 +246,7 @@ const lionMoan: SylGen = (k, t, d, v) => {
     jitter: 0.03,
     pd: [[0, 0.2, 0.3]],
     aspiration: 0.25,
-    formants: vary(k.rng, v, [[300, 110, -3], [800, 160, 0], [1500, 230, -6], [2400, 320, -10]]),
+    formants: [CHEST, ...vary(k.rng, v, [[300, 110, -3], [800, 160, 0], [1500, 230, -6], [2400, 320, -10]])],
     drive: 1.2,
     noise: { level: 0.12, lo: 500, hi: 1400 },
   });
@@ -259,7 +268,7 @@ const lionRoar: SylGen = (k, t, d, v) => {
     chaos: [[0.45, 0.8, r.range(0.06, 0.09)]],
     pd: [[0.8, 0.95, 0.3]],
     aspiration: 0.45,
-    formants: vary(k.rng, v, [[f1, 110, -1], [f2, 160, -1], [1550, 230, -6], [2400, 320, -10]], 0.4),
+    formants: [...vary(k.rng, v, [[f1, 110, -1], [f2, 160, -1], [1550, 230, -6], [2400, 320, -10]], 0.4), CHEST],
     fmove: [[[0, f1], [d, f1 * 0.9]], [[0, f2], [d, f2 * 0.9]]],
     drive: 1.3,
     noise: { level: 0.1, lo: 600, hi: 1500 },
@@ -342,7 +351,7 @@ const tigerMain: SylGen = (k, t, d, v) => {
     chaos: [[0, 0.25, 0.08]],
     pd: [[0.7, 0.9, 0.3]],
     aspiration: 0.35,
-    formants: vary(k.rng, v, F_TIGER, 0.5),
+    formants: [...vary(k.rng, v, F_TIGER, 0.5), CHEST],
     fmove: [[[0, 350], [d * 0.4, 400], [d, 330]]],
     drive: 1.3,
     noise: { level: 0.08, lo: 700, hi: 1800 },
@@ -382,13 +391,17 @@ const tigerHiss: SylGen = (k, t, d, v) => band(k, t, d, env(d, 0.03, d * 0.4, 0.
 
 // ------------------------------------------------------------------ elephant
 
-/** Nasal rumble formants with presence bands, so the 15–20 Hz pulsing is heard on a phone. */
+/**
+ * Nasal rumble formants: a real low body (40 Hz, felt on headphones; the
+ * phone-weighted level normalisation all but ignores it), and presence bands
+ * at 330–800 Hz so the 15–20 Hz pulsing is heard on a phone.
+ */
 const F_RUMBLE: Formant3[] = [
-  [40, 30, -18],
-  [165, 50, -14],
-  [330, 80, 2.5],
-  [520, 110, 5],
-  [800, 160, 0],
+  [40, 30, -6],
+  [165, 50, -12],
+  [330, 60, 2.5],
+  [520, 70, 5],
+  [800, 100, 0],
   [1250, 220, -8],
 ];
 
@@ -398,14 +411,19 @@ const elephantRumble: SylGen = (k, t, d, v) => {
   voice(k, {
     t,
     dur: d,
-    f0: [[0, 13 * s], [d * r.range(0.2, 0.35), 20 * s], [d * 0.7, 18 * s], [d, 14 * s]],
+    f0: [[0, 14 * s], [d * r.range(0.2, 0.35), 20 * s], [d * 0.7, 18 * s], [d, 15 * s]],
     amp: env(d, d * 0.25, d * 0.3, 0.9),
-    oq: 0.45,
+    // a soft-closing source and a gentle drive: the pulses purr instead of clicking
+    oq: 0.6,
+    tilt: 0.6,
     jitter: 0.03,
     shimmer: 0.1,
-    aspiration: 0.3,
+    aspiration: 0.15,
     formants: vary(k.rng, v, F_RUMBLE, 0.25),
-    drive: 1.6,
+    drive: 1.1,
+    // breath through the trunk fills the gaps between the slow pulses (a lower crest factor)
+    noise: { level: 0.2, lo: 250, hi: 900 },
+    lp: 1400,
   });
 };
 
@@ -433,21 +451,35 @@ const elephantTrumpet: SylGen = (k, t, d, v) => {
   });
 };
 
-/** Snort through the trunk: a pipe comb (70 Hz spacing, 210–490 Hz) plus a 1–3 kHz blast. */
-const elephantSnort: SylGen = (k, t, d) => {
+/**
+ * Snort through the trunk: a pipe comb (~70 Hz spacing, 210–490 Hz) plus a
+ * 1–3 kHz blast. The variant sets the trunk length and the pattern: a single
+ * blast, a double snort or a blast that ends in a trunk-tip flutter.
+ */
+const elephantSnort: SylGen = (k, t, d, v) => {
   const r = k.rng;
   const nz = k.noise('pink', t, t + d + 0.02);
   const sum = k.gain(1);
-  const pipe = 70 * r.range(0.93, 1.07);
+  const pipe = 70 * (1 + (vshift(v) - 1) * 0.4) * r.range(0.96, 1.04);
   for (let h = 3; h <= 7; h++) {
     const b = k.bq('bandpass', pipe * h, 8);
     nz.connect(b);
     b.connect(k.gain(2.2, sum));
   }
   k.chain(nz, k.bq('highpass', 1000), k.bq('lowpass', 3000), k.gain(0.5, sum));
+  let node: AudioNode = sum;
+  if (v % 3 === 2) {
+    const g = k.gain(0.75);
+    k.mod(k.osc('sine', t, t + d + 0.02, r.range(16, 24)), 0.25, g.gain);
+    node = k.chain(node, g);
+  }
   const e = k.gain(0);
-  sum.connect(e);
-  k.path(e.gain, t, [[0, 0], [0.012, 1], [d * 0.3, 0.7], [d * 0.7, 0.35], [d, 0]]);
+  node.connect(e);
+  const shape: Pt[] =
+    v % 3 === 1
+      ? [[0, 0], [0.01, 0.8], [d * 0.3, 0.2], [d * 0.38, 0], [d * 0.42, 1], [d * 0.7, 0.4], [d, 0]]
+      : [[0, 0], [0.012, 1], [d * 0.3, 0.7], [d * 0.7, 0.35], [d, 0]];
+  k.path(e.gain, t, shape);
   k.send(e, 1, WET);
 };
 
@@ -583,10 +615,14 @@ const F_BARK: Formant3[] = [
   [3000, 400, -10],
 ];
 
-/** One bray cycle: a noisy inhaled squeal, then the exhaled bark. */
+/**
+ * One bray cycle: a noisy inhaled squeal, then the exhaled bark (0.15–0.24 s).
+ * Cycles are shorter than the bout's onset interval, so the squeal of the next
+ * cycle is never covered by the previous bark.
+ */
 const zebraCycle: SylGen = (k, t, d, v) => {
   const r = k.rng;
-  const inh = r.range(0.07, 0.12);
+  const inh = r.range(0.06, 0.1);
   const fi = r.range(900, 1400);
   voice(k, {
     t,
@@ -599,7 +635,7 @@ const zebraCycle: SylGen = (k, t, d, v) => {
     noise: { level: 0.3, lo: 2000, hi: 5000 },
     level: Math.pow(10, -r.range(3, 6) / 20),
   });
-  const tb = Math.min(d - 0.15, r.range(0.12, 0.16));
+  const tb = Math.min(d - 0.15, r.range(0.1, 0.13));
   const bd = d - tb;
   const s = r.range(0.88, 1.12);
   voice(k, {
@@ -656,19 +692,24 @@ function brayF0(v: number, pitch: number): number {
   return (400 + 300 * spread(v + 3)) * pitch;
 }
 
-/** Exhaled donkey-like bray. */
-function bray(r: Rng, t: number, d: number, v: number, f: number, sag: number, level = 1): VoiceSpec {
+/**
+ * Exhaled donkey-like bray: rough for half or more of its length, and
+ * period-doubled in about a third of the brays (a harsh, buzzing bray).
+ */
+function bray(r: Rng, t: number, d: number, v: number, f: number, sag: number, level = 1, f0?: readonly Pt[]): VoiceSpec {
+  const c0 = r.range(0.1, 0.3);
   return {
     t,
     dur: d,
-    f0: [[0, f * 0.85], [d * 0.25, f], [d * 0.6, f * 0.95], [d, f * sag]],
+    f0: f0 ?? [[0, f * 0.85], [d * 0.25, f], [d * 0.6, f * 0.95], [d, f * sag]],
     amp: [[0, 0], [0.02, 1], [d * 0.6, 0.8], [d, 0]],
     oq: 0.45,
-    jitter: 0.02,
-    chaos: [[r.range(0.2, 0.35), r.range(0.6, 0.75), 0.06]],
-    aspiration: 0.25,
+    jitter: 0.025,
+    chaos: [[c0, c0 + r.range(0.5, 0.7), r.range(0.06, 0.1)]],
+    pd: r.chance(0.3) ? [[r.range(0.1, 0.4), r.range(0.6, 0.9), 0.3]] : undefined,
+    aspiration: 0.3,
     formants: vary(r, v, shift(F_BRAY, Math.sqrt(f / 550))),
-    drive: 1.5,
+    drive: 1.6,
     level,
   };
 }
@@ -695,7 +736,31 @@ export const penguinPairSpecs: SpecGen = (r, t, d, v, o = {}) => {
 
 export const penguinContactSpecs: SpecGen = (r, t, d, v, o = {}) => [bray(r, t, d, v, brayF0(v + 2, o.pitch ?? 1), 0.88, o.level)];
 
-const penguinFinalSpecs: SpecGen = (r, t, d, v) => [bray(r, t, d, v, brayF0(v + 1, 1) * 1.05, 0.8)];
+/** The display's long final bray: a noisy inhaled onset, then a rising-then-falling 'hee-haw'. */
+const penguinFinalSpecs: SpecGen = (r, t, d, v) => {
+  const f = brayF0(v + 1, 1) * 1.05;
+  const inh = r.range(0.08, 0.12);
+  const onset: VoiceSpec = {
+    t,
+    dur: inh,
+    f0: [[0, f * 1.3], [inh, f * 1.45]],
+    amp: env(inh, inh * 0.5, inh * 0.3, 0.8),
+    tilt: 0.4,
+    jitter: 0.03,
+    aspiration: 0.7,
+    formants: vary(r, v, [[1100, 200, 0], [2500, 350, -5]]),
+    noise: { level: 0.5, lo: 900, hi: 3000 },
+    level: 0.5,
+  };
+  const db = d - inh - 0.02;
+  const peak = r.range(0.3, 0.45);
+  const contour: Pt[] = [[0, f * 0.85], [db * peak, f * r.range(1.1, 1.2)], [db * (peak + 0.15), f * 1.05], [db, f * r.range(0.75, 0.85)]];
+  // the display's climax is harsh: rough throughout and period-doubled at its peak
+  const main = bray(r, t + inh + 0.02, db, v, f, 0.8, 1, contour);
+  main.chaos = [[0.1, 0.9, r.range(0.08, 0.12)]];
+  main.pd = [[peak - 0.1, peak + 0.3, 0.35]];
+  return [onset, main];
+};
 
 // ------------------------------------------------------------------ flamingo
 
@@ -826,7 +891,7 @@ const bearRoar: SylGen = (k, t, d, v) => {
     chaos: [[0.2, 0.8, 0.08]],
     pd: [[0.8, 0.95, 0.3]],
     aspiration: 0.4,
-    formants: vary(k.rng, v, F_BEAR),
+    formants: [...vary(k.rng, v, F_BEAR), CHEST],
     drive: 1.4,
     noise: { level: 0.12, lo: 500, hi: 1500 },
   });
@@ -925,7 +990,8 @@ const giraffeHum: SylGen = (k, t, d, v) => {
     shimmer: 0.08,
     pd: v % 2 === 1 ? [[0.4, 0.6, 0.25]] : undefined,
     aspiration: 0.2,
-    formants: vary(k.rng, v, [[250, 60, 0], [520, 90, -3], [900, 150, -8]]),
+    // a 700–1000 Hz presence band carries the hum on a phone; the 250 Hz body stays subtle
+    formants: vary(k.rng, v, [[250, 60, -6], [520, 90, -5], [850, 160, 0], [1500, 220, -10]]),
     drive: 1.1,
   });
 };
@@ -1113,27 +1179,31 @@ const hippoCalf: SylGen = (k, t, d, v) => {
 const BEAR: Record<string, SylDef> = {
   huff: { n: 4, d: [0.15, 0.3], rate: 16000, gen: bearHuff, hp: 150 },
   jawpop: { n: 4, d: [0.03, 0.03], rate: 22050, gen: jawpop(false), hp: 200 },
-  moan: { n: 2, d: [0.6, 1.1], rate: 16000, gen: bearMoan, hp: 150 },
-  growl: { n: 2, d: [0.8, 1.2], rate: 16000, gen: bearGrowl, hp: 150 },
-  roar: { n: 1, d: [1.3, 1.3], rate: 16000, gen: bearRoar, hp: 150 },
+  moan: { n: 2, d: [0.6, 1.1], rate: 16000, gen: bearMoan, hp: 75 },
+  growl: { n: 2, d: [0.8, 1.2], rate: 16000, gen: bearGrowl, hp: 75 },
+  roar: { n: 1, d: [1.3, 1.3], rate: 16000, gen: bearRoar, hp: 75 },
   sniff: { n: 2, d: [0.8, 1.1], rate: 22050, gen: bearSniff, idle: true, hp: 300 },
 };
 
-/** Syllable banks per voice id: the single source of variant counts, durations and rates. */
+/**
+ * Syllable banks per voice id: the single source of variant counts, durations
+ * and rates. 16 kHz wherever a voice has little above 7 kHz (it saves memory
+ * for more variants); 22.05 kHz for clicks, trumpets, honks and hisses.
+ */
 export const SYLLABLES: Readonly<Record<string, Readonly<Record<string, SylDef>>>> = {
   lion: {
-    moan: { n: 2, d: [0.6, 0.9], rate: 16000, gen: lionMoan, hp: 180 },
-    roar: { n: 3, d: [1.3, 1.7], rate: 16000, gen: lionRoar, hp: 220 },
-    grunt: { n: 5, d: [0.3, 0.45], rate: 16000, gen: lionGrunt, hp: 180 },
+    moan: { n: 6, d: [0.6, 0.9], rate: 16000, gen: lionMoan, hp: 70 },
+    roar: { n: 6, d: [1.3, 1.7], rate: 16000, gen: lionRoar, hp: 75 },
+    grunt: { n: 5, d: [0.3, 0.45], rate: 16000, gen: lionGrunt, hp: 75 },
     inhale: { n: 2, d: [0.22, 0.32], rate: 16000, gen: lionInhale, hp: 200 },
     huff: { n: 3, d: [0.25, 0.4], rate: 16000, gen: lionHuff, idle: true, hp: 150 },
-    growl: { n: 2, d: [0.7, 1.0], rate: 16000, gen: lionGrowl, hp: 180 },
+    growl: { n: 2, d: [0.7, 1.0], rate: 16000, gen: lionGrowl, hp: 70 },
     juv: { n: 3, d: [0.4, 0.7], rate: 16000, gen: lionCub, hp: 250 },
   },
   tiger: {
-    main: { n: 3, d: [1.1, 1.5], rate: 16000, gen: tigerMain, hp: 150 },
+    main: { n: 3, d: [1.1, 1.5], rate: 16000, gen: tigerMain, hp: 75 },
     prusten: { n: 3, d: [0.4, 0.7], rate: 16000, gen: tigerPrusten, idle: true, hp: 200 },
-    growl: { n: 2, d: [0.9, 1.3], rate: 16000, gen: tigerGrowl, hp: 150 },
+    growl: { n: 2, d: [0.9, 1.3], rate: 16000, gen: tigerGrowl, hp: 70 },
     hiss: { n: 1, d: [0.5, 0.5], rate: 16000, gen: tigerHiss, hp: 600 },
   },
   grizzly: BEAR,
@@ -1144,9 +1214,9 @@ export const SYLLABLES: Readonly<Record<string, Readonly<Record<string, SylDef>>
     hiss: { n: 1, d: [0.6, 0.6], rate: 22050, gen: bearHiss, hp: 800 },
   },
   elephant: {
-    rumble: { n: 3, d: [2.0, 2.8], rate: 16000, gen: elephantRumble, hp: 130 },
+    rumble: { n: 3, d: [2.0, 2.8], rate: 16000, gen: elephantRumble, hp: 32, squash: 1.5 },
     trumpet: { n: 3, d: [0.6, 1.4], rate: 22050, gen: elephantTrumpet, hp: 250 },
-    snort: { n: 2, d: [0.3, 0.6], rate: 22050, gen: elephantSnort, idle: true, hp: 150 },
+    snort: { n: 6, d: [0.3, 0.6], rate: 16000, gen: elephantSnort, idle: true, hp: 150 },
     juv: { n: 3, d: [0.3, 0.7], rate: 16000, gen: elephantCalf, hp: 300 },
   },
   hippo: {
@@ -1164,7 +1234,7 @@ export const SYLLABLES: Readonly<Record<string, Readonly<Record<string, SylDef>>
   },
   giraffe: {
     snort: { n: 2, d: [0.2, 0.4], rate: 22050, gen: giraffeSnort, idle: true, hp: 300 },
-    hum: { n: 3, d: [0.4, 1.6], rate: 16000, gen: giraffeHum, idle: true, hp: 120 },
+    hum: { n: 3, d: [0.4, 1.6], rate: 16000, gen: giraffeHum, hp: 120, squash: 2.2 },
   },
   camel: {
     groan: { n: 3, d: [1.0, 2.0], rate: 16000, gen: camelGroan, hp: 150 },
@@ -1172,26 +1242,26 @@ export const SYLLABLES: Readonly<Record<string, Readonly<Record<string, SylDef>>
     gurgle: { n: 2, d: [1.0, 1.6], rate: 16000, gen: camelGurgle, hp: 120 },
   },
   zebra: {
-    cycle: { n: 5, d: [0.39, 0.49], rate: 22050, gen: zebraCycle, hp: 250 },
-    final: { n: 2, d: [0.3, 0.4], rate: 22050, gen: zebraFinal, hp: 250 },
-    blow: { n: 3, d: [0.4, 0.7], rate: 22050, gen: zebraBlow, idle: true, hp: 180 },
+    cycle: { n: 5, d: [0.28, 0.34], rate: 16000, gen: zebraCycle, hp: 250 },
+    final: { n: 2, d: [0.3, 0.4], rate: 16000, gen: zebraFinal, hp: 250 },
+    blow: { n: 3, d: [0.4, 0.7], rate: 16000, gen: zebraBlow, idle: true, hp: 180 },
     snort: { n: 2, d: [0.12, 0.18], rate: 22050, gen: zebraSnort, hp: 400 },
     juv: { n: 3, d: [0.3, 0.6], rate: 16000, gen: zebraFoal, hp: 400 },
   },
   gazelle: {
     snort: { n: 3, d: [0.08, 0.15], rate: 22050, gen: gazelleSnort, hp: 600 },
-    bleat: { n: 3, d: [0.3, 0.6], rate: 22050, gen: gazelleBleat, idle: true, hp: 250 },
+    bleat: { n: 3, d: [0.3, 0.6], rate: 16000, gen: gazelleBleat, idle: true, hp: 250 },
   },
   gorilla: {
     hoot: { n: 4, d: [0.1, 0.3], rate: 16000, gen: gorillaHoot, hp: 120 },
-    beat: { n: 3, d: [0.8, 1.4], rate: 22050, gen: gorillaBeat, hp: 150 },
+    beat: { n: 3, d: [0.8, 1.4], rate: 16000, gen: gorillaBeat, hp: 150 },
     belch: { n: 4, d: [0.3, 0.7], rate: 16000, gen: gorillaBelch, idle: true, hp: 190 },
-    piggrunt: { n: 3, d: [0.07, 0.1], rate: 16000, gen: gorillaPiggrunt, hp: 150 },
+    piggrunt: { n: 6, d: [0.07, 0.1], rate: 16000, gen: gorillaPiggrunt, hp: 150 },
   },
   penguin: {
-    pair: { n: 4, d: [0.35, 0.6], rate: 22050, gen: fromSpecs(penguinPairSpecs), hp: 300 },
-    final: { n: 3, d: [0.6, 1.1], rate: 22050, gen: fromSpecs(penguinFinalSpecs), hp: 300 },
-    contact: { n: 3, d: [0.3, 0.7], rate: 22050, gen: fromSpecs(penguinContactSpecs), idle: true, hp: 300 },
+    pair: { n: 4, d: [0.33, 0.45], rate: 16000, gen: fromSpecs(penguinPairSpecs), hp: 300 },
+    final: { n: 3, d: [0.7, 1.1], rate: 16000, gen: fromSpecs(penguinFinalSpecs), hp: 300 },
+    contact: { n: 6, d: [0.3, 0.7], rate: 16000, gen: fromSpecs(penguinContactSpecs), idle: true, hp: 300 },
     juv: { n: 3, d: [0.45, 0.75], rate: 16000, gen: penguinChick, hp: 800 },
   },
   flamingo: {
@@ -1215,6 +1285,7 @@ function sylRecipes(): Record<string, Recipe> {
           rms: def.idle ? 0.12 : 0.14,
           // a per-variant low cut: variants differ in body as well as in contour
           hp: def.hp && def.hp * (0.8 + 0.5 * spread(v + 2)),
+          squash: def.squash,
           build: (k) => def.gen(k, 0, d, v),
         };
       }

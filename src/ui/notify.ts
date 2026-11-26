@@ -398,6 +398,38 @@ function popupGap(r: ScreenRect, sx: number, sy: number, halfW: number): number 
 }
 
 /** Pooled floating money labels anchored to world positions. */
+/** Seconds between money popups in one screen cell during a versus match (V7). */
+export const POPUP_CELL_GAP = 0.5;
+
+/** One screen cell's last shown popup (s) and the amount dropped since then. */
+export interface PopupCellState {
+  at: number;
+  carry: number;
+}
+
+/** Cell (0..8, row by row) of a 3×3 grid over a w×h view; points off the view count to the nearest cell. */
+export function popupCell(sx: number, sy: number, w: number, h: number): number {
+  const col = Math.max(0, Math.min(2, Math.floor((sx / Math.max(1, w)) * 3)));
+  const row = Math.max(0, Math.min(2, Math.floor((sy / Math.max(1, h)) * 3)));
+  return row * 3 + col;
+}
+
+/**
+ * Feedback density in a versus match (4× pace): at most one money popup per `gap` seconds per
+ * screen cell. Returns the amount to show, with the amounts dropped in that cell since its last
+ * popup summed in, or null to drop this one (its amount is carried to the cell's next popup).
+ */
+export function throttlePopup(state: Map<number, PopupCellState>, cell: number, now: number, amount: number, gap = POPUP_CELL_GAP): number | null {
+  const c = state.get(cell);
+  if (c && now - c.at < gap) {
+    c.carry += amount;
+    return null;
+  }
+  const total = amount + (c?.carry ?? 0);
+  state.set(cell, { at: now, carry: 0 });
+  return total;
+}
+
 export class MoneyPopups {
   readonly root = el('div', 'wh-popups');
   private pool: Popup[] = [];
@@ -430,7 +462,7 @@ export class MoneyPopups {
 
   /**
    * `top`: bottom edge (px) of the top bar; `covers`: other HUD rects over the view (the next-goal
-   * pill, the tour's bubble). A popup rising towards any of them fades out first.
+   * pill, rects UI extensions reserve such as the tutorial's bubble). A popup rising towards any of them fades out first.
    */
   update(dt: number, width: number, height: number, top = 0, covers: readonly ScreenRect[] = []): void {
     if (!this.activeCount) return;

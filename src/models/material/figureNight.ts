@@ -57,12 +57,21 @@ vec3 figNightToneMapping( vec3 color ) {
 #define toneMapping figNightToneMapping
 #endif`;
 
-/** Before <aomap_fragment> (after the lights): neutral moonlit light in the albedo's hue, and the grade mark. */
+/**
+ * Before <aomap_fragment> (after the lights): neutral moonlit light in the
+ * albedo's hue, and the grade mark. The hue comes from the albedo clamped at
+ * zero: fur partings and clumps leave single pixels with a slightly negative
+ * albedo (black either way), whose near-zero luminance turned the division
+ * into a light gain of hundreds there, glowing points with bloom halos on the
+ * post-FX tier (and specks on the others). With a non-negative albedo the
+ * result is unchanged and stays within the brightest channel of the light.
+ */
 function fragmentLight(share: string): string {
   return /* glsl */ `
 if (uFigureNight > 0.0) {
   float fnK = uFigureNight * clamp(${share}, 0.0, 1.0);
-  vec3 fnHue = diffuseColor.rgb / max(dot(diffuseColor.rgb, ${LUMA}), 1e-4);
+  vec3 fnAlb = max(diffuseColor.rgb, 0.0);
+  vec3 fnHue = fnAlb / max(dot(fnAlb, ${LUMA}), 1e-4);
   float fnL = ${FIGURE_NIGHT.light.toFixed(2)} * fnK;
   reflectedLight.directDiffuse = mix(reflectedLight.directDiffuse, dot(reflectedLight.directDiffuse, ${LUMA}) * fnHue, fnL);
   reflectedLight.indirectDiffuse = mix(reflectedLight.indirectDiffuse, dot(reflectedLight.indirectDiffuse, ${LUMA}) * fnHue, fnL);

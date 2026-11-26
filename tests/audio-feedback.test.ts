@@ -219,3 +219,44 @@ describe('feedback module: crate and pause', () => {
     expect(host.plays.length).toBe(0);
   });
 });
+
+describe('feedback module: versus pace', () => {
+  /** Transactions heard over `seconds` with one popup every `every` s (kinds rotating) at the sim's pace. */
+  function transactions(pace: number, every: number, seconds: number): number {
+    const { sim, host, run, callTimes } = setup();
+    (sim as unknown as { paceScale: number }).paceScale = pace;
+    const kinds: MoneyKind[] = ['admissions', 'shopIncome', 'donations', 'other'];
+    let n = 0;
+    let next = 0;
+    run(seconds, (t) => {
+      if (t + 1e-9 < next) return;
+      next += every;
+      host.events.emit('moneyPopup', { x: 2, z: 1, amount: 5, kind: kinds[n++ % kinds.length] });
+    });
+    return new Set(callTimes).size;
+  }
+
+  it('keeps a locked-4× match as sparse as 1×: four times the popups, the same transactions', () => {
+    const at1 = transactions(1, 8, 160);
+    const at4 = transactions(4, 2, 160);
+    expect(at1).toBeGreaterThanOrEqual(15);
+    expect(at4).toBeGreaterThanOrEqual(0.75 * at1);
+    expect(at4).toBeLessThanOrEqual(1.25 * at1);
+    // unpaced, the same 4× stream would play far more
+    expect(transactions(1, 2, 160)).toBeGreaterThan(1.8 * at1);
+  });
+
+  it('spaces repeats of the same note by the pace (escapes still ring every time)', () => {
+    const notes = (pace: number) => {
+      const { sim, host, run } = setup();
+      (sim as unknown as { paceScale: number }).paceScale = pace;
+      for (let k = 0; k < 6; k++) {
+        host.events.emit('notify', notify('birth'));
+        run(40);
+      }
+      return host.plays.filter((p) => p.spec.id === 'cue.note.good').length;
+    };
+    expect(notes(1)).toBe(6);
+    expect(notes(4)).toBe(2);
+  });
+});

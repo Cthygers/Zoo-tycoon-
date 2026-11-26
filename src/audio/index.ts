@@ -28,6 +28,8 @@ class SilentAudio implements IAudio {
   follow(animalId: number | null): void {
     this.followId = animalId;
   }
+  /** The tutorial's read-aloud duck (ZooAudio.speechDuck): nothing to duck here. */
+  speechDuck(_on: boolean): void {}
   setEnabled(on: boolean): void {
     this.enabled = on;
   }

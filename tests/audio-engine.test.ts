@@ -10,7 +10,17 @@ import { MAP_H, MAP_W, TILE } from '../src/core/constants';
 import type { ISimulation } from '../src/core/contracts';
 import { EventBus } from '../src/core/events';
 import { Terrain, type AnimalState, type GuestState } from '../src/core/types';
-import { FakeAudioContext, steepestRamp, type FakeGain, type FakeParam, type FakeSource } from './helpers/fakeAudio';
+import { FakeAudioContext, FakeNode, FakeParam, steepestRamp, type FakeGain, type FakeSource } from './helpers/fakeAudio';
+
+// The split shared reverb feeds its later IR segments through DelayNodes; give the
+// helper's context one until it has its own.
+if (!('createDelay' in FakeAudioContext.prototype)) {
+  Object.assign(FakeAudioContext.prototype, {
+    createDelay(this: FakeAudioContext) {
+      return Object.assign(new FakeNode(this), { delayTime: new FakeParam(this, 0) });
+    },
+  });
+}
 
 vi.mock('../src/audio/render', async (orig) => {
   const m = await orig<typeof import('../src/audio/render')>();
@@ -74,9 +84,12 @@ interface Internals {
   loops: Map<string, unknown>;
   sounds: Map<string, { buffer: unknown }>;
   pending: Set<string>;
-  chan: Record<'ambience' | 'world' | 'ui' | 'music', { vol: FakeGain; duck: FakeGain; input: FakeGain }>;
+  chan: Record<'ambience' | 'world' | 'ui' | 'music', { vol: FakeGain; duck: FakeGain; input: FakeGain; trim: FakeGain }>;
   master: FakeGain;
   beds: Map<string, { playing: boolean }>;
+  focusEq: { gain: FakeParam };
+  animalBus: FakeGain;
+  reverbIn: FakeGain;
 }
 
 const created: ZooAudio[] = [];
@@ -442,5 +455,234 @@ describe('beds', () => {
     } finally {
       for (const [id, r] of saved) if (r) RECIPES[id] = r;
     }
+  });
+});
+
+describe('mix: focus views, altitude trim, speech duck', () => {
+  const db = (p: FakeParam, t: number) => 20 * Math.log10(p.valueAt(t));
+  /** Run a lion at (100, 100) under a camera `dist` m from it; `setup` follows, selects or removes it. */
+  function scene(dist: number, setup: (audio: ZooAudio, events: EventBus, sim: Sim) => void = () => {}, seconds = 2) {
+    const sim = fakeSim();
+    sim.animals.set(1, animal(1, 'lion', 100, 100));
+    const events = new EventBus();
+    const ctx = new FakeAudioContext();
+    const audio = new ZooAudio(sim as unknown as ISimulation, events, { context: ctx as unknown as BaseAudioContext, modules: {} });
+    created.push(audio);
+    const i = audio as unknown as Internals;
+    setup(audio, events, sim);
+    const v = view(100, 100, dist);
+    run(audio, ctx, v, seconds);
+    const mix = (t = ctx.currentTime) => ({ amb: db(i.chan.ambience.trim.gain, t), world: db(i.chan.world.trim.gain, t), band: i.focusEq.gain.valueAt(t) });
+    return { audio, ctx, i, v, sim, events, mix };
+  }
+
+  it('ducks the ambience 6 dB and dips its 2–6 kHz band while following an animal close up', () => {
+    const { mix } = scene(6, (audio) => audio.follow(1));
+    const m = mix();
+    expect(m.amb).toBeCloseTo(-6, 0);
+    expect(m.band).toBeCloseTo(-6, 0);
+    expect(m.world).toBeCloseTo(4, 0);
+  });
+
+  it('hovering over an animal is a focus view; an empty close view or a far camera is not', () => {
+    expect(scene(12).mix().amb).toBeCloseTo(-6, 0);
+    expect(scene(12, (_a, _e, sim) => sim.animals.clear()).mix().amb).toBeCloseTo(0, 1);
+    const far = scene(60, (audio) => audio.follow(1)).mix();
+    expect(far.amb).toBeCloseTo(0, 1);
+    expect(far.band).toBeCloseTo(0, 1);
+  });
+
+  it('follows the selection, with a ≈ 0.6 s attack and a ≈ 1.5 s release', () => {
+    const { audio, ctx, v, events, mix, i } = scene(15, (_a, events) => events.emit('selectionChanged', { selection: { kind: 'animal', id: 1 } }), 0.05);
+    const t0 = ctx.currentTime;
+    expect(mix(t0 + 0.6).amb).toBeLessThan(-5.4);
+    run(audio, ctx, v, 2);
+    events.emit('selectionChanged', { selection: null });
+    // the lion is still right under the camera: hovering keeps the focus mix
+    run(audio, ctx, v, 1);
+    expect(mix().amb).toBeCloseTo(-6, 0);
+    (audio as unknown as { sim: Sim }).sim.animals.clear();
+    // the next 4 Hz mix update starts the release
+    run(audio, ctx, v, 0.3);
+    const t1 = ctx.currentTime - 0.05;
+    expect(mix(t1 + 0.5).amb).toBeLessThan(-1.5);
+    expect(mix(t1 + 1.5).amb).toBeGreaterThan(-0.5);
+    expect(steepestRamp([i.chan.ambience.trim.gain])).toBeLessThanOrEqual(0.05);
+  });
+
+  it('trims the animals 6 dB at the overview and leaves the coins and bells alone', () => {
+    const close = scene(10);
+    expect(close.i.animalBus.gain.valueAt(close.ctx.currentTime + 5)).toBeCloseTo(1, 2);
+    const over = scene(140);
+    expect(over.i.animalBus.gain.valueAt(over.ctx.currentTime + 5)).toBeCloseTo(0.5, 2);
+    const out = (v: unknown) => (v as { pan: { outputs: unknown[] } }).pan.outputs[0];
+    expect(out(over.i.pools.voice[0])).toBe(over.i.animalBus);
+    expect(out(over.i.pools.foley[0])).toBe(over.i.animalBus);
+    expect(out(over.i.pools.fx[0])).toBe(over.i.chan.world.input);
+  });
+
+  it('speechDuck ducks ambience and world 9 dB, tolerates repeats and lets go on its own', () => {
+    const { audio, ctx, v, mix } = scene(60);
+    audio.speechDuck(true);
+    audio.speechDuck(true);
+    const t0 = ctx.currentTime;
+    expect(mix(t0 + 0.25).amb).toBeLessThan(-8);
+    expect(mix(t0 + 0.25).world).toBeLessThan(-8);
+    audio.speechDuck(false);
+    expect(mix(t0 + 0.6).amb).toBeGreaterThan(-0.5);
+    audio.speechDuck(false);
+    audio.speechDuck(true);
+    run(audio, ctx, v, 32);
+    expect(mix().amb).toBeCloseTo(0, 1);
+    expect((audio.debugState().mix as { speech: boolean }).speech).toBe(false);
+  });
+
+  it('a speech duck asked for before the context exists applies when it starts', () => {
+    const sim = fakeSim();
+    const audio = new ZooAudio(sim as unknown as ISimulation, new EventBus(), { modules: {}, autoUnlock: false });
+    created.push(audio);
+    audio.speechDuck(true);
+    const ctx = Object.assign(new FakeAudioContext(), { close: () => Promise.resolve() });
+    (audio as unknown as { boot(c: unknown): void }).boot(ctx);
+    expect(db((audio as unknown as Internals).chan.world.trim.gain, 0)).toBeCloseTo(-9, 1);
+  });
+
+  it('celebrate ducks the ambience and the world', async () => {
+    const { audio, ctx, i } = scene(30);
+    await audio.prefetch(['cue.celebrate']);
+    audio.play('celebrate');
+    const t = ctx.currentTime + 0.5;
+    expect(db(i.chan.ambience.duck.gain, t)).toBeLessThan(-5);
+    expect(db(i.chan.world.duck.gain, t)).toBeLessThan(-5);
+  });
+
+  it('keeps the UI channel between its floor and full level as the ambience thins', () => {
+    const { audio } = scene(140, (_a, _e, sim) => (sim.minuteOfDay = 23 * 60), 3);
+    const s = (audio.debugState().mix as { uiScale: number }).uiScale;
+    expect(s).toBeGreaterThanOrEqual(0.165);
+    expect(s).toBeLessThan(0.45);
+  });
+});
+
+describe('shared reverb', () => {
+  it('is set up in three delayed partial convolvers after the cues and the urgent beds', async () => {
+    const { audio, ctx, i } = engine(fakeSim());
+    let renderedAtFirstConvolver: string[] | null = null;
+    const create = ctx.createConvolver.bind(ctx);
+    ctx.createConvolver = () => {
+      renderedAtFirstConvolver ??= [...i.sounds.keys()];
+      return create();
+    };
+    await audio.prefetch();
+    expect(renderedAtFirstConvolver).toEqual(expect.arrayContaining(['cue.tap', 'bed.birds', 'bed.wind']));
+    const outs = i.reverbIn.outputs as unknown as { buffer?: { length: number }; delayTime?: FakeParam; outputs: unknown[] }[];
+    expect(outs).toHaveLength(3);
+    const lens = [outs[0].buffer!.length, ...outs.slice(1).map((d) => (d.outputs[0] as { buffer: { length: number } }).buffer.length)];
+    const seg = lens[0];
+    expect(outs[1].delayTime!.value).toBeCloseTo(seg / ctx.sampleRate, 6);
+    expect(outs[2].delayTime!.value).toBeCloseTo((2 * seg) / ctx.sampleRate, 6);
+    expect(lens.reduce((a, b) => a + b, 0)).toBe(Math.floor(1.2 * ctx.sampleRate));
+  });
+});
+
+describe('beds: repetition and lowSpec memory', () => {
+  it('moves each bed side to a random point of its loop, crossfaded, so the bed never repeats at its period', async () => {
+    const { audio, ctx, i } = engine(fakeSim());
+    const v = view(0, 0);
+    audio.update(0.01, v.cam, v.focus);
+    await audio.prefetch();
+    run(audio, ctx, v, 60);
+    const wind = i.sounds.get('bed.wind')!.buffer as { duration: number };
+    const srcs = ctx.sources.filter((s) => s.buffer === (wind as unknown));
+    // two sides, each re-seeking every 40–75 % of the 16 s loop
+    expect(srcs.length).toBeGreaterThanOrEqual(2 + 2 * Math.floor(60 / (0.75 * wind.duration)));
+    expect(new Set(srcs.map((s) => s.startOffset.toFixed(4))).size).toBe(srcs.length);
+    const now = ctx.currentTime;
+    const live = srcs.filter((s) => s.stopAt === null || s.stopAt > now + 2);
+    expect(live).toHaveLength(2);
+    for (const s of live) expect((s.outputs[0] as FakeGain).gain.valueAt(now + 2)).toBeCloseTo(1, 3);
+    for (const s of srcs) if (s.stopAt !== null) expect((s.outputs[0] as FakeGain | undefined)?.gain.valueAt(s.stopAt) ?? 0).toBeLessThan(0.05);
+  });
+
+  it('lowSpec skips the second crowd layer and the night biome beds', async () => {
+    const sim = fakeSim();
+    sim.world.terrain.fill(Terrain.DryGrass);
+    sim.minuteOfDay = 23 * 60;
+    for (let k = 0; k < 30; k++) sim.guests.set(k + 1, guest(k + 1, 72 + (k % 5), 72 + (k % 6)));
+    const { audio, ctx, i } = engine(sim, { lowSpec: true });
+    const v = view(72, 72, 20);
+    audio.update(0.01, v.cam, v.focus);
+    for (let k = 0; k < 4; k++) {
+      run(audio, ctx, v, 5);
+      await audio.prefetch();
+    }
+    for (const id of ['bed.crowd.b', 'bed.savanna.night', 'bed.humid.night']) expect(i.pending.has(id) || i.sounds.has(id), id).toBe(false);
+    const beds = audio.debugState().beds as Record<string, number>;
+    expect(beds.savanna).toBeGreaterThan(0);
+    expect(beds.crowd).toBeGreaterThan(0);
+  });
+
+  it('lowSpec releases a bed silent for minutes, and renders it again when it is heard again', async () => {
+    const released = async (lowSpec: boolean) => {
+      const sim = fakeSim();
+      sim.world.terrain.fill(Terrain.DryGrass);
+      const { audio, ctx, i } = engine(sim, { lowSpec });
+      const v = view(72, 72, 20);
+      audio.update(0.01, v.cam, v.focus);
+      run(audio, ctx, v, 2);
+      await audio.prefetch();
+      run(audio, ctx, v, 2);
+      expect(i.beds.get('savanna')!.playing).toBe(true);
+      sim.world.terrain.fill(Terrain.Grass);
+      // the biome fades out over ~40 s, then the bed stays silent for its release time
+      run(audio, ctx, v, 240);
+      const gone = !i.sounds.has('bed.savanna');
+      sim.world.terrain.fill(Terrain.DryGrass);
+      run(audio, ctx, v, 2);
+      await audio.prefetch();
+      run(audio, ctx, v, 2);
+      expect(i.beds.get('savanna')!.playing).toBe(true);
+      return gone;
+    };
+    expect(await released(true)).toBe(true);
+    expect(await released(false)).toBe(false);
+  });
+});
+
+describe('voices: node reuse', () => {
+  it('reuses the layer gains of finished plays, and a late stop() of an old play leaves the new one alone', async () => {
+    const { audio, ctx } = engine(fakeSim(), { lowSpec: true });
+    await audio.prefetch([AMB[0]]);
+    const v = view(0, 0);
+    audio.update(0.01, v.cam, v.focus);
+    const gainsBefore = ctx.gains.length;
+    let first: ReturnType<typeof audio.host.play> = null;
+    for (let k = 0; k < 12; k++) {
+      const h = audio.host.play({ id: AMB[0], pool: 'fx', at: { x: 2, y: 0, z: 0 } });
+      expect(h).not.toBeNull();
+      first ??= h;
+      ctx.currentTime += 0.01;
+      h!.stop(0.01);
+      ctx.currentTime += 0.05;
+    }
+    // one fx voice on lowSpec: its first play's gain is reused by every later play
+    expect(ctx.gains.length - gainsBefore).toBeLessThanOrEqual(2);
+    const last = audio.host.play({ id: AMB[0], pool: 'fx', at: { x: 2, y: 0, z: 0 } })!;
+    const layerGain = (ctx.sources.at(-1)!.outputs[0] as FakeGain).gain;
+    const before = layerGain.calls.length;
+    first!.stop();
+    expect(layerGain.calls.length).toBe(before);
+    expect(last.endAt).toBeGreaterThan(ctx.currentTime);
+  });
+});
+
+describe('silent fallback', () => {
+  it('accepts the tutorial speech duck without Web Audio', async () => {
+    const { createAudio } = await import('../src/audio');
+    const audio = createAudio(fakeSim() as unknown as ISimulation, new EventBus()) as unknown as { speechDuck(on: boolean): void };
+    expect(() => {
+      audio.speechDuck(true);
+      audio.speechDuck(false);
+    }).not.toThrow();
   });
 });

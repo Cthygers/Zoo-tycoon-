@@ -41,7 +41,7 @@ import { LitterRenderer } from './litter';
 import { frustumToArray, InstancedBatch, MultiBatch, supportsMultiDraw, type CullView, type InstParams, type PropBatch } from './lod/batched';
 import { autoLod } from './lod/autolod';
 import { clearBlockers, setBlocker } from './lod/blockers';
-import { applyFade, applyOccluderCut, casterDepthMaterial, fadeModeOf, fadeUniforms, updateFade } from './lod/fade';
+import { applyFade, applyOccluderCut, casterDepthMaterial, fadeModeOf, fadeUniforms, setShellShadow, updateFade } from './lod/fade';
 import { propsTier, type PropsTier } from './lod/tiers';
 import { concreteMaterial, disposePropMaterials, projectBoxUVs, surfaceTextures } from './materials';
 import { applyNightLook, atlasSteps, disposeNatureResources, paintAtlasesOffThread, setNatureNight, withQuality } from './nature';
@@ -584,9 +584,10 @@ export class PropsLayer implements IPropsLayer {
   /**
    * Copy of a geometry for a shadow-only batch (attributes shared): position
    * and the crown data the batch's depth material reads, zeros (no crown,
-   * never fades) where the geometry has none.
+   * never fades) where the geometry has none, a den's reach where its
+   * material is a den's shell (lod/fade.ts setShellShadow).
    */
-  private shadowGeometry(g: THREE.BufferGeometry): THREE.BufferGeometry {
+  private shadowGeometry(g: THREE.BufferGeometry, m: THREE.Material): THREE.BufferGeometry {
     let s = this.shadowGeos.get(g);
     if (!s) {
       s = new THREE.BufferGeometry();
@@ -597,6 +598,9 @@ export class PropsLayer implements IPropsLayer {
       if (crown && crownR) {
         s.setAttribute('aCrown', crown);
         s.setAttribute('aCrownR', crownR);
+      } else if (m.userData.occluderShell === true) {
+        // a den: its shadow goes with it while the followed subject stands inside
+        setShellShadow(s, typeof m.userData.occluderReach === 'number' ? m.userData.occluderReach : 0);
       } else {
         if (this.noCrown.length < pos.count * 4) this.noCrown = new Int16Array(Math.max(pos.count * 4, this.noCrown.length * 2));
         s.setAttribute('aCrown', new THREE.BufferAttribute(this.noCrown.subarray(0, pos.count * 4), 4));
@@ -704,7 +708,7 @@ export class PropsLayer implements IPropsLayer {
         if (sb) {
           // it casts from the shadow-only batch instead
           shadowSlot = { batch: sb, index: -1 };
-          shadowSlot.index = sb.add(this.shadowGeometry(p.geometry), this.tmpM, { id: o.id, slot: shadowSlot }, { cull: Infinity, shadow: params.shadow, lodOn: false, shadowOn: params.shadowOn });
+          shadowSlot.index = sb.add(this.shadowGeometry(p.geometry, p.material), this.tmpM, { id: o.id, slot: shadowSlot }, { cull: Infinity, shadow: params.shadow, lodOn: false, shadowOn: params.shadowOn });
           params.shadow = 0;
         }
         rec.shadowSlots.push(shadowSlot);

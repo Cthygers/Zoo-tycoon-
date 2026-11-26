@@ -62,7 +62,7 @@ const NOTIFY: Readonly<Record<NotifySound, { prio: number; cue: string }>> = {
 };
 /** At most one notification cue per NOTE_GAP s, unless the new one ranks higher. */
 export const NOTE_GAP = 1.5;
-/** The same notification sound again within this many s is skipped (escapes excepted). */
+/** The same notification sound again within this many s (× the versus pace) is skipped (escapes excepted). */
 export const SAME_SOUND_GAP = 30;
 /** Escape bell repeat interval while any animal is out (s). */
 export const BELL_REPEAT: readonly [number, number] = [20, 30];
@@ -99,6 +99,15 @@ interface Pending {
 
 const dbGain = (db: number) => Math.pow(10, db / 20);
 
+/**
+ * The sim's pace multiplier: 4 during a locked-4× versus match, else 1. Event-driven
+ * sounds thin out by it, so a match sounds like 1× in density.
+ */
+function paceOf(host: AudioHost): number {
+  const p = (host.sim as { paceScale?: number }).paceScale ?? 1;
+  return Number.isFinite(p) && p > 1 ? p : 1;
+}
+
 class Feedback implements AudioModule {
   readonly ownsCoins = true;
   private readonly rng = new Rng(0xfeedbac);
@@ -116,6 +125,8 @@ class Feedback implements AudioModule {
   private readonly recent: number[] = [];
   private lastCoin = -1;
   private groupSeq = 0;
+  /** Popups owed to the pace: one in `pace` is heard. */
+  private paceAcc = 0;
   private txPlayed = 0;
   private txDropped = 0;
   // notifications
@@ -176,6 +187,9 @@ class Feedback implements AudioModule {
     if (!h.active || m.amount <= 0) return;
     // a far camera hears the zoo, not one till
     if (h.listener.camDist >= TX.maxCamDist || h.attenuate(m.x, 1, m.z).dist > TX.maxDist) return;
+    this.paceAcc += 1 / paceOf(h);
+    if (this.paceAcc < 1) return;
+    this.paceAcc -= 1;
     const kind = m.kind ?? 'other';
     const r2 = TX.groupDist * TX.groupDist;
     for (const p of this.pending) {
@@ -251,7 +265,7 @@ class Feedback implements AudioModule {
     if (n.logOnly || !n.sound || !h.active) return;
     const s = NOTIFY[n.sound];
     const t = h.time;
-    if (n.sound !== 'escape' && t - (this.lastSound.get(n.sound) ?? -Infinity) < SAME_SOUND_GAP) return;
+    if (n.sound !== 'escape' && t - (this.lastSound.get(n.sound) ?? -Infinity) < SAME_SOUND_GAP * paceOf(h)) return;
     if (t - this.noteT < NOTE_GAP && s.prio <= this.notePrio) return;
     let played: VoiceHandle | null = null;
     if (n.sound === 'escape') {

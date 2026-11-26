@@ -1,5 +1,6 @@
-// Pure helpers of the fauna module for foley: per-species body data, the
-// footstep phase, the start limiter and guest step cadence / surface.
+// Pure helpers of the fauna module for foley: per-species body data and
+// family banks, the footstep phase, the start limiters and guest step
+// cadence / surface.
 
 import { PathType } from '../../core/types';
 import type { FoleyBank } from '../recipes/foley';
@@ -14,7 +15,7 @@ export interface FoleySpecies {
   feet: Feet;
   /** playbackRate of the foley (bigger animals lower). */
   rateScale: number;
-  /** Close-up breathing level, 0 = none (big cats and bears breathe audibly too). */
+  /** Close-up breathing level, 0 = no regular breath (a sleeping focus animal still breathes softly). */
   breath: number;
   /** Close-up tail swishes. */
   tail?: boolean;
@@ -32,14 +33,52 @@ export const FOLEY_SPECIES: Readonly<Record<string, FoleySpecies>> = {
   camel: { stride: 1.6, mass: 0.6, feet: 'pad', rateScale: 0.85, breath: 0.6, tail: true, grazer: true },
   zebra: { stride: 1.1, mass: 0.45, feet: 'hoofHard', rateScale: 1, breath: 0.45, tail: true, grazer: true },
   gazelle: { stride: 0.8, mass: 0.3, feet: 'hoofHard', rateScale: 1.1, breath: 0, tail: true, grazer: true },
-  lion: { stride: 1.0, mass: 0.12, feet: 'pad', rateScale: 1, breath: 0.5, laps: true },
-  tiger: { stride: 1.0, mass: 0.12, feet: 'pad', rateScale: 1, breath: 0.5, laps: true },
+  lion: { stride: 1.0, mass: 0.12, feet: 'pad', rateScale: 1, breath: 0.9, laps: true },
+  tiger: { stride: 1.0, mass: 0.12, feet: 'pad', rateScale: 1, breath: 0.9, laps: true },
   grizzly: { stride: 1.0, mass: 0.5, feet: 'pad', rateScale: 0.9, breath: 0.6, laps: true },
   polarbear: { stride: 1.0, mass: 0.5, feet: 'pad', rateScale: 0.9, breath: 0.6, laps: true },
   gorilla: { stride: 0.7, mass: 0.35, feet: 'pad', rateScale: 1, breath: 0.4 },
   penguin: { stride: 0.15, mass: 0.2, feet: 'bird', rateScale: 1.2, breath: 0 },
   flamingo: { stride: 0.5, mass: 0.2, feet: 'bird', rateScale: 1.1, breath: 0 },
 };
+
+export type FoleyKind = 'breath' | 'chew' | 'drink';
+export type FoleyFamily = 'cat' | 'pachyderm' | 'bear' | 'grazer' | 'equid' | 'primate' | 'bird';
+
+/** Body family of each voice: it breathes, chews and drinks from `fx.<kind>.<family>` once that bank is registered. */
+export const FOLEY_FAMILY: Readonly<Record<string, FoleyFamily>> = {
+  lion: 'cat',
+  tiger: 'cat',
+  elephant: 'pachyderm',
+  hippo: 'pachyderm',
+  rhino: 'pachyderm',
+  grizzly: 'bear',
+  polarbear: 'bear',
+  giraffe: 'grazer',
+  gazelle: 'grazer',
+  camel: 'grazer',
+  zebra: 'equid',
+  gorilla: 'primate',
+  flamingo: 'bird',
+  penguin: 'bird',
+};
+
+/** The shared banks every family uses until it has its own. */
+export const GENERIC_FOLEY: Readonly<Record<FoleyKind, FoleyBank>> = { breath: 'fx.breath.big', chew: 'fx.chew', drink: 'fx.lap' };
+
+/** `fx.<kind>.<family>` when its first variant is registered, else the generic bank of that kind. */
+export function foleyBankFor(kind: FoleyKind, voice: string, registered: (id: string) => boolean): string {
+  const family = FOLEY_FAMILY[voice];
+  const base = family ? `fx.${kind}.${family}` : '';
+  return base && registered(`${base}#0`) ? base : GENERIC_FOLEY[kind];
+}
+
+/** Number of registered variants `${base}#0..k-1` (0 when only the bare id or nothing is registered). */
+export function registeredVariants(base: string, registered: (id: string) => boolean): number {
+  let k = 0;
+  while (registered(`${base}#${k}`)) k++;
+  return k;
+}
 
 export const FEET_BANK: Readonly<Record<Feet, FoleyBank>> = {
   pad: 'fx.step.pad',
@@ -52,6 +91,8 @@ export const FEET_BANK: Readonly<Record<Feet, FoleyBank>> = {
 export const STEP_DB = -8;
 /** Steps of the animal the player looks at come forward (a close-up microphone). */
 export const CLOSE_STEP_DB = 6;
+/** Close-up steps are at least this heavy, so light animals (lion, penguin, flamingo, gazelle) are heard walking. */
+export const CLOSE_STEP_MASS = 0.45;
 
 /**
  * Advance a footstep phase by `dt` s and return the offsets (s from now) of the
@@ -65,7 +106,11 @@ export function stepCrossings(phase: number, speed: number, stride: number, dt: 
   return next;
 }
 
-/** Foley start limiter: at most `max` starts in any `window` s, and a minimum gap per source. */
+/**
+ * Foley start limiter: at most `max` starts in any `window` s, and a minimum gap
+ * per source. `reserve` of the `max` starts are kept for priority sources (the
+ * animal the player looks at).
+ */
 export class FoleyLimiter {
   /** Recent start times (some lie slightly in the future: steps are scheduled ahead). */
   private readonly times: number[] = [];
@@ -75,13 +120,14 @@ export class FoleyLimiter {
     private readonly max = 6,
     private readonly window = 1,
     private readonly perSourceGap = 0.15,
+    private readonly reserve = 0,
   ) {}
 
   /** Record a start for source `key` at time `t` (s); false when over a limit. */
-  take(key: number, t: number): boolean {
+  take(key: number, t: number, priority = false): boolean {
     let recent = 0;
     for (const x of this.times) if (Math.abs(t - x) < this.window) recent++;
-    if (recent >= this.max) return false;
+    if (recent >= (priority ? this.max : this.max - this.reserve)) return false;
     const prev = this.last.get(key);
     if (prev !== undefined && Math.abs(t - prev) < this.perSourceGap) return false;
     this.times.push(t);

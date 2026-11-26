@@ -6,11 +6,13 @@
 //
 // Levels form a hierarchy on a phone speaker: `rms` is the phone-weighted RMS
 // of the loudest 400 ms (render.ts), and every peak cap sits well above it so
-// the rms target is what binds. Relative to build (−30 dB): tap −6, select /
+// the rms target is what binds. Relative to build (−26 dB): tap −6, select /
 // open / close −3 (select, the most frequent, −4), error +0.5, bulldoze −1.5,
-// deny −9, coin −4, celebrate +2.5.
-// build at −30 dB keeps a select well under a nearby lion roar and the cues
-// within 12 dB of a quiet night overview's ambience.
+// deny −9, celebrate +5.5.
+// build at −26 dB puts a tap ≥ 6 dB over a busy day bed on a phone; the engine
+// scales the UI channel down in quiet views, so a night overview's cues stay
+// within 12 dB of its ambience. Feedback heard in the world (coins, bell, crate,
+// gate) sits on its own reference, WORLD_DB: it is mixed with the animals.
 
 import type { Kit, Partial3 } from '../kit';
 import type { Recipe } from '../render';
@@ -31,7 +33,9 @@ const ROOM = { decay: 0.09, length: 0.45, bright: 0.6 };
 const PEAK = 0.6;
 /** Phone-weighted rms targets (dBFS), see the hierarchy above. */
 const rmsDb = (db: number) => Math.pow(10, db / 20);
-const BUILD_DB = -30;
+const BUILD_DB = -26;
+/** Reference of the positional feedback sounds (fx pool, world channel). */
+const WORLD_DB = -30;
 
 /** Small coin / metal tab: inharmonic plate partials. */
 const COIN: readonly Partial3[] = [
@@ -91,7 +95,7 @@ function coin(k: Kit, t: number, f: number, vel: number, partials: readonly Part
   k.bar(t, 1100 * k.rng.range(0.95, 1.05), vel * 1.2, { decay: 0.04, partials: FELT, click: 0.1, wet: 0.05 });
 }
 
-const COIN_DB = BUILD_DB - 4;
+const COIN_DB = WORLD_DB - 4;
 
 export const CUE_RECIPES: Record<string, Recipe> = {
   tap: cue(0.14, BUILD_DB - 6, (k) => {
@@ -219,7 +223,7 @@ export const CUE_RECIPES: Record<string, Recipe> = {
     k.bar(0.002, st(-4), 0.6, { decay: 0.25, click: 0.08, lp: 3500, wet: 0, dest: trem }); // F4
     k.bar(0.002, 1200, 0.35, { decay: 0.015, click: 0.35, partials: SINE, wet: 0.05 }); // knock
   }, { tail: 0.25, hp: 120 }),
-  bell: cue(1.2, BUILD_DB, function* (k) {
+  bell: cue(1.2, WORLD_DB, function* (k) {
     // keeper's hand bell, three strikes; the second also rings a lower bell
     for (let i = 0; i < 3; i++) {
       const t = 0.002 + i * 0.18;
@@ -228,7 +232,7 @@ export const CUE_RECIPES: Record<string, Recipe> = {
       yield;
     }
   }, { tail: 0.4, rate: FX_LONG_SR, reverb: { decay: 0.2, length: 1, bright: 0.6 } }),
-  crate: cue(0.7, BUILD_DB - 3, (k) => {
+  crate: cue(0.7, WORLD_DB - 3, (k) => {
     // a wooden transport crate set down, its latch, then the gate creaking open
     k.thump(0, 120, 90, 0.15, 0.4, { wet: 0.1 });
     k.burst({ t: 0, dur: 0.12, color: 'brown', band: [[0, 520], [0.12, 300]], q: 1, amp: [[0, 0], [0.004, 1], [0.12, 0]], wet: 0.1 });
@@ -264,7 +268,7 @@ export const CUE_RECIPES: Record<string, Recipe> = {
     k.bar(0.1, st(-2), 0.65, { decay: 0.16, click: 0.15, lp: 5000 }); // G4
     k.bar(0.22, st(5), 0.6, { decay: 0.2, click: 0.12, lp: 5000 }); // D5
   }),
-  gate: cue(1.6, BUILD_DB - 2, (k) => {
+  gate: cue(1.6, WORLD_DB - 2, (k) => {
     // entrance chime: two tones with a soft third harmonic
     const p: readonly Partial3[] = [
       [1, 1, 1],
@@ -273,7 +277,7 @@ export const CUE_RECIPES: Record<string, Recipe> = {
     k.bar(0.002, 659.3, 0.7, { decay: 0.45, partials: p, click: 0.08, wet: 0.25 }); // E5
     k.bar(0.45, 523.3, 0.7, { decay: 0.55, partials: p, click: 0.08, wet: 0.25 }); // C5
   }, { tail: 0.4, rate: FX_LONG_SR, reverb: { decay: 0.25, length: 1.2, bright: 0.5 } }),
-  celebrate: cue(1.6, BUILD_DB + 2.5, function* (k) {
+  celebrate: cue(1.6, BUILD_DB + 5.5, function* (k) {
     // original rising figure, then a soft open chord with a shimmer
     const fig: [number, number, number][] = [
       [0.0, 10, 0.55], // G5

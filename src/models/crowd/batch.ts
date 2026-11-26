@@ -13,7 +13,7 @@
 //     per-frame bounding sphere so a batch with nothing on screen is skipped.
 //   * the follow cut (setCreatureFollowCut): while the camera follows a
 //     subject up close, other animals between the camera and the subject are
-//     left out of the main pass (whole animals; they keep their shadows).
+//     left out of the main pass (whole animals, and their shadows with them).
 //   * SkinnedBatch — per-instance bone matrices + look parameters in one float
 //     DataTexture (see skinning.ts); each frame only the blocks written since
 //     the last upload are sent (creatures animated at a reduced rate, see
@@ -43,8 +43,12 @@ const _cam = new THREE.Vector3();
  * ahead of the subject on the ground, toward the camera) and comes within
  * the cut margin of the view line from the camera to the subject: whole
  * animals, never the subject itself, with a wider margin to come back so one
- * standing at the edge does not flicker. Shadows stay (the animal is still
- * there). No draw calls, no shader cost.
+ * standing at the edge does not flicker. Their shadows go too: an elephant's
+ * legs left as dark blotches across the followed hippo, or an elephant-shaped
+ * shadow on empty lawn, read as a rendering bug (the subject is lit as if the
+ * animal had stepped aside). The cut is decided once per rendered frame, by
+ * the shadow pass, which runs first, or else the main pass. No draw calls, no
+ * shader cost.
  *
  * The body is the animal's rest-pose box (`cutBody`, mesh space, carried by
  * the instance matrix: heading, growth): an elephant beside the line is cut
@@ -205,6 +209,8 @@ export class FilteredBatch extends THREE.BatchedMesh {
   /** Instances cut last frame (hysteresis) and ids hidden for the current main pass. */
   private cut = new Uint8Array(16);
   private readonly cutHidden: number[] = [];
+  /** renderer.info.render.frame the cut was last decided for (-1: never; see decideFollowCut). */
+  private cutFrame = -1;
 
   constructor(name: string, material: THREE.Material, instances: number, vertices: number, indices: number) {
     super(Math.max(4, instances), Math.max(64, vertices), Math.max(192, indices), material);
@@ -405,7 +411,7 @@ export class FilteredBatch extends THREE.BatchedMesh {
     group: THREE.Group,
   ): void {
     (this as unknown as BatchedInternals)._indirectTexture = this.mainIds;
-    if (this.followCut) this.applyFollowCut(camera);
+    if (this.followCut) this.applyFollowCut(camera, renderer.info.render.frame);
     super.onBeforeRender(renderer, scene, camera, geometry, material, group);
   }
 
@@ -415,15 +421,41 @@ export class FilteredBatch extends THREE.BatchedMesh {
     h.length = 0;
   }
 
-  /** Hide (for this pass) the instances in the follow cut; onAfterRender shows them again. */
-  private applyFollowCut(camera: THREE.Camera): void {
+  /**
+   * Hide (for this pass) the instances in the follow cut; onAfterRender shows
+   * them again. `frame`: see decideFollowCut.
+   */
+  private applyFollowCut(camera: THREE.Camera, frame = -1): void {
+    if (!this.decideFollowCut(camera, frame)) return;
+    const cut = this.cut;
+    const n = Math.min(this.want.length, this.maxInstanceCount);
+    for (let i = 0; i < n; i++) {
+      if (cut[i] && this.want[i]) {
+        this.setVisibleAt(i, false);
+        this.cutHidden.push(i);
+      }
+    }
+  }
+
+  /**
+   * Decide which instances the follow cut takes, seen from `camera` (the main
+   * camera, in the shadow pass too), into `cut`. Once per rendered frame
+   * (`frame`, renderer.info.render.frame, the same for a render's shadow and
+   * main pass; -1 decides anew): the shadow pass runs first and decides it,
+   * the main pass reuses it, so an animal and its shadow go together. False
+   * when nothing is cut (not following, or too far from the subject).
+   */
+  private decideFollowCut(camera: THREE.Camera, frame: number): boolean {
     const cut = this.cut;
     const n = Math.min(this.want.length, this.maxInstanceCount);
     _cam.setFromMatrixPosition(camera.matrixWorld);
     if (!cutAim.on || _cam.distanceTo(cutAim.subject) > FOLLOW_CUT_MAX_D) {
       cut.fill(0);
-      return;
+      this.cutFrame = -1;
+      return false;
     }
+    if (frame >= 0 && frame === this.cutFrame) return true;
+    this.cutFrame = frame;
     for (let i = 0; i < n; i++) {
       if (!this.want[i]) {
         cut[i] = 0;
@@ -433,19 +465,18 @@ export class FilteredBatch extends THREE.BatchedMesh {
       if (!body) {
         // no rest-pose box: half the all-pose sphere
         const sphere = this.getBoundingSphereAt(this.getGeometryIdAt(i), _sphere);
-        if (!sphere) continue;
+        if (!sphere) {
+          cut[i] = 0;
+          continue;
+        }
         body = _box.setFromCenterAndSize(sphere.center, _v.setScalar(sphere.radius));
       }
-      const on = inFollowCut(_cam, this.getMatrixAt(i, _m).premultiply(this.matrixWorld), body, cut[i] === 1);
-      cut[i] = on ? 1 : 0;
-      if (on) {
-        this.setVisibleAt(i, false);
-        this.cutHidden.push(i);
-      }
+      cut[i] = inFollowCut(_cam, this.getMatrixAt(i, _m).premultiply(this.matrixWorld), body, cut[i] === 1) ? 1 : 0;
     }
+    return true;
   }
 
-  // ---- shadow pass: hide instances that do not cast shadows
+  // ---- shadow pass: hide instances that do not cast shadows, and those the follow cut takes
   onBeforeShadow(
     renderer: THREE.WebGLRenderer,
     scene: THREE.Scene,
@@ -459,10 +490,13 @@ export class FilteredBatch extends THREE.BatchedMesh {
     const sw = this.swapped;
     h.length = 0;
     sw.length = 0;
+    // (`camera` is the main camera: the cut is decided as the main pass will see it)
+    const cutting = this.followCut && this.decideFollowCut(camera, renderer.info.render.frame);
+    const cut = this.cut;
     const n = Math.min(this.want.length, this.maxInstanceCount);
     for (let i = 0; i < n; i++) {
       if (!this.want[i]) continue;
-      if (!this.shadow[i]) {
+      if (!this.shadow[i] || (cutting && cut[i] === 1)) {
         this.setVisibleAt(i, false);
         h.push(i);
       } else if (this.shadowGeo[i] >= 0) {

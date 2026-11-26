@@ -129,30 +129,42 @@ export class VariantPicker {
     return ids;
   }
 
-  pick(base: string, count: number, has: (id: string) => boolean, rng: Rng): string | null {
+  /**
+   * A rendered variant, uniformly among the best candidates. `avoid` (optional)
+   * grades variants to pass over: 2 = never if possible (the animal's own last
+   * one), 1 = rather not (a recent identical play); the bank's last variant comes
+   * after those as a tie-breaker.
+   */
+  pick(base: string, count: number, has: (id: string) => boolean, rng: Rng, avoid?: (id: string) => number): string | null {
     const ids = this.ids(base, count);
     const prev = this.last.get(base) ?? -1;
-    let ready = 0;
-    let readyOther = 0;
-    for (let k = 0; k < ids.length; k++)
-      if (has(ids[k])) {
-        ready++;
-        if (k !== prev) readyOther++;
-      }
-    if (!ready) {
+    let best = Infinity;
+    let n = 0;
+    for (let k = 0; k < ids.length; k++) {
+      if (!has(ids[k])) continue;
+      const score = this.score(ids[k], k === prev, avoid);
+      if (score < best) {
+        best = score;
+        n = 1;
+      } else if (score === best) n++;
+    }
+    if (!n) {
       this.complete.delete(base);
       return null;
     }
-    const skipPrev = readyOther > 0 && readyOther < ready;
-    let n = rng.int(0, (skipPrev ? readyOther : ready) - 1);
+    let r = rng.int(0, n - 1);
     for (let k = 0; k < ids.length; k++) {
-      if (!has(ids[k]) || (skipPrev && k === prev)) continue;
-      if (n-- === 0) {
+      if (!has(ids[k]) || this.score(ids[k], k === prev, avoid) !== best) continue;
+      if (r-- === 0) {
         this.last.set(base, k);
         return ids[k];
       }
     }
     return null;
+  }
+
+  private score(id: string, isLast: boolean, avoid?: (id: string) => number): number {
+    return (avoid?.(id) ?? 0) * 2 + (isLast ? 1 : 0);
   }
 
   /** First variant of a bank that is not rendered yet (variants render lazily, after first use). */
@@ -164,9 +176,15 @@ export class VariantPicker {
   }
 }
 
-/** Conspecifics that join a bout: each eligible one with probability p, after U(delay) s. */
-export function planJoins(contagion: NonNullable<SpeciesAudio['contagion']>, eligible: readonly number[], rng: Rng): { id: number; delay: number }[] {
+/** Contagion never pulls in more than this many joiners: one roar does not set off the whole pride. */
+export const MAX_JOINERS = 2;
+
+/** Conspecifics that join a bout: each eligible one (in random order) with probability p, after U(delay) s, at most `max`. */
+export function planJoins(contagion: NonNullable<SpeciesAudio['contagion']>, eligible: readonly number[], rng: Rng, max = MAX_JOINERS): { id: number; delay: number }[] {
   const out: { id: number; delay: number }[] = [];
-  for (const id of eligible) if (rng.float() < contagion.p) out.push({ id, delay: rng.range(contagion.delay[0], contagion.delay[1]) });
+  const n = eligible.length;
+  const start = n ? rng.int(0, n - 1) : 0;
+  for (let i = 0; i < n && out.length < max; i++)
+    if (rng.float() < contagion.p) out.push({ id: eligible[(start + i) % n], delay: rng.range(contagion.delay[0], contagion.delay[1]) });
   return out;
 }

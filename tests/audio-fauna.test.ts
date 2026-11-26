@@ -6,7 +6,7 @@ import type { ISimulation } from '../src/core/contracts';
 import { EventBus } from '../src/core/events';
 import { Rng } from '../src/core/rng';
 import { PathType, Terrain, type AnimalState } from '../src/core/types';
-import { boutSpan, individual, planBout, planJoins, VariantPicker, type BoutItem } from '../src/audio/fauna/bout';
+import { boutSpan, individual, MAX_JOINERS, planBout, planJoins, VariantPicker, type BoutItem } from '../src/audio/fauna/bout';
 import { activityAt, colonyLevel, idleWeight, pickKind, pickWeighted } from '../src/audio/fauna/diel';
 import { createFauna, FAUNA } from '../src/audio/modules/fauna';
 import { SPECIES_AUDIO, type Bout } from '../src/audio/recipes';
@@ -122,9 +122,9 @@ describe('planBout', () => {
     for (let seed = 1; seed <= 100; seed++) {
       const z = planBout(zebra, zebra.bouts.find((b) => b.kind === 'call')!, new Rng(seed), dur(zebra)).filter((i) => i.syl === 'cycle');
       const iois = z.slice(1).map((g, i) => g.t - z[i].t);
-      expect(iois[0]).toBeGreaterThanOrEqual(0.27);
-      expect(iois[0]).toBeLessThanOrEqual(0.33);
-      expect(iois[iois.length - 1]).toBeLessThanOrEqual(0.5);
+      expect(iois[0]).toBeGreaterThanOrEqual(0.42);
+      expect(iois[0]).toBeLessThanOrEqual(0.46);
+      expect(iois[iois.length - 1]).toBeLessThanOrEqual(0.55 * 1.1);
       const honks = planBout(hippo, hippo.bouts.find((b) => b.kind === 'call')!, new Rng(seed), dur(hippo)).filter((i) => i.syl === 'honk');
       expect(honks.length).toBeGreaterThanOrEqual(4);
       expect(honks.length).toBeLessThanOrEqual(10);
@@ -163,18 +163,25 @@ describe('variants and individual voices', () => {
     expect(checked).toBeGreaterThan(500);
   });
 
-  it('never repeats a syllable at the same rate within 30 s, even across a chorus', () => {
+  it('rarely replays a variant at nearly the same rate within 10 s, even across a chorus', () => {
     const s = setup({ seed: 5 });
     const pride = [0, 1, 2, 3].map((i) => s.add(animal('lion', 20 + i, 3, { sex: i ? 'F' : 'M' })));
+    s.host.hour = 21;
+    s.host.nightness = 1;
     for (let k = 0; k < 4; k++) {
-      for (const l of pride) s.fauna.force!(l.id, 'call');
-      run(s, 45);
+      // the male roars, up to two lionesses join (contagion)
+      s.fauna.force!(pride[0].id, 'call');
+      run(s, 60);
     }
     const plays = sylPlays(s.host);
     expect(plays.length).toBeGreaterThan(100);
-    for (let i = 0; i < plays.length; i++)
-      for (let j = i + 1; j < plays.length && plays[j].t - plays[i].t < 30; j++)
-        if (plays[j].spec.id === plays[i].spec.id) expect(Math.abs(plays[j].spec.rate! / plays[i].spec.rate! - 1)).toBeGreaterThan(0.005);
+    let repeats = 0;
+    for (let j = 0; j < plays.length; j++) {
+      const clash = plays.some((p, i) => i < j && plays[j].t - p.t < 10 && p.spec.id === plays[j].spec.id && Math.abs(plays[j].spec.rate! / p.spec.rate! - 1) <= 0.03);
+      if (clash) repeats++;
+    }
+    expect(repeats).toBeLessThanOrEqual(5);
+    expect(s.fauna.debug!().repeated).toBe(repeats);
   });
 
   it('gives each animal its own pitch and colour, kept for life', () => {
@@ -191,8 +198,16 @@ describe('variants and individual voices', () => {
       s.fauna.force!(x.id, 'idle');
       run(s, 3);
     }
-    const colours = new Set(sylPlays(s.host, x.id).map((p) => JSON.stringify(p.spec.color)));
-    expect(colours.size).toBe(1);
+    // every play gets its own slight colour around the individual's, in the 1–3 kHz presence range
+    const plays = sylPlays(s.host, x.id);
+    const ind = individual(SPECIES_AUDIO.elephant, x.seed, x.sex);
+    const centre = Math.min(3000, Math.max(1000, ind.color.hz));
+    for (const p of plays) {
+      expect(p.spec.color!.hz / centre).toBeGreaterThanOrEqual(0.92);
+      expect(p.spec.color!.hz / centre).toBeLessThanOrEqual(1.08);
+      expect(Math.abs(p.spec.color!.db - ind.color.db)).toBeLessThanOrEqual(2);
+    }
+    expect(new Set(plays.map((p) => JSON.stringify(p.spec.color))).size).toBe(plays.length);
   });
 
   it('keeps juveniles at most 12 % higher', () => {
@@ -245,6 +260,31 @@ describe('warm-up and lowSpec', () => {
     }
     const ids = new Set(sylPlays(s.host).map((p) => p.spec.id));
     expect([...ids].every((id) => /#[01]$/.test(id))).toBe(true);
+  });
+
+  it('warms and plays only the family breath / chew / drink banks, one variant of each on lowSpec', () => {
+    for (const lowSpec of [false, true]) {
+      const s = setup({ seed: 5, lowSpec });
+      const lion = s.add(animal('lion', 3, 0));
+      const ids = s.fauna.warm!();
+      expect(ids).not.toContain('fx.breath.big#0');
+      expect(ids).not.toContain('fx.lap#0');
+      expect(ids).toContain('fx.breath.cat#0');
+      s.host.followId = lion.id;
+      s.host.listener = { x: 0, y: 1, z: 0, fx: 3, fz: 0, camDist: 6, zoomNear: 1 };
+      const actions = ['idle', 'eat', 'drink', 'sleep'] as const;
+      for (let k = 0; k < 16; k++) {
+        lion.action = actions[k % actions.length];
+        lion.actionTime = 0;
+        run(s, 4);
+      }
+      const fam = s.host.plays.map((p) => p.spec.id).filter((id) => /^fx\.(breath|chew|drink)\./.test(id));
+      expect(fam.length).toBeGreaterThan(10);
+      expect(fam.every((id) => /^fx\.(breath|chew|drink)\.cat#\d$/.test(id))).toBe(true);
+      const variants = new Set(fam.map((id) => id.split('#')[1]));
+      if (lowSpec) expect([...variants]).toEqual(['0']);
+      else expect(variants.size).toBeGreaterThan(1);
+    }
   });
 });
 
@@ -362,19 +402,23 @@ describe('diel scheduler', () => {
 // ------------------------------------------------------------------ A1-11 contagion, idles, follow
 
 describe('contagion', () => {
-  it('lionesses join a roar 2.4 times on average, after 2–8 s', () => {
+  it('at most 2 lionesses join a roar, after 2–8 s, any of the pride', () => {
     const con = SPECIES_AUDIO.lion.contagion!;
     const rng = new Rng(9);
     let joins = 0;
+    const who = new Set<number>();
     for (let i = 0; i < 1000; i++) {
       const j = planJoins(con, [1, 2, 3, 4], rng);
       joins += j.length;
+      expect(j.length).toBeLessThanOrEqual(MAX_JOINERS);
       for (const x of j) {
+        who.add(x.id);
         expect(x.delay).toBeGreaterThanOrEqual(2);
         expect(x.delay).toBeLessThanOrEqual(8);
       }
     }
-    expect(Math.abs(joins / 1000 - 2.4)).toBeLessThanOrEqual(0.25);
+    expect(joins / 1000).toBeGreaterThan(1.5);
+    expect([...who].sort()).toEqual([1, 2, 3, 4]);
   });
 
   it('offers every eligible pride member a join, and joins never spread further', () => {

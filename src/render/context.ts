@@ -63,6 +63,22 @@ function envSunStep(sunElev: number): number {
 }
 /** …or this often anyway (cloud drift). */
 const ENV_MAX_AGE = 40;
+
+/**
+ * Whether the sky environment is re-captured this frame (pure; unit-tested).
+ * - nothing to refresh (`dirty` false and the capture younger than ENV_MAX_AGE): no;
+ * - else at most every `floor` seconds (`age` = seconds since the last capture), except
+ *   that a >10° sun `jump` captures at once when `bypass` is on, or when the jump came
+ *   through an explicit path (`forced`: settle(), the load / holdEnvironment() release,
+ *   a quality change). With the defaults (6 s, bypass on) this is the behaviour before
+ *   setEnvCaptureFloor existed; a versus match uses (20 s, off), where the 4× clock
+ *   moves the sun 10° every few real seconds.
+ */
+export function shouldRecapture(age: number, dirty: boolean, jump: boolean, floor: number, bypass: boolean, forced: boolean): boolean {
+  if (!dirty && age < ENV_MAX_AGE) return false;
+  if (age >= floor) return true;
+  return jump && (bypass || forced);
+}
 const FOG_DENSITY = 0.00085;
 const GROUND_ALBEDO = new THREE.Color(0.1, 0.12, 0.065);
 const BANK_ALBEDO = new THREE.Color(0.05, 0.07, 0.035);
@@ -447,6 +463,11 @@ export class RenderContext implements IRenderContext {
   private envSunElev = -999;
   private envAge = 1e9;
   private envDirty = true;
+  /** Minimum seconds between re-captures while time flows, and whether a >10° sun jump skips it (setEnvCaptureFloor). */
+  private envFloor = ENV_MIN_INTERVAL;
+  private envJumpBypass = true;
+  /** An explicit path (settle, load release, quality change) asked for the next capture: a jump then counts even without the bypass. */
+  private envForced = false;
   /** Re-capture suspended (see holdEnvironment). */
   private envHeld = false;
   /** Sky irradiance luminance when the environment was captured (see applyEnvIntensity). */
@@ -1055,9 +1076,10 @@ export class RenderContext implements IRenderContext {
    */
   private updateEnvironment() {
     if (this.envHeld && this.envRT) return;
-    if (!this.envDirty && this.envAge < ENV_MAX_AGE) return;
     const jump = Math.abs(Math.asin(this.sunDirection.y) - this.envSunElev) > 10 * DEG;
-    if (this.envRT && this.envAge < ENV_MIN_INTERVAL && !jump) return;
+    // (the first capture, and one after a lost context, never waits)
+    if (this.envRT && !shouldRecapture(this.envAge, this.envDirty, jump, this.envFloor, this.envJumpBypass, this.envForced)) return;
+    if (!this.envRT && !this.envDirty && this.envAge < ENV_MAX_AGE) return;
     // the sky is smooth: small capture faces are plenty (PMREM upsamples to 256²)
     const size = ENV_TIERS[this.quality.level].envCapture;
     if (!this.envCapture || this.envCapture.width !== size) {
@@ -1073,8 +1095,20 @@ export class RenderContext implements IRenderContext {
     this.envSunElev = Math.asin(this.sunDirection.y);
     this.envSkyLum = luminance(this.skyIrr);
     this.envDirty = false;
+    this.envForced = false;
     this.envAge = 0;
     this.applyEnvIntensity();
+  }
+
+  /**
+   * Minimum seconds between sky environment re-captures while time flows (default 6), and
+   * whether a >10° sun jump captures at once regardless (default on). A versus match sets
+   * (20, false): its 4× clock would otherwise capture every few seconds; settle(), the load
+   * path and quality changes still capture at once (see shouldRecapture).
+   */
+  setEnvCaptureFloor(seconds: number, jumpBypass: boolean): void {
+    this.envFloor = Number.isFinite(seconds) && seconds > 0 ? seconds : ENV_MIN_INTERVAL;
+    this.envJumpBypass = jumpBypass;
   }
 
   /**
@@ -1117,7 +1151,7 @@ export class RenderContext implements IRenderContext {
       if (this.envRT && Math.abs(elev - this.envSunElev) <= envSunStep(Math.min(elev, this.envSunElev))) {
         this.envDirty = false;
         this.envAge = 0;
-      }
+      } else this.envForced = true;
     };
   }
 
@@ -1180,7 +1214,10 @@ export class RenderContext implements IRenderContext {
     const newTextures = envPrev.groundRes !== env.groundRes || envPrev.anisotropy !== env.anisotropy;
     if (newTextures) this.replaceTextures(env);
     this.setGroundOptions(groundOptions(level));
-    if (envPrev.envCapture !== env.envCapture) this.envDirty = true;
+    if (envPrev.envCapture !== env.envCapture) {
+      this.envDirty = true;
+      this.envForced = true;
+    }
     if (envPrev.grassCapacity !== env.grassCapacity || envPrev.tuft.blades !== env.tuft.blades || envPrev.tuft.segs !== env.tuft.segs) {
       this.scene.remove(this.grass.mesh);
       this.grass.dispose();
@@ -1259,6 +1296,7 @@ export class RenderContext implements IRenderContext {
     this.exposure = this.targetExposure;
     this.applyExposure();
     this.envDirty = true;
+    this.envForced = true;
     this.envAge = 1e9;
   }
 }

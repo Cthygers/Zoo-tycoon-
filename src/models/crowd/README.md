@@ -158,8 +158,10 @@ it comes back into view.
   — comes within a margin of the line from the camera to the subject that
   narrows toward the camera (the subject's size on screen): an elephant whose
   rump overlaps a followed hippo goes, a lion lying low under the view stays.
-  Whole animals, never the subject, hysteresis to come back, shadows kept, no
-  shader or draw-call cost. main.ts calls it every frame with the followed
+  Whole animals, never the subject, hysteresis to come back, no shader or
+  draw-call cost. Their shadows go with them (the shadow pass, which runs
+  first, decides the cut for the frame): a cut elephant's shadow left lying
+  across the followed hippo read as a rendering bug. main.ts calls it every frame with the followed
   subject's position (null when not following).
 * **Fur shell** (`build/furShell.ts`): fur coats append a raised copy of their
   long-hair triangles to level 0 (shell vertices flagged by `pattern.z = −1`,

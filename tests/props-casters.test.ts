@@ -99,6 +99,37 @@ describe('shadow-only caster batch (batched back-end)', () => {
     expect(crownVerts(['shelter_wood'])).toBe(0);
     expect(crownVerts(['shelter_wood', 'tree_pine'])).toBeGreaterThan(0); // the pine's trunk
   }, 20000);
+
+  it("marks a rock den's shell, so its shadow goes with the den the followed subject stands in (no other piece)", () => {
+    // (on low a den is too low to cast at all: medium)
+    const medium: QualitySettings = { ...QUALITY, level: 'medium', grassDensity: 0.6, creatureDetail: 1 };
+    const events = new EventBus();
+    const world = new World(events, 3);
+    for (const o of [...world.objects.values()]) world.removeObject(o.id);
+    world.addObject('shelter_cave', 40, 40, 0, 1);
+    world.addObject('shelter_wood', 44, 40, 0, 1);
+    const scene = new THREE.Scene();
+    const layer = new PropsLayer(world, events, scene, medium, { backend: 'batched' });
+    const camera = new THREE.PerspectiveCamera();
+    camera.position.set(84, 25, 100);
+    camera.lookAt(84, 0, 80);
+    layer.update(0, 0, camera);
+    let shell = 0;
+    let other = 0;
+    scene.getObjectByName('objects')!.traverse((o) => {
+      if (o.name !== 'prop-shadow-casters') return;
+      const r = (o as THREE.Mesh).geometry.getAttribute('aCrownR');
+      for (let i = 0; i < r.count; i++) {
+        if (r.getZ(i) < 0) {
+          shell++;
+          expect(r.getZ(i)).toBe(-160); // the den's reach (habitat.ts occluderReach 1.6 m)
+        } else if (r.getY(i) === 0) other++;
+      }
+    });
+    layer.dispose();
+    expect(shell).toBeGreaterThan(0);
+    expect(other).toBeGreaterThan(0); // the wooden shelter: never fades
+  }, 20000);
 });
 
 describe('fence shadow-only caster batch (batched back-end)', () => {

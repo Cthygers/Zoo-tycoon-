@@ -8,6 +8,21 @@ import { OBJECTS_BY_ID } from '../data/objects';
 import { SPECIES, SPECIES_BY_ID } from '../data/species';
 import { GATE_SPOT } from './guests';
 import type { Simulation } from './simulation';
+import type { AnimalSim } from './state';
+
+/** The exhibit terms of the rating (see Progress.exhibitParts). */
+export interface ExhibitParts {
+  /** Animals counted. */
+  count: number;
+  /** Mean welfare: happiness × (0.6 + 0.4 × health), 0 with no animals. */
+  welfare: number;
+  /** Collection weight (Simulation.collectionWeight summed). */
+  held: number;
+  /** Different species. */
+  species: number;
+  /** Mean appeal of those species ÷ 10 (0..1), 0 with none. */
+  appeal: number;
+}
 
 interface ObjectiveDef {
   id: string;
@@ -259,6 +274,40 @@ export class Progress {
   private outlets = { food: 0, drink: 0, restroom: 0 };
 
   /**
+   * The exhibit half of the rating, shared with versus Zoo Points: over the animals `filter`
+   * accepts (every animal when omitted), their mean welfare, how much of a collection they make
+   * (`held`: animals crammed past their habitat's room count only for the room there is), how
+   * many species, and the species' mean appeal (0..1).
+   */
+  exhibitParts(filter?: (a: AnimalSim) => boolean): ExhibitParts {
+    const sim = this.sim;
+    let ah = 0;
+    let n = 0;
+    let held = 0;
+    const species = this.exhibitSpecies;
+    species.clear();
+    let appeal = 0;
+    for (const a of sim.animals.values()) {
+      if (filter && !filter(a)) continue;
+      ah += a.happiness * (0.6 + 0.4 * a.health);
+      n++;
+      held += sim.collectionWeight(a);
+      if (!species.has(a.speciesId)) {
+        species.add(a.speciesId);
+        appeal += SPECIES_BY_ID[a.speciesId]?.appeal ?? 5;
+      }
+    }
+    return {
+      count: n,
+      welfare: n ? ah / n : 0,
+      held,
+      species: species.size,
+      appeal: species.size ? appeal / species.size / 10 : 0,
+    };
+  }
+  private readonly exhibitSpecies = new Set<string>();
+
+  /**
    * Instantaneous rating target 0..100 from the current zoo: up to 55 for the
    * exhibits (a varied, large, appealing collection, scaled by how well the
    * animals are kept) and up to 45 for the visit (mostly how happy guests are,
@@ -269,25 +318,12 @@ export class Progress {
   targetRating(): number {
     const sim = this.sim;
     this.refreshFacilities();
-    let ah = 0;
-    let n = 0;
-    let held = 0;
-    const species = new Set<string>();
-    let appeal = 0;
-    for (const a of sim.animals.values()) {
-      ah += a.happiness * (0.6 + 0.4 * a.health);
-      n++;
-      held += sim.collectionWeight(a);
-      if (!species.has(a.speciesId)) {
-        species.add(a.speciesId);
-        appeal += SPECIES_BY_ID[a.speciesId]?.appeal ?? 5;
-      }
-    }
-    const welfare = n ? ah / n : 0;
-    const diversity = 1 - Math.exp(-species.size / 3.5);
+    const ex = this.exhibitParts();
+    const welfare = ex.welfare;
+    const diversity = 1 - Math.exp(-ex.species / 3.5);
     // cramming more animals into a full habitat adds nothing
-    const collection = 1 - Math.exp(-held / 18);
-    const avgAppeal = species.size ? appeal / species.size / 10 : 0;
+    const collection = 1 - Math.exp(-ex.held / 18);
+    const avgAppeal = ex.appeal;
     const exhibits = 55 * (0.5 * diversity + 0.3 * collection + 0.2 * avgAppeal) * (0.4 + 0.6 * welfare);
 
     let gh = 0;

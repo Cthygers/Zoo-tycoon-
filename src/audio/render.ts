@@ -69,16 +69,65 @@ export function offlineCtor(): OfflineCtor | null {
   return g.OfflineAudioContext ?? g.webkitOfflineAudioContext ?? null;
 }
 
-const irCache = new Map<string, AudioBuffer>();
+/** Normalised IR parts per (rate, decay, length, brightness), see irParts. */
+const irCache = new Map<string, readonly IrPart[]>();
+/** Per-render IRs longer than this (s) are set up as two partial convolvers, a main-thread slice each. */
+const SPLIT_IR_S = 0.3;
+
+interface IrPart {
+  buffer: AudioBuffer;
+  /** Start of the part in the whole IR, s. */
+  offset: number;
+}
+
+/**
+ * The scale a ConvolverNode with `normalize = true` applies to its IR (the Web Audio
+ * spec's normalisation: RMS power, −58 dB calibration at 44.1 kHz). Parts of a split
+ * IR must share the scale of the whole one, so it is applied by hand.
+ */
+export function normalizationScale(ir: AudioBuffer): number {
+  let power = 0;
+  for (let ch = 0; ch < ir.numberOfChannels; ch++) {
+    const d = ir.getChannelData(ch);
+    for (let i = 0; i < d.length; i++) power += d[i] * d[i];
+  }
+  power = Math.sqrt(power / (ir.numberOfChannels * ir.length));
+  if (!Number.isFinite(power) || power < 0.000125) power = 0.000125;
+  return (0.00125 / power) * (44100 / ir.sampleRate) * (ir.numberOfChannels === 4 ? 0.5 : 1);
+}
+
+/**
+ * A render's reverb IR as normalised parts. ConvolverNode sets up its whole IR on the
+ * main thread in one call (8–16 ms for a 1 s IR at 4× CPU throttle): a long IR becomes
+ * two halves, each set up in a slice of its own, the second fed through a delay.
+ */
+function irParts(c: BaseAudioContext, decay: number, length: number, bright: number): readonly IrPart[] {
+  const key = `${c.sampleRate}:${decay}:${length}:${bright}`;
+  const hit = irCache.get(key);
+  if (hit) return hit;
+  const ir = impulse(c, decay, length, bright);
+  const scale = normalizationScale(ir);
+  const n = ir.length;
+  const sr = ir.sampleRate;
+  const step = n > SPLIT_IR_S * sr ? Math.ceil(n / 2) : n;
+  const src = ir.getChannelData(0);
+  const parts: IrPart[] = [];
+  for (let i0 = 0; i0 < n; i0 += step) {
+    const len = Math.min(step, n - i0);
+    const buffer = c.createBuffer(1, len, sr);
+    const d = buffer.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = src[i0 + i] * scale;
+    parts.push({ buffer, offset: i0 / sr });
+  }
+  irCache.set(key, parts);
+  return parts;
+}
 
 /**
  * Synthetic outdoor impulse response: a few early ground / wall reflections and
  * a diffuse tail that darkens as it decays.
  */
 function impulse(c: BaseAudioContext, decay: number, length: number, bright: number): AudioBuffer {
-  const key = `${c.sampleRate}:${decay}:${length}:${bright}`;
-  const hit = irCache.get(key);
-  if (hit) return hit;
   const sr = c.sampleRate;
   const n = Math.max(64, Math.floor(length * sr));
   const buf = c.createBuffer(1, n, sr);
@@ -104,7 +153,6 @@ function impulse(c: BaseAudioContext, decay: number, length: number, bright: num
     const i = Math.floor(tt * sr);
     if (i < n) d[i] += g * (r() < 0.5 ? -1 : 1);
   }
-  irCache.set(key, buf);
   return buf;
 }
 
@@ -253,6 +301,11 @@ class Slicer {
     this.t = performance.now();
     this.end = this.t + ms;
   }
+  /** Yield now, whatever is left of the slice: the next step is one long call that needs a slice of its own. */
+  async yieldNow(): Promise<void> {
+    this.end = 0;
+    await this.tick();
+  }
   /** Run fn over [0, n) in chunks, yielding between slices. */
   async each(n: number, fn: (i0: number, i1: number) => void): Promise<void> {
     for (let i = 0; i < n; i += CHUNK) {
@@ -309,12 +362,21 @@ export async function renderRecipe(r: Recipe, seed: number, opts: RenderOptions 
   dry.connect(hp);
   let wet: AudioNode | null = null;
   if (r.reverb) {
-    const conv = c.createConvolver();
-    // short IRs: the convolver's FFT set-up runs on the main thread
-    conv.buffer = impulse(c, r.reverb.decay, Math.min(r.reverb.length ?? 1, r.reverb.decay * 3, 1.1), r.reverb.bright ?? 0.5);
     const send = c.createGain();
-    send.connect(conv);
-    conv.connect(hp);
+    // short IRs: the convolvers' FFT set-up runs on the main thread, a part per slice
+    for (const part of irParts(c, r.reverb.decay, Math.min(r.reverb.length ?? 1, r.reverb.decay * 3, 1.1), r.reverb.bright ?? 0.5)) {
+      const conv = c.createConvolver();
+      conv.normalize = false;
+      conv.buffer = part.buffer;
+      if (part.offset > 0) {
+        const delay = c.createDelay(part.offset + 0.01);
+        delay.delayTime.value = part.offset;
+        send.connect(delay);
+        delay.connect(conv);
+      } else send.connect(conv);
+      conv.connect(hp);
+      await sl.yieldNow();
+    }
     wet = send;
   }
   await sl.tick();
@@ -351,6 +413,18 @@ async function assignLoopNoise(c: BaseAudioContext, noise: RenderNoise, seed: nu
   noise.sources.clear();
 }
 
+/**
+ * The seamless-loop fold of samples [i0, i1) of the head: the rendered tail
+ * [L, L + x) is cross-faded into [0, x) at equal power (head × sin, tail × cos).
+ * recipes/colony.ts foldable() pre-windows its circular mix against exactly this.
+ */
+export function foldLoop(d: Float32Array, L: number, x: number, i0 = 0, i1 = x): void {
+  for (let i = i0; i < i1; i++) {
+    const p = (i / x) * Math.PI * 0.5;
+    d[i] = d[i] * Math.sin(p) + d[L + i] * Math.cos(p);
+  }
+}
+
 async function postProcess(c: BaseAudioContext, buf: AudioBuffer, r: Recipe, sl: Slicer): Promise<SoundAsset> {
   const sr = buf.sampleRate;
   const d = buf.getChannelData(0);
@@ -364,12 +438,7 @@ async function postProcess(c: BaseAudioContext, buf: AudioBuffer, r: Recipe, sl:
     const L = Math.floor(r.dur * sr);
     n = L;
     const x = Math.min(Math.floor(fold * sr), d.length - L);
-    await sl.each(x, (i0, i1) => {
-      for (let i = i0; i < i1; i++) {
-        const p = (i / x) * Math.PI * 0.5;
-        d[i] = d[i] * Math.sin(p) + d[L + i] * Math.cos(p);
-      }
-    });
+    await sl.each(x, (i0, i1) => foldLoop(d, L, x, i0, i1));
     await sl.each(n, (i0, i1) => {
       for (let i = i0; i < i1; i++) mean += d[i];
     });

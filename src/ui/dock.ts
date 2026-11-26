@@ -161,7 +161,7 @@ export class Dock {
     return this.activeCat;
   }
 
-  // elements the first-run tour points at (null when not on screen)
+  // elements UI extensions (the tutorial) point at (null when not on screen)
   categoryButton(id: CategoryId): HTMLElement | null {
     return this.catBtns.get(id) ?? null;
   }
@@ -190,6 +190,11 @@ export class Dock {
 
   get confirmBarEl(): HTMLElement | null {
     return this.confirmVisible ? this.confirmEl : null;
+  }
+
+  /** The confirm bar's Build / Adopt / Hire button (null while the bar is hidden). */
+  get confirmOkEl(): HTMLElement | null {
+    return this.confirmVisible ? this.cfOk : null;
   }
 
   /** Show or hide the camera-gesture line on the tool bar. */

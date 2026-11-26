@@ -88,18 +88,58 @@ const BED_LEVELS = Object.fromEntries(BED_IDS.map((b) => [b, 0])) as Record<BedI
 const CUE_IDS: readonly Cue[] = ['tap', 'select', 'open', 'close', 'build', 'bulldoze', 'error', 'deny', 'cash', 'celebrate'];
 const CHANNELS: readonly Channel[] = ['ambience', 'world', 'ui', 'music'];
 const VOLUME_CHANNELS: readonly AudioChannel[] = ['master', ...CHANNELS];
-/** Master gain into the glue compressor (calibrated to the loudness targets). */
-const MASTER = 1.9;
 /**
- * Static channel levels, calibrated with MASTER on the demo zoo: day close
- * views −16 LUFS, a lion roar within its reference distance −10…−13 LUFS
- * momentary; UI cues stay at 0.8 × the world level.
+ * Master gain into the glue compressor, calibrated on the demo zoo's day cycle with the
+ * focus mix and the altitude trim: −17.3 LUFS integrated, overview −18.3, night −20.6.
  */
-const CHANNEL_LEVEL: Record<Channel, number> = { ambience: 0.55, world: 0.4, ui: 0.32, music: 1 };
+const MASTER = 2.25;
+/**
+ * Static channel levels: a lion roar within its reference distance −10…−13 LUFS
+ * momentary; UI cues clear of a busy day bed on a phone (the UI scale below
+ * brings them down with a quieter ambience).
+ */
+const CHANNEL_LEVEL: Record<Channel, number> = { ambience: 0.55, world: 0.4, ui: 0.7, music: 1 };
 /** Outdoor reverb return (unit-energy IR): at the full send (≥ 29 m) the tail sits ~3 dB under the dry sound. */
 const REVERB_RETURN = 1.8;
+/** The shared reverb's IR is set up in this many partial convolvers (one main-thread slice each). */
+const REVERB_PARTS = 3;
 /** Σ bed levels in a busy daytime close view: the UI channel is at full level from here up. */
-const DAY_CLOSE_REF = 1.1;
+const DAY_CLOSE_REF = 1;
+/**
+ * The UI level follows the ambience, (Σ bed levels / DAY_CLOSE_REF)^UI_SCALE_SLOPE down to
+ * UI_SCALE_FLOOR, so the cues keep about the same margin over the beds in every view: a night
+ * overview's beds are ~12 dB quieter on a phone for a third of the bed-level sum.
+ */
+const UI_SCALE_SLOPE = 2;
+const UI_SCALE_FLOOR = 0.165;
+/**
+ * Focus views: the camera follows an animal, has one selected or hovers close over
+ * some. Full focus mix with the camera within FOCUS_CAM[0] m of its focus, none
+ * from FOCUS_CAM[1] m (well before the overview).
+ */
+const FOCUS_CAM: readonly [number, number] = [20, 30];
+/** A followed or selected animal further than this from the focus point (m) is not the one in view. */
+const FOCUS_ANIMAL_RADIUS = 25;
+/** Hovering: any animal within this many m of the focus point. */
+const FOCUS_HOVER_RADIUS = 12;
+/**
+ * Focus mix, so the animal in view (breath, steps, chewing, calls) cuts through on a
+ * phone speaker: ambience −6 dB, plus a −6 dB dip around 3.4 kHz where the birds,
+ * cicadas and humid-biome insects sit; world (animals) +4 dB of presence, which also keeps
+ * the view's loudness up.
+ */
+const FOCUS_AMB_DB = -6;
+const FOCUS_WORLD_DB = 4;
+const FOCUS_BAND = { hz: 3400, q: 0.8, db: -6 } as const;
+/** Focus mix attack / release time constants (s): ≈ 0.6 s in, ≈ 1.5 s out. */
+const FOCUS_TC: readonly [number, number] = [0.2, 0.5];
+/** World voices recede as the camera rises (gain at the overview: −6 dB). Lion choruses must not make the overview the loudest view. */
+const ALTITUDE_TRIM_MIN = 0.5;
+/** Tutorial read-aloud: ambience and world −9 dB; attack / release time constants (≈ 0.25 s / 0.6 s). */
+const SPEECH_DB = -9;
+const SPEECH_TC: readonly [number, number] = [0.083, 0.2];
+/** A speech duck that is never released lets go on its own after this long (s). */
+const SPEECH_MAX = 30;
 /** Legacy animal calls: audible radius around the ear, m. */
 const CALL_RADIUS = 60;
 const AMBIENT_ONESHOTS = ['amb.songA', 'amb.songB', 'amb.songA', 'amb.wood', 'amb.crow'] as const;
@@ -108,12 +148,21 @@ const LOWSPEC_RATE = 16000;
 /** Max keyed loops [normal, lowSpec] and beds playing at once. */
 const MAX_LOOPS: readonly [number, number] = [4, 2];
 const MAX_BEDS: readonly [number, number] = [7, 5];
+/** lowSpec: a bed silent this long (s) releases its buffer (decoded memory ≤ 14 MB over a game day). */
+const LOWSPEC_BED_RELEASE = 180;
 /** Steal / stop fade (s) and the gap before a stolen voice restarts. */
 const STEAL_FADE = 0.02;
 const STEAL_GAP = 0.025;
 const MAX_LAYERS = 2;
+/** Bed sides re-seek after this fraction of their buffer's length, crossfading over BED_XFADE s (at most a fifth of it). */
+const BED_SEGMENT: readonly [number, number] = [0.4, 0.75];
+const BED_XFADE = 1.5;
+/** Equal-power crossfade curves (uncorrelated sides: the summed power stays constant). */
+const FADE_IN = Float32Array.from({ length: 33 }, (_, k) => Math.sin((k / 32) * (Math.PI / 2)));
+const FADE_OUT = Float32Array.from({ length: 33 }, (_, k) => Math.cos((k / 32) * (Math.PI / 2)));
 
 const noop = () => {};
+const dbGain = (db: number) => Math.pow(10, db / 20);
 
 /**
  * Freeze a param at its current value (cancelAndHoldAtTime where available) so
@@ -147,7 +196,17 @@ const LP4_Q = [0.541, 1.307] as const;
 
 // -------------------------------------------------------------------- beds
 
-/** A looping bed: two sources (left / right) through a 4-pole low-pass. Also used for keyed loops. */
+/** One side's source with its own gain (crossfades between re-seeks). */
+interface BedSide {
+  src: AudioBufferSourceNode;
+  gain: GainNode;
+}
+
+/**
+ * A looping bed: two sources (left / right) through a 4-pole low-pass. Also used for keyed loops.
+ * A strict loop repeats audibly at its period (16–24 s beds, 6 s colony loops), so each side jumps
+ * to a random point of its buffer every BED_SEGMENT × its length, crossfaded at equal power.
+ */
 class Bed {
   asset: SoundAsset | null = null;
   /** Optional second layer for the right-hand source (bed.<id>.b). */
@@ -156,7 +215,9 @@ class Bed {
   private readonly lp: BiquadFilterNode[];
   private readonly inputs: AudioNode[];
   private readonly pans: StereoPannerNode[] = [];
-  private srcs: AudioBufferSourceNode[] = [];
+  private sides: BedSide[] = [];
+  /** Context time of each side's next re-seek. */
+  private readonly nextSeek: number[] = [];
   playing = false;
   quiet = 0;
   level = 0;
@@ -195,9 +256,6 @@ class Bed {
 
   start(rng: Rng): void {
     if (this.playing || !this.asset) return;
-    const buf = this.asset.buffer;
-    const L = buf.duration;
-    const off = rng.range(0, L);
     const now = this.ctx.currentTime;
     // from silence (a stop fade may still be running)
     fadeOut(this.out.gain, now, STEAL_FADE);
@@ -206,35 +264,70 @@ class Bed {
     this.level = 0;
     this.setCut(this.cut || 18000, 0);
     for (let i = 0; i < this.inputs.length; i++) {
-      const s = this.ctx.createBufferSource();
-      const b = i === 1 ? this.assetB : null;
-      s.buffer = b ? b.buffer : buf;
-      s.loop = true;
-      s.connect(this.inputs[i]);
-      if (b) s.start(at, rng.range(0, b.buffer.duration));
-      else {
-        // the second copy runs half a loop apart and 3.5 % slower: decorrelated
-        // left / right, and the pair never lines up the same way twice
-        if (i === 1) s.playbackRate.value = 0.966;
-        s.start(at, (off + i * L * 0.5) % L);
-      }
-      this.srcs.push(s);
+      this.sides.push(this.source(i, rng, at, 1));
+      this.nextSeek[i] = at + this.segment(i, rng);
     }
     this.playing = true;
     this.quiet = 0;
+  }
+
+  /** Re-seek the first side that is due (at most one per call: spreads the node work over updates). */
+  reseek(rng: Rng): boolean {
+    if (!this.playing) return false;
+    const now = this.ctx.currentTime;
+    for (let i = 0; i < this.sides.length; i++) {
+      if (now < this.nextSeek[i]) continue;
+      const len = this.layer(i).duration;
+      const xf = Math.min(BED_XFADE, 0.2 * len);
+      const at = now + 0.02;
+      const old = this.sides[i];
+      old.gain.gain.setValueCurveAtTime(FADE_OUT, at, xf);
+      safeStop(old.src, at + xf + 0.02);
+      this.sides[i] = this.source(i, rng, at, 0);
+      this.sides[i].gain.gain.setValueCurveAtTime(FADE_IN, at, xf);
+      this.nextSeek[i] = at + this.segment(i, rng);
+      return true;
+    }
+    return false;
   }
 
   /** Fade out over 60 ms, then stop the sources. */
   stop(): void {
     const now = this.ctx.currentTime;
     fadeOut(this.out.gain, now, 0.06);
-    for (const s of this.srcs) {
-      safeStop(s, now + 0.065);
-      s.onended = () => s.disconnect();
-    }
-    this.srcs = [];
+    for (const s of this.sides) safeStop(s.src, now + 0.065);
+    this.sides = [];
     this.playing = false;
     this.level = 0;
+  }
+
+  /** The buffer side `i` plays: the .b layer on the right when there is one. */
+  private layer(i: number): AudioBuffer {
+    return (i === 1 && this.assetB ? this.assetB : this.asset!).buffer;
+  }
+
+  private segment(i: number, rng: Rng): number {
+    return this.layer(i).duration * rng.range(BED_SEGMENT[0], BED_SEGMENT[1]);
+  }
+
+  /** A looping source for side `i` from a random point, through its own gain. */
+  private source(i: number, rng: Rng, at: number, gain: number): BedSide {
+    const buf = this.layer(i);
+    const g = this.ctx.createGain();
+    g.gain.value = gain;
+    g.connect(this.inputs[i]);
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+    // the right-hand copy of a single layer runs 3.5 % slower: decorrelated left / right
+    if (i === 1 && !this.assetB) src.playbackRate.value = 0.966;
+    src.connect(g);
+    src.start(at, rng.range(0, buf.duration));
+    src.onended = () => {
+      src.disconnect();
+      g.disconnect();
+    };
+    return { src, gain: g };
   }
 
   dispose(): void {
@@ -297,6 +390,8 @@ interface Layer {
 
 class Voice {
   layers: Layer[] = [];
+  /** Layer gains whose source has ended, still connected to the voice: reused by the next plays. */
+  private readonly spare: GainNode[] = [];
   readonly lp: BiquadFilterNode;
   readonly shelf: BiquadFilterNode;
   readonly color: BiquadFilterNode;
@@ -368,27 +463,21 @@ class Voice {
   start(buf: AudioBuffer, rate: number, level: number, when: number, att: Readonly<Attenuation>, color: { hz: number; db: number } | undefined): Layer {
     const now = this.ctx.currentTime;
     let at = Math.max(now, when);
-    if (this.busy(now)) {
+    const stolen = this.busy(now);
+    if (stolen) {
       for (const l of this.layers) this.fadeLayer(l, now, STEAL_FADE);
       this.layers.length = 0;
       at = Math.max(at, now + STEAL_GAP);
     }
     this.bufRate = buf.sampleRate;
     const cut = this.cutFor(att);
-    const params: [AudioParam, number][] = [
-      [this.gain.gain, att.gain],
-      [this.lp.frequency, cut],
-      [this.shelf.gain, att.shelfDb],
-      [this.color.frequency, color?.hz ?? 1000],
-      [this.color.gain, color?.db ?? 0],
-    ];
-    if (this.pan) params.push([this.pan.pan, att.pan]);
-    if (this.send) params.push([this.send.gain, att.wet]);
-    // a stolen voice is silent from now + STEAL_FADE: switch its parameters after that
-    for (const [p, v] of params) {
-      hold(p, now);
-      p.setValueAtTime(v, at);
-    }
+    this.setAt(this.gain.gain, att.gain, at, stolen);
+    this.setAt(this.lp.frequency, cut, at, stolen);
+    this.setAt(this.shelf.gain, att.shelfDb, at, stolen);
+    this.setAt(this.color.frequency, color?.hz ?? 1000, at, stolen);
+    this.setAt(this.color.gain, color?.db ?? 0, at, stolen);
+    if (this.pan) this.setAt(this.pan.pan, att.pan, at, stolen);
+    if (this.send) this.setAt(this.send.gain, att.wet, at, stolen);
     this.curGain = att.gain;
     this.curPan = att.pan;
     this.curCut = cut;
@@ -397,6 +486,16 @@ class Voice {
     this.startAt = at;
     this.endAt = 0;
     return this.layer(buf, rate, level, at);
+  }
+
+  /**
+   * A parameter's value from `at`. A stolen voice is silent from now + STEAL_FADE: its
+   * running automation is frozen first. An idle voice has nothing scheduled ahead, so a
+   * plain set is enough (a third of the AudioParam calls per start).
+   */
+  private setAt(p: AudioParam, v: number, at: number, stolen: boolean): void {
+    if (stolen) hold(p, this.ctx.currentTime);
+    p.setValueAtTime(v, at);
   }
 
   /** Add a source to this voice (bout layering; at most MAX_LAYERS overlap). */
@@ -420,19 +519,29 @@ class Voice {
     }
     this.layers = live.filter((l) => !l.stopped);
     this.refreshEnd();
-    const g = this.ctx.createGain();
-    g.gain.value = 0;
+    let g = this.spare.pop();
+    if (g) {
+      // a reused gain may still hold its last play's automation
+      g.gain.cancelScheduledValues(now);
+      g.gain.setValueAtTime(0, now);
+    } else {
+      g = this.ctx.createGain();
+      g.gain.value = 0;
+      g.connect(this.lp);
+    }
     g.gain.setValueAtTime(level, at);
-    g.connect(this.lp);
     const s = this.ctx.createBufferSource();
     s.buffer = buf;
     s.playbackRate.value = rate;
     s.connect(g);
     s.start(at);
     const layer: Layer = { src: s, gain: g, level, endAt: at + buf.duration / rate + 0.05, stopped: false };
+    const gain = g;
     s.onended = () => {
       s.disconnect();
-      g.disconnect();
+      // the gain goes back to the voice for the next play: a late stop() on this layer must not touch it
+      layer.stopped = true;
+      this.spare.push(gain);
     };
     this.layers.push(layer);
     this.endAt = Math.max(this.endAt, layer.endAt);
@@ -499,8 +608,10 @@ interface ChannelNodes {
   input: GainNode;
   /** Player volume, v². */
   vol: GainNode;
-  /** Ducking, separate from the volume. */
+  /** Short ducks (calls, celebrate), separate from the volume. */
   duck: GainNode;
+  /** Slow mix trims: focus views and the tutorial's speech. */
+  trim: GainNode;
   duckDb: number;
   duckUntil: number;
 }
@@ -545,10 +656,21 @@ export class ZooAudio implements IAudio {
   private worldFilter!: BiquadFilterNode;
   private worldGain!: GainNode;
   /** Probe names: ambience / world (reverb included) / ui channel outputs. */
-  private ambBus!: GainNode;
-  private sfxBus!: GainNode;
-  private uiBus!: GainNode;
+  private ambBus!: AudioNode;
+  private sfxBus!: AudioNode;
+  private uiBus!: AudioNode;
   private reverbIn!: GainNode;
+  /** Animal voices, foley and colony loops (and their reverb send): the altitude trim. */
+  private animalBus!: GainNode;
+  private animalSend!: GainNode;
+  /** Focus views: the dip of the birds' and insects' band on the ambience. */
+  private focusEq!: BiquadFilterNode;
+  /** Current focus amount 0..1 and altitude trim (targets of the smoothed params). */
+  private focus = 0;
+  private altitude = 1;
+  private selectedId = -1;
+  private speech = false;
+  private speechUntil = 0;
   private readonly beds = new Map<BedId, Bed>();
   private readonly loops = new Map<string, LoopEmitter>();
   private readonly pools: Record<Exclude<Pool, 'ui'>, Voice[]> = { voice: [], foley: [], fx: [], amb: [] };
@@ -613,8 +735,8 @@ export class ZooAudio implements IAudio {
   private openness = 1;
   private nightness = 0;
   private birdsDay = 1;
-  /** UI level relative to its channel level (follows how busy the ambience is). */
-  private uiScale = 1;
+  /** UI level relative to its channel level (follows how busy the ambience is); −1 until the first update. */
+  private uiScale = -1;
   private readonly biome = { savanna: 0, arctic: 0, humid: 0 };
   private readonly biomeSide = { savanna: 0, arctic: 0, humid: 0 };
   /** Per habitat id: 1 = holds a desert species, 2 = holds a tropical / wetland species. */
@@ -661,6 +783,7 @@ export class ZooAudio implements IAudio {
     this.unsub.push(
       events.on('objectiveCompleted', () => this.play('celebrate')),
       events.on('animalRemoved', (e) => this.calling.delete(e.id)),
+      events.on('selectionChanged', (e) => (this.selectedId = e.selection?.kind === 'animal' ? e.selection.id : -1)),
       events.on('objectAdded', () => (this.objectsDirty = true)),
       events.on('objectRemoved', () => (this.objectsDirty = true)),
       events.on('habitatsChanged', () => (this.habitatsDirty = true)),
@@ -820,9 +943,9 @@ export class ZooAudio implements IAudio {
     if (this.appSuspended) return;
     this.appSuspended = true;
     if (!this.ctx) return;
-    // 40 ms fade first: suspending mid-waveform pops
+    // 50 ms fade first: suspending mid-waveform pops
     const now = this.ctx.currentTime;
-    fadeOut(this.master.gain, now, 0.04);
+    fadeOut(this.master.gain, now, 0.05);
     if (this.suspendTimer !== null) clearTimeout(this.suspendTimer);
     this.suspendTimer = setTimeout(() => {
       this.suspendTimer = null;
@@ -832,7 +955,7 @@ export class ZooAudio implements IAudio {
         const c = this.ctx as AudioContext;
         if (c.state === 'running') c.suspend().catch(noop);
       }
-    }, 60);
+    }, 70);
   }
 
   play(cue: Cue): void {
@@ -854,8 +977,24 @@ export class ZooAudio implements IAudio {
     });
     if (!h) return;
     this.lastCue.set(cue, now);
-    // let the jingle breathe
-    if (cue === 'celebrate') this.duck('ambience', -6, 1.3);
+    // let the jingle breathe over a busy zoo
+    if (cue === 'celebrate') {
+      this.duck('ambience', -6, 1.3);
+      this.duck('world', -6, 1.3);
+    }
+  }
+
+  /**
+   * Duck ambience and world while the tutorial's read-aloud speaks (called structurally by
+   * the tutorial; not part of IAudio). Repeated calls are harmless; a duck that is never
+   * released lets go after SPEECH_MAX s.
+   */
+  speechDuck(on: boolean): void {
+    on = !!on;
+    if (on) this.speechUntil = this.time + SPEECH_MAX;
+    if (on === this.speech) return;
+    this.speech = on;
+    if (this.ctx) this.applyTrims(on ? SPEECH_TC[0] : SPEECH_TC[1]);
   }
 
   setVolume(ch: AudioChannel, v: number): void {
@@ -889,6 +1028,8 @@ export class ZooAudio implements IAudio {
       this.envT = 0.25;
       this.sampleEnvironment(0.25);
       this.updateBeds(0.25);
+      this.updateMix();
+      this.reseekOne();
     }
     this.animT -= dt;
     if (this.animT <= 0) {
@@ -1016,6 +1157,7 @@ export class ZooAudio implements IAudio {
         zoomNear: r2(this.ear.zoomNear),
         near: this.nearCount,
       },
+      mix: { focus: r2(this.focus), altitude: r2(this.altitude), speech: this.speech, uiScale: r2(this.uiScale) },
     };
   }
 
@@ -1099,32 +1241,72 @@ export class ZooAudio implements IAudio {
       const vol = c.createGain();
       vol.gain.value = this.volumes[ch] ** 2;
       const duck = c.createGain();
+      const trim = c.createGain();
       input.connect(vol);
       vol.connect(duck);
-      duck.connect(ch === 'world' || ch === 'ambience' ? this.worldFilter : this.masterVol);
-      chan[ch] = { input, vol, duck, duckDb: 0, duckUntil: 0 };
+      duck.connect(trim);
+      chan[ch] = { input, vol, duck, trim, duckDb: 0, duckUntil: 0 };
     }
     this.chan = chan;
-    this.ambBus = chan.ambience.duck;
-    this.sfxBus = chan.world.duck;
-    this.uiBus = chan.ui.duck;
-    // one shared outdoor reverb, returned into the world channel
-    const conv = c.createConvolver();
-    conv.normalize = false;
-    // built by the render queue right after the UI cues, in idle slices (never inside the unlocking gesture)
-    this.reverbBuild = async () => {
-      const ir = await outdoorImpulse(c, this.lowSpec ? 0.8 : 1.2, this.lowSpec ? 1 : 2);
-      if (!this.disposed) conv.buffer = ir;
-    };
+    // focus views dip the band where the birds and insects sing, on the ambience only
+    this.focusEq = c.createBiquadFilter();
+    this.focusEq.type = 'peaking';
+    this.focusEq.frequency.value = FOCUS_BAND.hz;
+    this.focusEq.Q.value = FOCUS_BAND.q;
+    this.focusEq.gain.value = 0;
+    chan.ambience.trim.connect(this.focusEq);
+    this.focusEq.connect(this.worldFilter);
+    chan.world.trim.connect(this.worldFilter);
+    chan.ui.trim.connect(this.masterVol);
+    chan.music.trim.connect(this.masterVol);
+    this.ambBus = this.focusEq;
+    this.sfxBus = chan.world.trim;
+    this.uiBus = chan.ui.trim;
+    this.animalBus = c.createGain();
+    this.animalBus.connect(chan.world.input);
+    this.animalSend = c.createGain();
+    // a speech duck asked for before the context existed
+    if (this.speech) for (const ch of ['ambience', 'world'] as const) chan[ch].trim.gain.value = dbGain(SPEECH_DB);
+    // One shared outdoor reverb, returned into the world channel. Built by the render queue after
+    // the UI cues and the urgent beds, in idle slices (never inside the unlocking gesture). A
+    // ConvolverNode sets up its whole IR on the main thread in one call (35–40 ms for 1.2 s stereo
+    // at 4× CPU throttle), so the IR is split into REVERB_PARTS segments: segment k convolves the
+    // send delayed by its offset, each set up in a slice of its own. The sum is the same convolution.
     this.reverbIn = c.createGain();
     this.reverbIn.gain.value = REVERB_RETURN;
-    this.reverbIn.connect(conv);
-    conv.connect(chan.world.input);
+    this.animalSend.connect(this.reverbIn);
+    const reverbIn = this.reverbIn;
+    const out = chan.world.input;
+    this.reverbBuild = async () => {
+      const ir = await outdoorImpulse(c, this.lowSpec ? 0.8 : 1.2, this.lowSpec ? 1 : 2);
+      const n = ir.length;
+      const seg = Math.ceil(n / REVERB_PARTS);
+      for (let k = 0; k * seg < n; k++) {
+        if (this.disposed) return;
+        const len = Math.min(seg, n - k * seg);
+        const part = c.createBuffer(ir.numberOfChannels, len, ir.sampleRate);
+        for (let ch = 0; ch < ir.numberOfChannels; ch++) part.getChannelData(ch).set(ir.getChannelData(ch).subarray(k * seg, k * seg + len));
+        const conv = c.createConvolver();
+        conv.normalize = false;
+        conv.buffer = part;
+        if (k === 0) reverbIn.connect(conv);
+        else {
+          const d = c.createDelay((k * seg) / ir.sampleRate + 0.01);
+          d.delayTime.value = (k * seg) / ir.sampleRate;
+          reverbIn.connect(d);
+          d.connect(conv);
+        }
+        conv.connect(out);
+        if (k * seg + len < n) await yieldMain();
+      }
+    };
     for (const id of BED_IDS) this.beds.set(id, new Bed(c, chan.ambience.input, !this.lowSpec || LOWSPEC_STEREO.has(id)));
     const tier = this.lowSpec ? 1 : 0;
     for (const p of ['voice', 'foley', 'fx', 'amb'] as const) {
-      const dest = chan[POOL_CHANNEL[p]].input;
-      const rev = POOL_CHANNEL[p] === 'world' ? this.reverbIn : null;
+      // animal voices and foley go through the altitude trim; coins, bells and crates do not
+      const animal = p === 'voice' || p === 'foley';
+      const dest = animal ? this.animalBus : chan[POOL_CHANNEL[p]].input;
+      const rev = animal ? this.animalSend : POOL_CHANNEL[p] === 'world' ? this.reverbIn : null;
       for (let i = 0; i < POOL_SIZES[p][tier]; i++) this.pools[p].push(new Voice(c, dest, rev));
     }
     if (!this.injected) {
@@ -1259,7 +1441,8 @@ export class ZooAudio implements IAudio {
     }
     try {
       while (this.queue.length && !this.disposed && this._enabled && !this.appSuspended) {
-        if (this.reverbBuild && !this.queue[0].startsWith('cue.')) {
+        // the reverb waits for the cues and the urgent (audible) beds: they are what the player hears first
+        if (this.reverbBuild && !this.queue[0].startsWith('cue.') && !this.urgentIds.has(this.queue[0])) {
           await this.buildReverb();
           // re-check: dispose (which empties the queue), the sound switch or an app pause may have come meanwhile
           continue;
@@ -1299,10 +1482,15 @@ export class ZooAudio implements IAudio {
     }
   }
 
+  /** A failed reverb build leaves the voices dry; it must never stall the render queue. */
   private async buildReverb(): Promise<void> {
     const build = this.reverbBuild!;
     this.reverbBuild = null;
-    await build();
+    try {
+      await build();
+    } catch (err) {
+      console.warn('[audio] outdoor reverb unavailable', err);
+    }
   }
 
   private speciesInfo(speciesId: string): SpeciesInfo {
@@ -1475,7 +1663,9 @@ export class ZooAudio implements IAudio {
         this.loops.get(qk)!.bed.dispose();
         this.loops.delete(qk);
       }
-      e = { bed: new Bed(this.ctx!, this.chan[ch].input, true), id, ch, level: 0, side: 0, quiet: 0 };
+      // world loops are animals (colony murmurs): they take the altitude trim
+      const dest = ch === 'world' ? this.animalBus : this.chan[ch].input;
+      e = { bed: new Bed(this.ctx!, dest, true), id, ch, level: 0, side: 0, quiet: 0 };
       this.loops.set(key, e);
     }
     if (e.id !== id) {
@@ -1496,6 +1686,12 @@ export class ZooAudio implements IAudio {
       e.bed.setLevel(level, 0.9);
       e.bed.setBias(side);
     }
+  }
+
+  /** Move one bed or loop side that is due to a new point of its buffer (one per call spreads the node work). */
+  private reseekOne(): void {
+    for (const b of this.beds.values()) if (b.reseek(this.rng)) return;
+    for (const e of this.loops.values()) if (e.bed.reseek(this.rng)) return;
   }
 
   /** Quiet loops stop after 4 s. */
@@ -1524,6 +1720,52 @@ export class ZooAudio implements IAudio {
     hold(g, now);
     g.setTargetAtTime(Math.pow(10, depth / 20), now, 0.027); // ≈ 80 ms attack
     g.setTargetAtTime(1, until, 0.4); // ≈ 1.2 s release
+  }
+
+  /** 4 Hz: the altitude trim of the animals, the focus mix and the speech duck's failsafe. */
+  private updateMix(): void {
+    const now = this.ctx!.currentTime;
+    const alt = ALTITUDE_TRIM_MIN + (1 - ALTITUDE_TRIM_MIN) * this.ear.zoomNear;
+    if (Math.abs(alt - this.altitude) > 0.01) {
+      this.altitude = alt;
+      for (const g of [this.animalBus.gain, this.animalSend.gain]) g.setTargetAtTime(alt, now, 0.5);
+    }
+    if (this.speech && this.time > this.speechUntil) this.speechDuck(false);
+    const f = this.focusAmount();
+    if (Math.abs(f - this.focus) > 0.02 || (f !== this.focus && (f === 0 || f === 1))) {
+      const tc = f > this.focus ? FOCUS_TC[0] : FOCUS_TC[1];
+      this.focus = f;
+      this.applyTrims(tc);
+    }
+  }
+
+  /**
+   * 0..1, how much this is a focus view: the camera close to its focus, with the followed
+   * animal (else the selected one) in view, else any animal right under the focus point.
+   */
+  private focusAmount(): number {
+    const e = this.ear;
+    const close = 1 - smoothstep(FOCUS_CAM[0], FOCUS_CAM[1], e.camDist);
+    if (close <= 0) return 0;
+    const near = (a: AnimalState | undefined, r: number) => !!a && (a.x - e.fx) ** 2 + (a.z - e.fz) ** 2 <= r * r;
+    const id = this.followId >= 0 ? this.followId : this.selectedId;
+    if (id >= 0 && near(this.sim.animals.get(id), FOCUS_ANIMAL_RADIUS)) return close;
+    for (const a of this.sim.animals.values()) if (near(a, FOCUS_HOVER_RADIUS)) return close;
+    return 0;
+  }
+
+  /** Ramp the slow trims (focus mix + speech duck) to their targets with time constant `tc`. */
+  private applyTrims(tc: number): void {
+    const now = this.ctx!.currentTime;
+    const sp = this.speech ? SPEECH_DB : 0;
+    const f = this.focus;
+    const set = (p: AudioParam, v: number) => {
+      hold(p, now);
+      p.setTargetAtTime(v, now, tc);
+    };
+    set(this.chan.ambience.trim.gain, dbGain(FOCUS_AMB_DB * f + sp));
+    set(this.chan.world.trim.gain, dbGain(FOCUS_WORLD_DB * f + sp));
+    set(this.focusEq.gain, FOCUS_BAND.db * f);
   }
 
   private setWorldFilter(cutHz: number, gainDb: number, tc: number): void {
@@ -1759,7 +2001,8 @@ export class ZooAudio implements IAudio {
     L.fountain = this.fountainNear * (0.25 + 0.75 * zn);
     for (const bm of ['savanna', 'humid'] as const) {
       const nightId = `${bm}.night` as const;
-      if (RECIPES[`bed.${nightId}`]) {
+      // lowSpec keeps to one bed per biome (memory): the day bed thins out at night instead
+      if (!this.lowSpec && RECIPES[`bed.${nightId}`]) {
         L[bm] = bio[bm] * (1 - night) * (0.5 + 0.5 * zn) * 0.45;
         L[nightId] = bio[bm] * night * (0.6 + 0.4 * zn) * 0.4;
       } else {
@@ -1768,14 +2011,13 @@ export class ZooAudio implements IAudio {
       }
     }
     L.arctic = bio.arctic * (0.5 + 0.5 * zn) * 0.45;
-    // the ear rises with the camera: every bed recedes a little from above (−2.5 dB at overview)
-    const alt = 0.75 + 0.25 * zn;
     // the loudest beds win when more would play than the tier allows
     const cap = MAX_BEDS[this.lowSpec ? 1 : 0];
     const ambOn = this.channelOn('ambience');
     let sum = 0;
     for (const id of BED_IDS) {
-      const tgt = ambOn && RECIPES[`bed.${id}`] ? L[id] * BED_MIX[id] * alt : 0;
+      // no altitude recession here: from above, the animals recede (animalBus) and the zoo's ambience carries the overview
+      const tgt = ambOn && RECIPES[`bed.${id}`] ? L[id] * BED_MIX[id] : 0;
       L[id] = tgt;
       sum += tgt;
     }
@@ -1794,7 +2036,8 @@ export class ZooAudio implements IAudio {
           else this.request(`bed.${id}`, true);
         }
         const bId = `bed.${id}.b`;
-        const wantB = !!RECIPES[bId] && !this.failed.has(bId);
+        // lowSpec plays one layer per bed (memory); the re-seeks keep its sides apart
+        const wantB = !this.lowSpec && !!RECIPES[bId] && !this.failed.has(bId);
         if (wantB && !bed.assetB) {
           const a = this.sounds.get(bId);
           if (a) bed.assetB = a;
@@ -1806,6 +2049,14 @@ export class ZooAudio implements IAudio {
         bed.quiet += dt;
         // over the cap: make room now; otherwise let it fade for 4 s first
         if (bed.quiet > 4 || L[id] > 0.004) bed.stop();
+      } else if (this.lowSpec && bed.asset) {
+        // lowSpec: a bed silent for minutes gives its buffer back; it renders again when it is heard again
+        bed.quiet += dt;
+        if (bed.quiet > LOWSPEC_BED_RELEASE) {
+          bed.asset = bed.assetB = null;
+          this.sounds.delete(`bed.${id}`);
+          this.sounds.delete(`bed.${id}.b`);
+        }
       }
       if (bed.playing) bed.setLevel(tgt, 0.9);
     }
@@ -1823,11 +2074,14 @@ export class ZooAudio implements IAudio {
       this.beds.get(bm)!.setBias(bias);
       if (bm !== 'arctic') this.beds.get(`${bm}.night`)!.setBias(bias);
     }
-    // UI cues sit relative to the ambience: about −3 dB in a quiet night overview
-    const uiScale = 0.62 + 0.38 * Math.min(1, sum / DAY_CLOSE_REF);
+    // UI cues sit relative to the ambience: quieter in a quiet night overview
+    const uiScale = Math.max(UI_SCALE_FLOOR, Math.min(1, sum / DAY_CLOSE_REF) ** UI_SCALE_SLOPE);
     if (Math.abs(uiScale - this.uiScale) > 0.01) {
+      const g = this.chan.ui.input.gain;
+      // the first value applies at once: a tap right after start-up gets the scene's level
+      if (this.uiScale < 0) g.value = CHANNEL_LEVEL.ui * uiScale;
+      else g.setTargetAtTime(CHANNEL_LEVEL.ui * uiScale, this.ctx!.currentTime, 1.5);
       this.uiScale = uiScale;
-      this.chan.ui.input.gain.setTargetAtTime(CHANNEL_LEVEL.ui * uiScale, this.ctx!.currentTime, 1.5);
     }
   }
 

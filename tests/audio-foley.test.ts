@@ -4,8 +4,8 @@ import { describe, expect, it } from 'vitest';
 import type { ISimulation } from '../src/core/contracts';
 import { EventBus } from '../src/core/events';
 import { PathType, Terrain, type AnimalState, type GuestState } from '../src/core/types';
-import { FOLEY_SPECIES, FoleyLimiter, guestCadence, guestStepBank, stepCrossings } from '../src/audio/fauna/foley';
-import { createFauna } from '../src/audio/modules/fauna';
+import { FOLEY_FAMILY, FOLEY_SPECIES, FoleyLimiter, foleyBankFor, guestCadence, guestStepBank, stepCrossings } from '../src/audio/fauna/foley';
+import { FAUNA, createFauna } from '../src/audio/modules/fauna';
 import { RECIPES } from '../src/audio/recipes';
 import { FOLEY_BANKS, FOLEY_RECIPES, LAP_SPACING } from '../src/audio/recipes/foley';
 import type { Recipe } from '../src/audio/render';
@@ -13,6 +13,10 @@ import { SPECIES } from '../src/data/species';
 import { FakeHost } from './helpers/fakeHost';
 
 const bytes = (r: Recipe) => (r.dur + (r.tail ?? 0.6)) * (r.rate ?? 22050) * 4;
+const KINDS = ['breath', 'chew', 'drink'] as const;
+const FAMILIES = [...new Set(Object.values(FOLEY_FAMILY))];
+/** A per-family close-up bank: fx.breath.cat#2, fx.drink.bird#0... */
+const isFamily = (id: string) => /^fx\.(breath|chew|drink)\.[a-z]+#\d+$/.test(id) && !id.startsWith('fx.breath.big');
 
 describe('foley recipes', () => {
   it('registers every bank as fx.* ids with a short tail and capped peak', () => {
@@ -28,15 +32,53 @@ describe('foley recipes', () => {
     expect(Object.keys(FOLEY_RECIPES).every((id) => id.startsWith('fx.'))).toBe(true);
   });
 
-  it('fits the memory budget: animal foley ≤ 0.7 MB, guest steps ≤ 0.3 MB', () => {
+  it('fits the memory budget: animal foley ≤ 0.7 MB, guest steps ≤ 0.3 MB, family close-ups ≤ 0.45 MB each', () => {
     let animal = 0;
     let guest = 0;
+    const family: Record<string, number> = {};
+    const warm: Record<string, number> = {};
     for (const [id, r] of Object.entries(FOLEY_RECIPES)) {
       if (id.startsWith('fx.gstep.')) guest += bytes(r);
-      else animal += bytes(r);
+      else if (isFamily(id)) {
+        const f = id.split('.')[2].split('#')[0];
+        family[f] = (family[f] ?? 0) + bytes(r);
+        if (id.endsWith('#0')) warm[f] = (warm[f] ?? 0) + bytes(r);
+      } else animal += bytes(r);
     }
     expect(animal).toBeLessThanOrEqual(0.7e6);
     expect(guest).toBeLessThanOrEqual(0.3e6);
+    // every variant of one family; the #0 breath, chew and drink the fauna module warms
+    for (const f of FAMILIES) {
+      expect(family[f], f).toBeLessThanOrEqual(0.45e6);
+      expect(warm[f], f).toBeLessThanOrEqual(0.15e6);
+    }
+  });
+
+  it('gives every body family its own breath, chew and drink banks, rendered for phones', () => {
+    const registered = (id: string) => id in RECIPES;
+    for (const [voice, f] of Object.entries(FOLEY_FAMILY))
+      for (const kind of KINDS) expect(foleyBankFor(kind, voice, registered), `${voice} ${kind}`).toBe(`fx.${kind}.${f}`);
+    for (const f of FAMILIES)
+      for (const kind of KINDS) {
+        const base = `fx.${kind}.${f}` as keyof typeof FOLEY_BANKS;
+        expect(FOLEY_BANKS[base], base).toBeGreaterThanOrEqual(3);
+        for (let k = 0; k < FOLEY_BANKS[base]; k++) {
+          const r = FOLEY_RECIPES[`${base}#${k}`];
+          // presence at 1–5 kHz needs more than the 8 kHz rate of the generic breath
+          expect(r.rate, `${base}#${k}`).toBeGreaterThanOrEqual(16000);
+        }
+      }
+  });
+
+  it('keeps each family sound shorter than the cadence it is played at', () => {
+    for (const [id, r] of Object.entries(FOLEY_RECIPES)) {
+      if (!isFamily(id)) continue;
+      const len = r.dur + (r.tail ?? 0);
+      if (id.startsWith('fx.drink.')) expect(len, id).toBeLessThan(LAP_SPACING);
+      // one chew per 1.2 s; one breath per FAUNA.focusBreath, slowed by the biggest bodies (rate 0.7)
+      else if (id.startsWith('fx.chew.')) expect(len, id).toBeLessThan(1.2 * 0.7);
+      else expect(len / 0.7, id).toBeLessThan(FAUNA.focusBreath[0]);
+    }
   });
 
   it('covers every species of the game', () => {
@@ -149,7 +191,7 @@ describe('foley triggers', () => {
     const lion = animal('lion', 4, 0, { action: 'drink' });
     s.animals.set(lion.id, lion);
     s.run(10);
-    const t = foley(s.host, 'fx.lap').map((p) => p.t);
+    const t = foley(s.host, 'fx.drink.cat').map((p) => p.t);
     const iv = t.slice(1).map((x, i) => x - t[i]);
     const mean = iv.reduce((a, b) => a + b, 0) / iv.length;
     expect(Math.abs(mean - LAP_SPACING)).toBeLessThanOrEqual(0.05);
@@ -164,6 +206,15 @@ describe('foley triggers', () => {
     const pour = foley(s.host, 'fx.pour')[0];
     expect(suck).toBeDefined();
     expect(pour.t - suck.t).toBeCloseTo(1.2, 1);
+  });
+
+  it('lets a penguin on land drink with a beak dip, not a cat lap', () => {
+    const s = setup();
+    const p = animal('penguin', 3, 0, { action: 'drink' });
+    s.animals.set(p.id, p);
+    s.run(5);
+    expect(foley(s.host, 'fx.drink.bird').length).toBeGreaterThan(5);
+    expect(foley(s.host, 'fx.lap').length).toBe(0);
   });
 
   it('splashes a wading zebra and dives a penguin', () => {
@@ -185,7 +236,7 @@ describe('foley triggers', () => {
     s.animals.set(el.id, el);
     s.host.followId = el.id;
     s.run(120);
-    expect(foley(s.host, 'fx.breath.big').length).toBeGreaterThanOrEqual(15);
+    expect(foley(s.host, 'fx.breath.pachyderm').length).toBeGreaterThanOrEqual(15);
     expect(foley(s.host, 'fx.flap').length).toBeGreaterThanOrEqual(4);
     expect(foley(s.host, 'fx.tail').length).toBeGreaterThanOrEqual(6);
   });

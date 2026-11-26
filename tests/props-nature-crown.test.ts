@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import type { QualitySettings } from '../src/core/contracts';
 import { PROP_SPECS } from '../src/props/registry';
 import '../src/props/nature';
-import { applyFade, applyOccluderCut, BIG_TRUNK_R, casterDepthMaterial, fadeModeOf, updateFade, fadeUniforms, FOLLOW_CARD_R, FOLLOW_CARD_R_MAX, FOLLOW_CUT_D, OCCLUDER_AIM, OCCLUDER_BELOW, OCCLUDER_D, OCCLUDER_FADE_S, OCCLUDER_OFF_D, OCCLUDER_R, OCCLUDER_SHARE, OCCLUDER_SIDE, setFollowCut, setOcclTop, TREE_GONE, TREE_KEEP_R, TREE_SHADOW_R } from '../src/props/lod/fade';
+import { applyFade, applyOccluderCut, BIG_TRUNK_R, casterDepthMaterial, fadeModeOf, updateFade, fadeUniforms, FOLLOW_CARD_R, FOLLOW_CARD_R_MAX, FOLLOW_CUT_D, OCCLUDER_AIM, OCCLUDER_BELOW, OCCLUDER_D, OCCLUDER_FADE_S, OCCLUDER_OFF_D, OCCLUDER_R, OCCLUDER_SHARE, OCCLUDER_SIDE, setFollowCut, setOcclTop, setShellShadow, SHELL_SHADOW_RANK, TREE_GONE, TREE_KEEP_R, TREE_SHADOW_R } from '../src/props/lod/fade';
 import { windDepthMaterial } from '../src/props/wind';
 import { addCrownFade, barkRanks, connectedPieces, trunkRadius } from '../src/props/nature/geo';
 import { buildAcacia, buildBamboo, buildBaobab } from '../src/props/nature/trees';
@@ -506,7 +506,7 @@ describe('big trunks on the follow line', () => {
     expect(trunkRadius(new THREE.CylinderGeometry(1.2, 1.2, 4, 16, 8).translate(0, 2, 0))).toBeCloseTo(1.2, 3);
   });
 
-  it('take their tree (visible pass only, at every follow zoom) when the trunk covers the subject', () => {
+  it('take their tree and its shadow (at every follow zoom) when the trunk covers the subject', () => {
     const leaf = new THREE.MeshStandardMaterial();
     leaf.userData.foliage = true;
     leaf.userData.crownFade = true;
@@ -517,12 +517,18 @@ describe('big trunks on the follow line', () => {
     expect(sh).toContain(`return step( ${BIG_TRUNK_R.toFixed(2)}, tr ) * ( 1.0 - smoothstep( tr + 0.2, tr + 0.5, side ) )`);
     // the line passes the trunk below the crown, not over it
     expect(sh).toContain('* ( 1.0 - smoothstep( crownY - 0.5, crownY, lineY ) );');
-    expect(sh.lastIndexOf('#ifndef PROP_FADE_SHADOW', sh.indexOf(cut))).toBeGreaterThan(sh.lastIndexOf('#endif', sh.indexOf(cut)) - 400);
+    // outside the visible-pass-only block (which ends right before it), so the shadow passes take it too
+    const visibleOnly = sh.lastIndexOf('#ifndef PROP_FADE_SHADOW', sh.indexOf(cut));
+    expect(visibleOnly).toBeGreaterThan(0);
+    expect(sh.indexOf('#endif', visibleOnly)).toBeLessThan(sh.indexOf(cut));
+    // the closest-zoom trunk cut stays visible-pass only: its shade stays on the subject
+    expect(sh.slice(visibleOnly, sh.indexOf('#endif', visibleOnly))).toContain('propOccluderAt( o, propOcclTop( o, M ), 0.5, true )');
     const depth = windDepthMaterial(Object.assign(new THREE.MeshStandardMaterial({ alphaTest: 0.5 }), { userData: { foliage: true, crownFade: true, sway: 0.011 } }))!;
     const dv = compileDepth(depth).vertexShader;
-    // the shadow pass compiles with PROP_FADE_SHADOW, which skips the term: the shade stays
+    // the swaying crown's shadow pass (PROP_FADE_SHADOW) and the shared still-bark casters run the term: no baobab shadow without its tree
     expect(dv).toContain('#define PROP_FADE_SHADOW');
-    expect(dv.indexOf('#ifndef PROP_FADE_SHADOW')).toBeLessThan(dv.indexOf(cut));
+    expect(dv).toContain(cut);
+    expect(compileDepth(casterDepthMaterial()).vertexShader).toContain(cut);
   });
 });
 
@@ -551,6 +557,29 @@ describe('follow-mode occluder cut: never parked half dissolved, only what hides
       expect(occl()).toBeCloseTo(0.75, 5);
       updateFade(camAt(OCCLUDER_OFF_D + 0.5), subject, true, undefined, OCCLUDER_FADE_S);
       expect(occl()).toBe(0);
+    } finally {
+      setFollowCut(null);
+      updateFade(camAt(40), subject, true);
+    }
+  });
+
+  it('is on for every follow zoom up to 10 m, however the follow got there', () => {
+    const subject = new THREE.Vector3(0, 0, 0);
+    const camAt = (d: number) => new THREE.Vector3(0, d * 0.42, d * 0.906);
+    try {
+      setFollowCut(subject);
+      // a 10 m zoom puts the camera 11.75 m from the subject on a 20:9 phone, 12.05 m on 21:9;
+      // zoomed out to 13 m first (15.2 m: off), then back to 10 m, the cut comes on
+      for (const at10 of [11.75, 12.05]) {
+        updateFade(camAt(15.2), subject, true, undefined, 1);
+        expect(fadeUniforms.uFadeOccl.value).toBe(0);
+        updateFade(camAt(at10), subject, true, undefined, 1);
+        expect(fadeUniforms.uFadeOccl.value).toBe(1);
+      }
+      // a 12 m zoom (14 m) keeps what it had: hysteresis, never parked half dissolved
+      updateFade(camAt(14.0), subject, true, undefined, 1);
+      expect(fadeUniforms.uFadeOccl.value).toBe(1);
+      expect(OCCLUDER_OFF_D - OCCLUDER_D).toBeGreaterThanOrEqual(2);
     } finally {
       setFollowCut(null);
       updateFade(camAt(40), subject, true);
@@ -608,8 +637,26 @@ describe('shared shadow casters (still bark)', () => {
     expect(casterDepthMaterial()).toBe(d);
     const sh = compileDepth(d);
     for (const def of ['PROP_FADE_CROWN', 'PROP_FADE_SHADOW', 'PROP_FADE_BARK', 'PROP_FADE_TREES_ONLY']) expect(sh.vertexShader).toContain(`#define ${def}`);
-    expect(sh.vertexShader).toContain('if ( aCrownR.y < 1.0 ) return 0.0;');
+    // pieces without crown data never fade, but for a den's shell (aCrownR.z < 0), which goes with
+    // the den the followed subject stands in (the den shell rule of the visible pass)
+    expect(sh.vertexShader).toContain('if ( aCrownR.y < 1.0 ) return step( aCrownR.z, -1.0 ) * step( length( o.xz - uFadeFocus.xz ), 0.2 - aCrownR.z * 0.01 ) * uFadeOccl;');
     expect(sh.fragmentShader).toContain('if ( vPropFade > vPropRank ) discard;');
     expect(d.customProgramCacheKey()).toBe('props-caster-depth|treeshadow');
+  });
+
+  it("mark a den's shell: no crown, minus its reach, and the middle rank (it goes half way through the cut's cross-fade)", () => {
+    const g = setShellShadow(new THREE.BoxGeometry(4, 2, 4), 1.6);
+    const c = g.getAttribute('aCrown') as THREE.BufferAttribute;
+    const r = g.getAttribute('aCrownR') as THREE.BufferAttribute;
+    expect(c.count).toBe(g.getAttribute('position').count);
+    expect(r.count).toBe(g.getAttribute('position').count);
+    expect(c.array).toBeInstanceOf(Int16Array);
+    for (const i of [0, c.count - 1]) {
+      expect([c.getX(i), c.getY(i), c.getZ(i)]).toEqual([0, 0, 0]);
+      expect([r.getX(i), r.getY(i), r.getZ(i)]).toEqual([0, 0, -160]);
+      // rank (w + 0.5) / 256 ≈ 0.5: discarded once uFadeOccl passes half way
+      expect((c.getW(i) + 0.5) / 256).toBeCloseTo(0.5, 2);
+    }
+    expect(SHELL_SHADOW_RANK).toBe(c.getW(0));
   });
 });

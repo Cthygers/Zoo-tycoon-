@@ -135,6 +135,44 @@ export interface ScreenRect {
   bottom: number;
 }
 
+/** A screen box as the shell's layout code keeps it (px): x0/y0 top-left, x1/y1 bottom-right. */
+export interface ScreenBox {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+/** Below / above a rect is preferred over beside it unless beside leaves this much more room (keeps things centred sideways). */
+const VERTICAL_CUT_BONUS = 1.25;
+
+/**
+ * The part of `area` left clear of `r` (e.g. the tutorial's bubble): `area` cut on the side that
+ * keeps the most room, below or above it preferred (VERTICAL_CUT_BONUS; below wins ties). A bubble
+ * docked in a top corner leaves the view below it, as the old tour's did; a tall one at a side
+ * leaves the other side. Unchanged when they do not overlap; a rect covering all of it leaves
+ * the area as it was.
+ */
+export function avoidRect(area: ScreenBox, r: ScreenRect): ScreenBox {
+  if (r.right <= area.x0 || r.left >= area.x1 || r.bottom <= area.y0 || r.top >= area.y1) return area;
+  const options: [ScreenBox, number][] = [
+    [{ ...area, y0: Math.max(area.y0, r.bottom) }, VERTICAL_CUT_BONUS],
+    [{ ...area, y1: Math.min(area.y1, r.top) }, VERTICAL_CUT_BONUS],
+    [{ ...area, x0: Math.max(area.x0, r.right) }, 1],
+    [{ ...area, x1: Math.min(area.x1, r.left) }, 1],
+  ];
+  let best = area;
+  let bestA = 0;
+  for (const [o, k] of options) {
+    const a = Math.max(0, o.x1 - o.x0) * Math.max(0, o.y1 - o.y0) * k;
+    if (a > bestA) {
+      best = o;
+      bestA = a;
+    }
+  }
+  return best;
+}
+
 export function swallowPointer(e: HTMLElement): void {
   const stop = (ev: Event) => ev.stopPropagation();
   e.addEventListener('pointerdown', stop);

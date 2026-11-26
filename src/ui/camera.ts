@@ -198,6 +198,8 @@ export class CameraController {
   private blockKept = false;
   /** Yaw (rad) the player's current gesture or keys have turned the view by. */
   private gestureTurn = 0;
+  /** A scripted move showing what a gesture does (demo()); a touch or a new view ends it. */
+  private demoAnim: { kind: 'pan' | 'zoom' | 'turn'; t: number; dur: number; total: number; done: () => void } | null = null;
 
   constructor(
     readonly camera: THREE.PerspectiveCamera,
@@ -238,6 +240,7 @@ export class CameraController {
     }
     this.clampOrbit();
     this.anim = null;
+    this.endDemo();
     this.velX = this.velZ = this.velYaw = this.velZoom = this.dodgeVel = 0;
     this.applyPose();
   }
@@ -302,7 +305,53 @@ export class CameraController {
     return out.distanceTo(_ray.origin) < this.distance * 8 + 200;
   }
 
+  /**
+   * Show what a camera gesture does (the tutorial's Help me): over `duration` seconds 'pan'
+   * slides the view sideways, 'zoom' moves in (out when already close) and 'turn' swings it
+   * round by 40°. The view stays where the move ends. Resolves when it is over, or cut short
+   * by a touch, a new view or another demo.
+   */
+  demo(kind: 'pan' | 'zoom' | 'turn', duration = 1.5): Promise<void> {
+    this.endDemo();
+    if (kind === 'pan') this.stopFollow();
+    this.anim = null;
+    this.velX = this.velZ = this.velYaw = this.velZoom = 0;
+    const total = kind === 'pan' ? this.distance * 0.45 : kind === 'zoom' ? Math.log(this.distance < 20 ? 1.7 : 0.55) : 40 * DEG;
+    return new Promise((resolve) => {
+      this.demoAnim = { kind, t: 0, dur: Math.max(0.1, duration), total, done: resolve };
+    });
+  }
+
+  /** A demo move is running. */
+  get demoing(): boolean {
+    return this.demoAnim !== null;
+  }
+
+  private endDemo(): void {
+    const d = this.demoAnim;
+    this.demoAnim = null;
+    d?.done();
+  }
+
+  private stepDemo(dt: number): void {
+    const d = this.demoAnim;
+    if (!d) return;
+    const t1 = Math.min(1, d.t + dt / d.dur);
+    const step = (easeInOut(t1) - easeInOut(d.t)) * d.total;
+    d.t = t1;
+    if (d.kind === 'pan') {
+      // screen-right on the ground is (cos yaw, −sin yaw)
+      this.target.x += Math.cos(this.yaw) * step;
+      this.target.z -= Math.sin(this.yaw) * step;
+      this.clampTarget();
+    } else if (d.kind === 'zoom') this.distance *= Math.exp(step);
+    else this.yaw += step;
+    this.clampOrbit();
+    if (t1 >= 1) this.endDemo();
+  }
+
   beginInteraction(kind: 'pan' | 'orbit'): void {
+    this.endDemo();
     this.interacting++;
     this.anim = null;
     this.velX = this.velZ = this.velYaw = this.velZoom = 0;
@@ -597,6 +646,8 @@ export class CameraController {
       this.clampOrbit();
     }
     this.accX = this.accZ = this.accYaw = this.accZoom = 0;
+
+    if (this.demoAnim && dt > 0) this.stepDemo(dt);
 
     if (this.anim) {
       const a = this.anim;

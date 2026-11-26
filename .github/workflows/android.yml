@@ -42,13 +42,72 @@ jobs:
       - name: Check committed Android project is in sync
         run: git diff --exit-code -- android/capacitor.settings.gradle android/app/capacitor.build.gradle
 
+      # Optional: sign CI debug APKs with the registered debug key so Google sign-in works on them.
+      # Without the secret, Gradle makes its own debug keystore (the APK builds, sign-in fails).
+      - name: Install the registered debug keystore
+        env:
+          DEBUG_KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
+        if: env.DEBUG_KEYSTORE_B64 != ''
+        run: |
+          mkdir -p ~/.android
+          printf '%s' "$DEBUG_KEYSTORE_B64" | base64 --decode > ~/.android/debug.keystore
+          chmod 600 ~/.android/debug.keystore
+
       - name: Build debug APK
         working-directory: android
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon
 
+      # Google sign-in only: the AD_ID permission or the Facebook SDK in the APK would change the
+      # Play data-safety declaration (spec C6).
+      - name: Check merged manifest (no AD_ID permission, no Facebook SDK)
+        run: |
+          files=$(find android/app/build/intermediates -path '*merged_manifest*' -name AndroidManifest.xml)
+          if [ -z "$files" ]; then
+            echo "::error::No merged AndroidManifest.xml found under android/app/build/intermediates"
+            exit 1
+          fi
+          if echo "$files" | xargs grep -lE 'permission.AD_ID|com\.facebook'; then
+            echo "::error::The merged manifest contains com.google.android.gms.permission.AD_ID or com.facebook"
+            exit 1
+          fi
+          echo "Merged manifest is clean:"
+          echo "$files"
+
       - uses: actions/upload-artifact@v4
         with:
           name: wildhaven-zoo-debug-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
+
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+
+      # The contract test imports the game's client code (src/net), which uses fflate from the root.
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Typecheck server
+        working-directory: server
+        run: npm run typecheck
+
+      - name: Server tests
+        working-directory: server
+        run: npm test
+
+      - name: Docker build (smoke)
+        run: docker build -f server/Dockerfile .

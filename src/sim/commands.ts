@@ -117,13 +117,21 @@ export class Commands {
   private logBuild(log: Map<number, number>, key: number) {
     const now = this.now();
     log.set(key, now);
-    if (log.size > 512) for (const [k, t] of log) if (now - t > FULL_REFUND_MINUTES) log.delete(k);
+    if (log.size > 512) for (const [k, t] of log) if (now - t > this.refundWindow()) log.delete(k);
   }
 
-  /** Add one removed item to the tally: its full price if built in the last game hour, else REFUND_FRACTION of it. */
+  /**
+   * Game minutes the full refund lasts: FULL_REFUND_MINUTES, × paceScale in a versus match so a
+   * mis-tap at the locked 4× still has the 1× real-time window (versus.md §3.3 T1).
+   */
+  private refundWindow(): number {
+    return FULL_REFUND_MINUTES * this.sim.paceScale;
+  }
+
+  /** Add one removed item to the tally: its full price if built within the refund window, else REFUND_FRACTION of it. */
   private addRefund(acc: RefundTally, price: number, log: Map<number, number>, key: number) {
     const t = log.get(key);
-    const recent = t !== undefined && this.now() - t >= 0 && this.now() - t <= FULL_REFUND_MINUTES;
+    const recent = t !== undefined && this.now() - t >= 0 && this.now() - t <= this.refundWindow();
     acc.price += price;
     acc.refund += Math.round(price * (recent ? 1 : REFUND_FRACTION));
   }

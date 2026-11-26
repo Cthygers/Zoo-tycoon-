@@ -2,22 +2,28 @@ import type * as THREE from 'three';
 // Wildhaven UI module — public API:
 //   createGameUI(root, deps)      → IGameUI (HUD, build dock, tools, panels, camera, input)
 //   showLoadingScreen(root)       → { setProgress, hide }
-//   showMainMenu(root, opts)      → Promise<'continue' | 'new'>
+//   showMainMenu(root, opts)      → the title menu's choice (screens.ts)
+//
+// The game UI is also the host for UI extensions (core/ui-ext.ts): the tutorial, account and
+// versus features plug in through UIDeps.extensions (mounted in order once the UI is built) or
+// addExtension() at runtime, and reach the shell only through the UIExtensionHost methods.
 
 import { Vector3 } from 'three';
 import { ENTRANCE_TILE, TILE } from '../core/constants';
-import type { IGameUI, QualityLevel, SimSpeed, UIDeps } from '../core/contracts';
-import type { Habitat, SelectionRef, Tool } from '../core/types';
+import type { BootIntent, IAudio, IEntityViews, IGameUI, IRenderContext, ISimulation, PlayerInfo, QualityLevel, SimSpeed, UIDeps } from '../core/contracts';
+import type { EventBus, NotifyKind } from '../core/events';
+import type { CommandResult, Habitat, SelectionRef, Tool } from '../core/types';
+import type { GestureSummary, PendingInfo, PillStepView, SettingsSection, SpeedLock, UIExtension, UIExtensionHost, UIRect, ZooPanelEvent } from '../core/ui-ext';
 import { OBJECTS_BY_ID } from '../data/objects';
 import { SPECIES_BY_ID } from '../data/species';
 import { CameraController, followFraming } from './camera';
 import { buildCatalog, type CatalogItem, type Category, type CategoryId } from './catalog';
 import { Coach } from './coach';
 import { Dock } from './dock';
-import { el, setStyle, toggleClass, type ScreenRect } from './dom';
-import { Hud } from './hud';
+import { avoidRect, el, setStyle, toggleClass, type ScreenBox, type ScreenRect } from './dom';
+import { Hud, SpeedControl, speedForKey, type SpeedSource } from './hud';
 import { InputController } from './input';
-import { CostLabel, Celebration, MoneyPopups, Toasts } from './notify';
+import { CostLabel, Celebration, MoneyPopups, Toasts, popupCell, throttlePopup, type PopupCellState } from './notify';
 import { InfoPanel, SpeciesCard, closeTopDialog, dialogOpen, habitatCentre, showDialog } from './panels';
 import { bindAudio, cue } from './sound';
 import { ensureStyles } from './styles';
@@ -39,7 +45,16 @@ export interface GameUIHandle extends IGameUI {
   startMove(sel: SelectionRef): void;
   openCategory(id: CategoryId | null): void;
   openZooPanel(tab?: ZooTab): void;
+  /** The extension host (the game UI itself) that UI extensions are mounted with. */
+  readonly ext: UIExtensionHost;
+  /** Mount a UI extension now (after the ones from UIDeps.extensions); e2e scripts use it through Vite dev imports. */
+  addExtension(ext: UIExtension): void;
 }
+
+const ZOO_TABS: readonly ZooTab[] = ['finance', 'goals', 'stats', 'messages', 'settings'];
+const isZooTab = (t: string | undefined): t is ZooTab => !!t && (ZOO_TABS as readonly string[]).includes(t);
+
+const toUIRect = (b: ScreenBox): UIRect => ({ left: b.x0, top: b.y0, right: b.x1, bottom: b.y1 });
 
 const DEG = Math.PI / 180;
 /** The "Applying graphics settings…" line stays up at least this long (ms), so it never just flickers. */
@@ -59,11 +74,13 @@ const TOAST_GAP = 8;
 const MENU_TOAST_ROOM = 76;
 
 const _corner = new Vector3();
+const _proj = new Vector3();
 
-class GameUI implements GameUIHandle {
+class GameUI implements GameUIHandle, UIExtensionHost {
   readonly camera: CameraController;
   readonly tools: ToolManager;
-  private root: HTMLElement;
+  /** The .wh-ui layer: every HUD element, and the overlays extensions add. */
+  readonly root: HTMLElement;
   private thumbs: ThumbnailService;
   private catalog: Category[];
   private hud: Hud;
@@ -78,7 +95,18 @@ class GameUI implements GameUIHandle {
   private coach: Coach;
   private input: InputController;
   private offs: (() => void)[] = [];
-  private selection: SelectionRef | null = null;
+  private sel: SelectionRef | null = null;
+  /** HUD buttons, keys and extensions all change the speed through this. */
+  private speedCtl: SpeedControl;
+  /** Mounted UI extensions, in mount order (and those whose update / back / key failed once). */
+  private exts: UIExtension[] = [];
+  private extFailed = new Set<string>();
+  /** Screen rects extensions keep clear of toasts, popups and the camera's clear area (e.g. the tutorial's bubble). */
+  private reserved = new Map<string, ScreenRect>();
+  private zooFns: ((e: ZooPanelEvent) => void)[] = [];
+  private gestureFns: ((g: GestureSummary) => void)[] = [];
+  /** Versus feedback density: the last money popup per screen cell. */
+  private popupCells = new Map<number, PopupCellState>();
   private followSel: SelectionRef | null = null;
   private followPos = { x: 0, z: 0, lookHeight: 0, minDistance: 0 };
   private vw = window.innerWidth;
@@ -158,7 +186,8 @@ class GameUI implements GameUIHandle {
       focusEvent(x, z);
     };
     this.toasts = new Toasts(toastFocus, () => ({ day: sim.day, minute: sim.minuteOfDay }));
-    this.hud = new Hud({ sim, log: this.toasts.log, openMenu: (tab) => this.openZooPanel(tab), setSpeed: (s) => this.setSpeed(s) });
+    this.speedCtl = new SpeedControl(sim, () => this.hud.refresh());
+    this.hud = new Hud({ sim, log: this.toasts.log, openMenu: (tab) => this.openZooPanel(tab), setSpeed: (s) => this.setSpeed(s, 'hud') });
     this.dock = new Dock({
       sim,
       thumbs: this.thumbs,
@@ -201,27 +230,15 @@ class GameUI implements GameUIHandle {
       qualityApplying: () => this.applyingQuality,
       log: this.toasts.log,
       focus: focusEvent,
+      player: deps.player ?? null,
+      onShown: (tab) => this.zooEvent({ kind: 'shown', tab }),
+      onClosed: () => this.zooEvent({ kind: 'closed' }),
     });
     this.cele = new Celebration(this.toasts.root);
-    const dock = this.dock;
     this.coach = new Coach({
       sim,
-      tool: () => ({ tool: this.tools.tool, moving: !!this.tools.moving }),
-      openCategory: () => dock.openCategoryId,
-      categoryButton: (id) => dock.categoryButton(id),
-      card: (match) => dock.cardFor(match),
-      revealCard: (card) => dock.revealCard(card),
-      drawer: () => dock.drawerEl,
-      toolBar: () => dock.toolbarEl,
-      confirmBar: () => dock.confirmBarEl,
-      viewArea: () => this.viewArea(),
-      workRect: () => this.workRect(),
-      busy: () => this.zoo.isOpen || dialogOpen() || this.info.sheet.open,
-      endTool: () => this.setTool({ kind: 'select' }),
-      bubbleMoved: () => this.layoutToasts(),
       openBuildCategory: (id) => this.openCategory(id),
       openGoals: () => this.openZooPanel('goals'),
-      toast: (text, kind) => this.toasts.show(text, kind),
     });
 
     this.root.append(
@@ -232,7 +249,6 @@ class GameUI implements GameUIHandle {
       this.species.sheet.root,
       this.info.sheet.root,
       this.dock.root,
-      this.coach.bubble,
       this.toasts.root,
       this.zoo.root,
     );
@@ -243,6 +259,15 @@ class GameUI implements GameUIHandle {
       select: (x, y) => this.pickAt(x, y),
       touchedView: () => this.dock.closeDrawer(),
       key: (code) => this.onKey(code),
+      gesture: (g) => {
+        for (const fn of [...this.gestureFns]) {
+          try {
+            fn(g);
+          } catch (err) {
+            console.error('[ui] gesture handler failed', err);
+          }
+        }
+      },
     });
 
     // ---- events
@@ -254,7 +279,7 @@ class GameUI implements GameUIHandle {
         this.cele.show(o.text, o.reward);
         this.layoutToasts(); // toasts under the new card make way at once
       }),
-      ev.on('moneyPopup', (m) => this.popups.spawn(m.x, m.z, m.amount)),
+      ev.on('moneyPopup', (m) => this.moneyPopup(m.x, m.z, m.amount)),
       ev.on('commandResult', (r) => {
         if (!r.ok && this.dock.confirmVisible) this.dock.shake();
       }),
@@ -264,15 +289,14 @@ class GameUI implements GameUIHandle {
         this.select(null);
         this.setTool({ kind: 'select' });
         this.resetView();
-        this.coach.reset();
+        this.popupCells.clear();
       }),
-      ev.on('terrainChanged', (r) => this.coach.terrainPainted(r)),
       ev.on('animalRemoved', (e) => this.dropIfSelected('animal', e.id)),
       ev.on('guestRemoved', (e) => this.dropIfSelected('guest', e.id)),
       ev.on('staffRemoved', (e) => this.dropIfSelected('staff', e.id)),
       ev.on('objectRemoved', (e) => this.dropIfSelected('object', e.id)),
       ev.on('habitatsChanged', () => {
-        const s = this.selection;
+        const s = this.sel;
         if (s && s.kind === 'habitat' && !sim.world.habitats.has(s.id)) this.select(null);
       }),
     );
@@ -318,13 +342,13 @@ class GameUI implements GameUIHandle {
   }
 
   select(sel: SelectionRef | null): void {
-    const prev = this.selection;
+    const prev = this.sel;
     const same = prev && sel && prev.kind === sel.kind && prev.id === sel.id;
     if (same) return;
     if (sel) cue('select');
     if (sel && this.tools.active) this.setTool({ kind: 'select' });
     if (sel) this.dock.closeDrawer();
-    this.selection = sel;
+    this.sel = sel;
     try {
       this.deps.views.setSelected(sel);
     } catch (err) {
@@ -344,7 +368,7 @@ class GameUI implements GameUIHandle {
    * side margins, above the dock, and beside the info sheet / species card (landscape) or
    * above / below them (portrait).
    */
-  private viewArea(): { x0: number; y0: number; x1: number; y1: number } {
+  private viewBox(): ScreenBox {
     const hud = this.hud.root;
     const a = { x0: hud.offsetLeft, y0: hud.offsetTop + hud.offsetHeight, x1: hud.offsetLeft + hud.offsetWidth, y1: this.dock.root.offsetTop || this.vh };
     for (const sheet of [this.info.sheet, this.species.sheet]) {
@@ -360,18 +384,17 @@ class GameUI implements GameUIHandle {
     return a;
   }
 
-  /** The view area below the tour's bubble while it is docked under the top bar: where the camera centres things. */
-  private clearArea(): { x0: number; y0: number; x1: number; y1: number } {
-    const a = this.viewArea();
-    const b = this.coach.dockedRect;
-    if (b) a.y0 = Math.max(a.y0, b.bottom);
+  /** The view area clear of the rects extensions reserve (e.g. beside or below the tutorial's bubble): where the camera centres things. */
+  private clearBox(): ScreenBox {
+    let a = this.viewBox();
+    for (const r of this.reserved.values()) a = avoidRect(a, r);
     return a;
   }
 
   /**
    * Lay the toast column out over the free part of the view, around the next-goal pill and
-   * the tour's bubble (beside them where there is room, else below the one under the top bar
-   * and above the one pointing at the dock), and above the dock, drawer, tool bar and confirm
+   * the rects extensions reserve (beside them where there is room, else below one under the
+   * top bar and above one low in the view), and above the dock, drawer, tool bar and confirm
    * bar (Toasts.setRoom: only what fits is shown, the rest waits).
    */
   private layoutToasts(): void {
@@ -387,7 +410,7 @@ class GameUI implements GameUIHandle {
       this.toasts.setRoom(MENU_TOAST_ROOM);
       return;
     }
-    const a = this.viewArea();
+    const a = this.viewBox();
     let { x0, x1 } = a;
     let top = a.y0 + 4;
     let bottom = a.y1;
@@ -411,17 +434,17 @@ class GameUI implements GameUIHandle {
     this.toasts.setRoom(room);
   }
 
-  /** The next-goal pill and the tour's bubble where they float over the view. */
+  /** The next-goal pill and the rects extensions reserve (the tutorial's bubble) where they float over the view. */
   private viewOverlays(): ScreenRect[] {
     const out: ScreenRect[] = [];
     const pill = this.coach.pill;
     if (getComputedStyle(pill).visibility !== 'hidden') out.push(pill.getBoundingClientRect());
-    if (this.coach.rect) out.push(this.coach.rect);
+    for (const r of this.reserved.values()) out.push(r);
     return out;
   }
 
   /** Screen rect (px) of what is being built right now: the tool's preview and its cost label. */
-  private workRect(): ScreenRect | null {
+  workRect(): UIRect | null {
     const r = this.tools.previewScreenRect(this.vw, this.vh);
     const l = this.costLabel.shown ? this.costLabel.root.getBoundingClientRect() : null;
     if (!r || !l) return r ?? l;
@@ -429,8 +452,8 @@ class GameUI implements GameUIHandle {
   }
 
   /** Fly the camera to a ground point, centring it in the part of the view that panels leave clear. */
-  private focusClear(x: number, z: number, distance?: number): void {
-    const a = this.clearArea();
+  focusClear(x: number, z: number, distance?: number): void {
+    const a = this.clearBox();
     this.camera.focusAt(x, z, (a.x0 + a.x1) / this.vw - 1, 1 - (a.y0 + a.y1) / this.vh, distance);
   }
 
@@ -447,7 +470,7 @@ class GameUI implements GameUIHandle {
     p.project(this.deps.ctx.camera);
     const sx = (p.x * 0.5 + 0.5) * this.vw;
     const sy = (0.5 - p.y * 0.5) * this.vh;
-    const a = this.clearArea();
+    const a = this.clearBox();
     const m = 36; // room for the selection ring around the thing's ground point
     if (p.z < 1 && sx > a.x0 + m && sx < a.x1 - m && sy > a.y0 + m && sy < a.y1 - m) return;
     this.focusClear(x, z);
@@ -474,7 +497,7 @@ class GameUI implements GameUIHandle {
       }
     }
     if (!best) return;
-    const a = this.clearArea();
+    const a = this.clearBox();
     const cam = this.deps.ctx.camera;
     const w = sim.world;
     const inView = [best.minX, best.maxX + 1].every((tx) =>
@@ -493,12 +516,12 @@ class GameUI implements GameUIHandle {
 
   /** A followed animal or person stays in the middle of the part of the view the info sheet leaves clear. */
   private keepFollowClear(): void {
-    const a = this.clearArea();
+    const a = this.clearBox();
     this.camera.followScreenX = (a.x0 + a.x1) / this.vw - 1;
   }
 
   private dropIfSelected(kind: SelectionRef['kind'], id: number): void {
-    const s = this.selection;
+    const s = this.sel;
     if (s && s.kind === kind && s.id === id) this.select(null);
   }
 
@@ -598,14 +621,10 @@ class GameUI implements GameUIHandle {
     this.deps.sim.events.emit('toolChanged', { tool });
   }
 
-  /**
-   * The animal tool shows the species card, with a habitat to tap in the clear part of the view
-   * (measured once the tour's bubble has docked for the new tool).
-   */
+  /** The animal tool shows the species card, with a habitat to tap in the clear part of the view. */
   private showSpeciesCard(tool: Tool): void {
     if (tool.kind === 'animal') this.species.show(tool.speciesId);
     else this.species.hide();
-    this.coach.refresh();
     if (tool.kind === 'animal') this.showHabitatFor(tool.speciesId);
   }
 
@@ -620,9 +639,9 @@ class GameUI implements GameUIHandle {
     this.dock.setCameraTip(this.coach.buildModeEntered());
   }
 
-  openCategory(id: CategoryId | null): void {
-    if (id) this.dock.openCategory(id);
-    else this.dock.closeDrawer();
+  openCategory(id: string | null): void {
+    if (!id) this.dock.closeDrawer();
+    else if (this.catalog.some((c) => c.id === id)) this.dock.openCategory(id as CategoryId);
   }
 
   private onPending(p: PendingAction | null): void {
@@ -676,9 +695,20 @@ class GameUI implements GameUIHandle {
     this.zoo.open(tab);
   }
 
-  private setSpeed(s: SimSpeed): void {
-    this.deps.sim.setSpeed(s);
-    this.hud.refresh();
+  /**
+   * The one path for speed changes: HUD buttons, keys and extensions. Refused (false, nothing
+   * changes) during a versus match, and while a SpeedLock is set unless an extension asks.
+   */
+  setSpeed(s: SimSpeed, source: SpeedSource = 'hud'): boolean {
+    const ok = this.speedCtl.set(s, source);
+    // a locked button or key says no (its lock's owner explains why); a versus match just ignores them
+    if (!ok && source !== 'ext' && !this.deps.sim.versus) cue('deny');
+    return ok;
+  }
+
+  setSpeedLock(lock: SpeedLock | null): void {
+    this.speedCtl.setLock(lock);
+    this.hud.setSpeedLock(lock);
   }
 
   /**
@@ -716,6 +746,21 @@ class GameUI implements GameUIHandle {
   }
 
   private onKey(code: string): boolean {
+    // extensions first (e.g. the tutorial's Enter = Got it)
+    for (const e of this.exts) {
+      if (!e.onKey) continue;
+      try {
+        if (e.onKey(code)) return true;
+      } catch (err) {
+        this.extError(e, 'onKey', err);
+      }
+    }
+    const speed = speedForKey(code, this.deps.sim.speed);
+    if (speed !== null) {
+      // refused during a versus match or under a lock, but the key is still used up
+      this.setSpeed(speed, 'key');
+      return true;
+    }
     switch (code) {
       case 'Escape':
         return this.handleBack();
@@ -728,21 +773,8 @@ class GameUI implements GameUIHandle {
         if (this.tools.tool.kind !== 'object') return false;
         this.tools.rotate();
         return true;
-      case 'Space': {
-        const sim = this.deps.sim;
-        this.setSpeed(sim.speed === 0 ? 1 : 0);
-        return true;
-      }
-      case 'Digit1':
-      case 'Digit2':
-      case 'Digit3':
-        this.setSpeed(Number(code.slice(5)) as SimSpeed);
-        return true;
-      case 'Digit0':
-        this.setSpeed(0);
-        return true;
       case 'KeyF': {
-        const s = this.selection;
+        const s = this.sel;
         if (s && (s.kind === 'animal' || s.kind === 'guest' || s.kind === 'staff')) {
           this.toggleFollow(s);
           this.info.syncFollow();
@@ -781,7 +813,7 @@ class GameUI implements GameUIHandle {
       this.layoutToasts();
       if (this.followSel) this.keepFollowClear();
     }
-    if (!this.backArmed && (this.zoo.isOpen || this.dock.drawerOpen || this.tools.active || this.selection)) {
+    if (!this.backArmed && (this.zoo.isOpen || this.dock.drawerOpen || this.tools.active || this.sel)) {
       try {
         history.pushState({ wildhaven: 1 }, '');
         this.backArmed = true;
@@ -813,10 +845,308 @@ class GameUI implements GameUIHandle {
       this.layoutToasts();
       if (this.followSel) this.keepFollowClear();
     }
+    // extensions after the shell's own update
+    for (const e of this.exts) {
+      if (!e.update) continue;
+      try {
+        e.update(dt);
+      } catch (err) {
+        this.extError(e, 'update', err);
+      }
+    }
   }
 
   get followed(): SelectionRef | null {
     return this.camera.following ? this.followSel : null;
+  }
+
+  // ------------------------------------------------------------ money popups
+  /** A money popup; in a versus match (4× pace) at most one per 0.5 s per screen cell, the dropped amounts summed into the next. */
+  private moneyPopup(x: number, z: number, amount: number): void {
+    if (this.deps.sim.versus) {
+      const p = this.project(x, this.deps.sim.world.heightAt(x, z) + 2.2, z);
+      const shown = throttlePopup(this.popupCells, popupCell(p.x, p.y, this.vw, this.vh), performance.now() / 1000, amount);
+      if (shown === null) return;
+      amount = shown;
+    }
+    this.popups.spawn(x, z, amount);
+  }
+
+  // ------------------------------------------------------------ UI extensions (UIExtensionHost)
+  get ext(): UIExtensionHost {
+    return this;
+  }
+
+  /** Mount an extension; one that fails to mount is left out (the game goes on without it). */
+  addExtension(ext: UIExtension): void {
+    if (this.disposed || this.exts.includes(ext)) return;
+    try {
+      ext.mount(this);
+      this.exts.push(ext);
+    } catch (err) {
+      console.error(`[ui] extension ${ext.id} failed to mount`, err);
+    }
+  }
+
+  /** An extension threw: logged once per extension and hook, the game goes on. */
+  private extError(e: UIExtension, hook: string, err: unknown): void {
+    const key = `${e.id}:${hook}`;
+    if (this.extFailed.has(key)) return;
+    this.extFailed.add(key);
+    console.error(`[ui] extension ${e.id} ${hook} failed`, err);
+  }
+
+  get sim(): ISimulation {
+    return this.deps.sim;
+  }
+
+  get ctx(): IRenderContext {
+    return this.deps.ctx;
+  }
+
+  get views(): IEntityViews {
+    return this.deps.views;
+  }
+
+  get audio(): IAudio {
+    return this.deps.audio;
+  }
+
+  get events(): EventBus {
+    return this.deps.sim.events;
+  }
+
+  get player(): PlayerInfo | null {
+    return this.deps.player ?? null;
+  }
+
+  save(): 'saved' | 'showcase' | 'kept' | 'failed' {
+    return this.deps.save();
+  }
+
+  switchSlot(target: BootIntent): Promise<void> {
+    const fn = this.deps.switchSlot;
+    return fn ? fn(target) : Promise.reject(new Error('switchSlot is not available in this build'));
+  }
+
+  // HUD
+  hudSlot(name: 'speed' | 'badge'): HTMLElement {
+    return name === 'speed' ? this.hud.speedSlot : this.hud.badgeSlot;
+  }
+
+  hudEl(name: 'money' | 'speedGroup' | 'menu' | 'pill'): HTMLElement | null {
+    switch (name) {
+      case 'money':
+        return this.hud.moneyEl;
+      case 'speedGroup':
+        return this.hud.speedGroupEl;
+      case 'menu':
+        return this.hud.menuEl;
+      case 'pill':
+        return this.coach.pill;
+      default:
+        return null;
+    }
+  }
+
+  hudSpeedButton(s: SimSpeed): HTMLElement | null {
+    return this.hud.speedButton(s);
+  }
+
+  setPillStep(view: PillStepView | null): void {
+    this.coach.setStep(view);
+  }
+
+  onPillTapped(fn: () => void): () => void {
+    return this.coach.onPillTapped(fn);
+  }
+
+  // build UI
+  tool(): { tool: Tool; moving: boolean } {
+    return { tool: this.tools.tool, moving: !!this.tools.moving };
+  }
+
+  pending(): PendingInfo | null {
+    return this.tools.pendingInfo;
+  }
+
+  openedCategory(): string | null {
+    return this.dock.openCategoryId;
+  }
+
+  categoryButton(id: string): HTMLElement | null {
+    return this.dock.categoryButton(id as CategoryId);
+  }
+
+  card(match: (key: string) => boolean): HTMLElement | null {
+    return this.dock.cardFor(match);
+  }
+
+  revealCard(card: HTMLElement): void {
+    this.dock.revealCard(card);
+  }
+
+  drawer(): HTMLElement | null {
+    return this.dock.drawerEl;
+  }
+
+  toolBar(): HTMLElement | null {
+    return this.dock.toolbarEl;
+  }
+
+  confirmBar(): HTMLElement | null {
+    return this.dock.confirmBarEl;
+  }
+
+  confirmOk(): HTMLElement | null {
+    return this.dock.confirmOkEl;
+  }
+
+  endTool(): void {
+    if (this.tools.active) this.setTool({ kind: 'select' });
+  }
+
+  closeDrawer(): void {
+    this.dock.closeDrawer();
+  }
+
+  selection(): SelectionRef | null {
+    return this.sel;
+  }
+
+  sheet(): { root: HTMLElement | null; close: HTMLElement | null; anchor(name: 'happiness'): HTMLElement | null } {
+    const open = this.info.sheet.open;
+    return {
+      root: open ? this.info.sheet.root : null,
+      close: open ? this.info.sheet.closeEl : null,
+      anchor: (name) => this.info.anchor(name),
+    };
+  }
+
+  // zoo menu and dialogs
+  openMenu(tab?: string): void {
+    this.openZooPanel(isZooTab(tab) ? tab : undefined);
+  }
+
+  zooPanel(): { tab: string | null; close: HTMLElement | null; tabButton(t: string): HTMLElement | null; headGap(): { x0: number; x1: number; top: number } | null } {
+    const zoo = this.zoo;
+    return {
+      tab: zoo.currentTab,
+      close: zoo.isOpen ? zoo.closeEl : null,
+      tabButton: (t) => (zoo.isOpen && isZooTab(t) ? zoo.tabButton(t) : null),
+      headGap: () => (zoo.isOpen ? zoo.headGap() : null),
+    };
+  }
+
+  onZooPanel(fn: (e: ZooPanelEvent) => void): () => void {
+    this.zooFns.push(fn);
+    return () => {
+      const i = this.zooFns.indexOf(fn);
+      if (i >= 0) this.zooFns.splice(i, 1);
+    };
+  }
+
+  private zooEvent(e: ZooPanelEvent): void {
+    for (const fn of [...this.zooFns]) {
+      try {
+        fn(e);
+      } catch (err) {
+        console.error('[ui] zoo menu handler failed', err);
+      }
+    }
+  }
+
+  addSettingsSection(sec: SettingsSection): () => void {
+    return this.zoo.addSettingsSection(sec);
+  }
+
+  hideSettingsRow(row: 'newZoo', hidden: boolean): void {
+    this.zoo.hideSettingsRow(row, hidden);
+  }
+
+  dialogOpen(): boolean {
+    return dialogOpen();
+  }
+
+  showDialog(o: { title: string; text: string; ok: string; cancel?: string; danger?: boolean; primary?: 'ok' | 'cancel' }): Promise<boolean> {
+    return showDialog(this.root, o);
+  }
+
+  notify(text: string, kind: NotifyKind = 'info'): void {
+    this.toasts.show(text, kind);
+  }
+
+  // view, camera, input
+  viewArea(): UIRect {
+    return toUIRect(this.viewBox());
+  }
+
+  clearArea(): UIRect {
+    return toUIRect(this.clearBox());
+  }
+
+  cameraDemo(kind: 'pan' | 'zoom' | 'turn'): Promise<void> {
+    return this.camera.demo(kind);
+  }
+
+  /** Screen position (px) of a world point, and whether it is in front of the camera and on screen. */
+  project(x: number, y: number, z: number): { x: number; y: number; visible: boolean } {
+    const v = _proj.set(x, y, z).project(this.deps.ctx.camera);
+    return {
+      x: (v.x * 0.5 + 0.5) * this.vw,
+      y: (0.5 - v.y * 0.5) * this.vh,
+      visible: v.z > -1 && v.z < 1 && v.x >= -1 && v.x <= 1 && v.y >= -1 && v.y <= 1,
+    };
+  }
+
+  pointersDown(): number {
+    return this.input.pointers;
+  }
+
+  onGesture(fn: (g: GestureSummary) => void): () => void {
+    this.gestureFns.push(fn);
+    return () => {
+      const i = this.gestureFns.indexOf(fn);
+      if (i >= 0) this.gestureFns.splice(i, 1);
+    };
+  }
+
+  /**
+   * Run a sim command with the feedback a confirmed tool action gets: exactly one commandResult
+   * event (the sim's own, else one with `at`), the build / bulldoze / error cue and a HUD refresh.
+   */
+  runCommand(fn: () => CommandResult, at?: { x: number; z: number }): CommandResult {
+    const ev = this.deps.sim.events;
+    let emitted = false;
+    const off = ev.on('commandResult', () => {
+      emitted = true;
+    });
+    let r: CommandResult;
+    try {
+      r = fn();
+    } finally {
+      off();
+    }
+    if (!emitted) ev.emit('commandResult', at ? { ...r, x: at.x, z: at.z } : { ...r });
+    cue(r.ok ? (r.cost < 0 ? 'bulldoze' : 'build') : 'error');
+    if (r.ok) this.hud.refresh();
+    return r;
+  }
+
+  /** Keep `r` clear of toasts, money popups and the camera's clear area (null drops it). */
+  setReservedRect(id: string, r: UIRect | null): void {
+    const prev = this.reserved.get(id);
+    if (!r) {
+      if (!prev) return;
+      this.reserved.delete(id);
+    } else {
+      if (prev && Math.abs(prev.left - r.left) + Math.abs(prev.top - r.top) + Math.abs(prev.right - r.right) + Math.abs(prev.bottom - r.bottom) < 1) return;
+      this.reserved.set(id, { left: r.left, top: r.top, right: r.right, bottom: r.bottom });
+    }
+    if (this.disposed) return;
+    this.popupCovers = this.viewOverlays();
+    this.layoutToasts();
+    if (this.followSel) this.keepFollowClear();
   }
 
   get focus(): THREE.Vector3 {
@@ -825,8 +1155,8 @@ class GameUI implements GameUIHandle {
 
   /**
    * Android back / Escape: close the top-most layer, one per press —
-   * dialog → text field → zoo menu → info panel → build drawer →
-   * pending build (confirm bar + ghost) → active tool (back to Inspect).
+   * dialog → text field → UI extensions (last mounted first) → zoo menu → info panel →
+   * build drawer → pending build (confirm bar + ghost) → active tool (back to Inspect).
    * Returns false at the top level so main can minimise the app.
    */
   handleBack(): boolean {
@@ -837,11 +1167,20 @@ class GameUI implements GameUIHandle {
       a.blur();
       return true;
     }
+    for (let i = this.exts.length - 1; i >= 0; i--) {
+      const e = this.exts[i];
+      if (!e.handleBack) continue;
+      try {
+        if (e.handleBack()) return true;
+      } catch (err) {
+        this.extError(e, 'handleBack', err);
+      }
+    }
     if (this.zoo.isOpen) {
       this.zoo.close();
       return true;
     }
-    if (this.selection) {
+    if (this.sel) {
       this.select(null);
       return true;
     }
@@ -868,6 +1207,14 @@ class GameUI implements GameUIHandle {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    for (const e of [...this.exts].reverse()) {
+      try {
+        e.dispose?.();
+      } catch (err) {
+        this.extError(e, 'dispose', err);
+      }
+    }
+    this.exts = [];
     for (const off of this.offs) off();
     this.offs = [];
     this.input.dispose();
@@ -882,7 +1229,10 @@ class GameUI implements GameUIHandle {
 }
 
 export function createGameUI(root: HTMLElement, deps: UIDeps): GameUIHandle {
-  return new GameUI(root, deps);
+  const ui = new GameUI(root, deps);
+  // extensions plug in once the whole UI is built, in the order main.ts gives them
+  for (const e of deps.extensions ?? []) ui.addExtension(e);
+  return ui;
 }
 
 export type { ZooTab } from './zoopanel';

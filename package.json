@@ -15,9 +15,14 @@
     "android:apk": "npm run android:sync && cd android && ./gradlew assembleDebug"
   },
   "dependencies": {
+    "@capacitor-community/text-to-speech": "8.0.2",
     "@capacitor/android": "8.6.2",
     "@capacitor/app": "8.1.2",
     "@capacitor/core": "8.6.2",
+    "@capacitor/device": "8.0.3",
+    "@capacitor/share": "8.0.3",
+    "@capgo/capacitor-social-login": "8.7.13",
+    "fflate": "0.8.3",
     "three": "0.187.0"
   },
   "devDependencies": {

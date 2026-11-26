@@ -4,8 +4,9 @@
 
 import { AUDIO_PREFS_KEY, parsePrefs, serializePrefs, type AudioPrefs } from '../audio/prefs';
 import { QUALITY_KEY, SOUND_KEY } from '../core/constants';
-import type { AudioChannel, IAudio, IRenderContext, ISimulation, QualityLevel, RunningCostEstimate } from '../core/contracts';
+import type { AudioChannel, IAudio, IRenderContext, ISimulation, PlayerInfo, QualityLevel, RunningCostEstimate } from '../core/contracts';
 import type { LedgerEntry } from '../core/types';
+import type { SettingsSection } from '../core/ui-ext';
 import { button, el, escapeHtml, fmtClock, fmtMoney, fmtPct, setText, storageGet, storageSet, swallowPointer, toggleClass } from './dom';
 import { goalFraction, goalProgressText } from './coach';
 import { guestChip } from './hud';
@@ -44,6 +45,29 @@ export interface ZooPanelHost {
   log: MessageLog;
   /** Fly the camera to a ground point (a message's location). */
   focus(x: number, z: number): void;
+  /** Who plays: a profile's New zoo also replaces the zoo on the player's other devices. */
+  player?: PlayerInfo | null;
+  /** The menu opened or switched to a tab, and it closed (for UI extensions). */
+  onShown?(tab: ZooTab): void;
+  onClosed?(): void;
+}
+
+/** Settings rows an extension can hide. */
+export type SettingsRowId = 'newZoo';
+
+/** Extension sections in the order they show (by `order`, then the order they were added). */
+export function orderSections<T extends Pick<SettingsSection, 'order'>>(sections: readonly T[]): T[] {
+  return sections
+    .map((s, i) => ({ s, i }))
+    .sort((a, b) => a.s.order - b.s.order || a.i - b.i)
+    .map((x) => x.s);
+}
+
+/** The New zoo confirm text: a signed-in player's zoo is replaced on every device. */
+export function newZooText(profileId: string | null | undefined): string {
+  return profileId
+    ? 'Your current zoo, animals and money will be replaced by a fresh start on all your devices. This cannot be undone.'
+    : 'Your current zoo, animals and money will be replaced by a fresh start. This cannot be undone.';
 }
 
 /** Under Zoo stats: what makes room for more guests. */
@@ -73,6 +97,9 @@ export class ZooPanel {
   private refreshFn: (() => void) | null = null;
   private acc = 0;
   private unread: UnreadBadge;
+  /** Sections UI extensions added to Settings (shown above 'Save game'), and rows they hid. */
+  private sections: SettingsSection[] = [];
+  private hiddenRows = new Set<SettingsRowId>();
 
   constructor(private host: ZooPanelHost) {
     const tabs = el('div', 'wh-tabs');
@@ -99,6 +126,49 @@ export class ZooPanel {
 
   get isOpen(): boolean {
     return !this.root.classList.contains('hidden');
+  }
+
+  /** The tab on screen (null while the menu is closed). */
+  get currentTab(): ZooTab | null {
+    return this.isOpen ? this.tab : null;
+  }
+
+  /** The menu's X button. */
+  get closeEl(): HTMLElement {
+    return this.closeBtn;
+  }
+
+  tabButton(t: ZooTab): HTMLElement | null {
+    return this.tabBtns.get(t) ?? null;
+  }
+
+  /** Add a section to Settings, above 'Save game' (by its order). Returns a function that removes it. */
+  addSettingsSection(sec: SettingsSection): () => void {
+    this.sections.push(sec);
+    this.rerenderSettings();
+    return () => {
+      const i = this.sections.indexOf(sec);
+      if (i < 0) return;
+      this.sections.splice(i, 1);
+      this.rerenderSettings();
+    };
+  }
+
+  /** Hide (or show again) a built-in Settings row, e.g. 'New zoo' in a practice zoo or a versus match. */
+  hideSettingsRow(row: SettingsRowId, hidden: boolean): void {
+    if (this.hiddenRows.has(row) === hidden) return;
+    if (hidden) this.hiddenRows.add(row);
+    else this.hiddenRows.delete(row);
+    this.rerenderSettings();
+  }
+
+  /** Settings changed while on screen: draw it again where it was scrolled to (no 'shown' event: the tab did not change). */
+  private rerenderSettings(): void {
+    if (this.isOpen && this.tab === 'settings') {
+      const top = this.body.scrollTop;
+      this.renderTab('settings');
+      this.body.scrollTop = top;
+    }
   }
 
   /** The Messages tab is on screen: news shows up in its list as it comes in. */
@@ -137,6 +207,7 @@ export class ZooPanel {
     // a focused control inside the hidden modal would keep swallowing key presses
     const a = document.activeElement as HTMLElement | null;
     if (a && this.root.contains(a)) a.blur();
+    this.host.onClosed?.();
   }
 
   update(dt: number): void {
@@ -149,6 +220,11 @@ export class ZooPanel {
   }
 
   showTab(tab: ZooTab): void {
+    this.renderTab(tab);
+    this.host.onShown?.(tab);
+  }
+
+  private renderTab(tab: ZooTab): void {
     this.tab = tab;
     for (const [id, b] of this.tabBtns) toggleClass(b, 'on', id === tab);
     const t = TABS.find((x) => x.id === tab)!;
@@ -480,10 +556,20 @@ export class ZooPanel {
       el('div', 'wh-setting', [el('div', { class: 'wh-setting-t', html: `<b>${escapeHtml(title)}</b><span>${escapeHtml(sub)}</span>` }), ctrl]);
     const quality = row('Graphics quality', 'Lower settings save battery and run smoother on older phones. Edge smoothing changes after a restart.', seg);
     quality.firstElementChild!.append(applying);
-    this.body.append(
+    // sections added by UI extensions (tutorial, account, versus) come before 'Save game'
+    const extra: HTMLElement[] = [];
+    for (const sec of orderSections(this.sections)) {
+      try {
+        extra.push(sec.render());
+      } catch (err) {
+        console.error(`[ui] settings section ${sec.id} failed`, err);
+      }
+    }
+    const rows: (HTMLElement | null)[] = [
       quality,
       row('Sound', 'Ambient sounds and effects.', sw),
       this.soundMix(audio),
+      ...extra,
       row(
         'Save game',
         'Your zoo also saves automatically every few minutes.',
@@ -492,22 +578,24 @@ export class ZooPanel {
           if (t) this.host.toast(t.text, t.kind);
         }),
       ),
-      row(
-        'New game',
-        'Start a brand-new zoo. Your current zoo will be lost.',
-        button('wh-btn-danger', 'refresh', 'New zoo', async () => {
-          const ok = await showDialog(this.host.uiRoot, {
-            title: 'Start a new zoo?',
-            text: 'Your current zoo, animals and money will be replaced by a fresh start. This cannot be undone.',
-            ok: 'Start over',
-            danger: true,
-          });
-          if (ok) {
-            this.close();
-            this.host.newGame();
-          }
-        }),
-      ),
+      this.hiddenRows.has('newZoo')
+        ? null
+        : row(
+            'New game',
+            'Start a brand-new zoo. Your current zoo will be lost.',
+            button('wh-btn-danger', 'refresh', 'New zoo', async () => {
+              const ok = await showDialog(this.host.uiRoot, {
+                title: 'Start a new zoo?',
+                text: newZooText(this.host.player?.profileId),
+                ok: 'Start over',
+                danger: true,
+              });
+              if (ok) {
+                this.close();
+                this.host.newGame();
+              }
+            }),
+          ),
       el('div', {
         class: 'wh-note',
         attrs: { style: 'margin-top:14px' },
@@ -515,7 +603,8 @@ export class ZooPanel {
           '<span class="wh-only-touch">Camera: drag to pan, pinch to zoom, twist with two fingers to rotate, slide two fingers up or down to tilt. Android back closes panels.</span>' +
           '<span class="wh-only-mouse">Camera: drag to pan, right-drag to rotate, wheel to zoom, WASD / QE to move and turn. Esc closes panels, R rotates, Space pauses.</span>',
       }),
-    );
+    ];
+    for (const r of rows) if (r) this.body.append(r);
     return refresh;
   }
 

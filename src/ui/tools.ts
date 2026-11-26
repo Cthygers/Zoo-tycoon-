@@ -7,6 +7,7 @@ import { ENTRANCE_PLAZA, MAP_H, MAP_W, TILE, WATER_LEVEL } from '../core/constan
 import type { ICreatureFactory, IPropsLayer, IRenderContext, ISimulation, SpeciesSuitability } from '../core/contracts';
 import type { TileRect } from '../core/events';
 import { PathType, Terrain, type CommandResult, type StaffRole, type Tool } from '../core/types';
+import type { PendingInfo } from '../core/ui-ext';
 import type { EdgeRef } from '../core/world';
 import { FENCES_BY_ID, PATHS_BY_TYPE } from '../data/fences';
 import { OBJECTS_BY_ID, rotatedSize } from '../data/objects';
@@ -59,6 +60,16 @@ export function confirmQuestion(r: CommandResult, verb: string): ConfirmQuestion
   }
   if (/crowded/i.test(r.warning)) return { title: 'Overcrowd this habitat?', text: sentence(r.warning), ok };
   return { title: 'Are you sure?', text: sentence(r.warning), ok };
+}
+
+/**
+ * A pending action as UI extensions see it (pure). The note's kind: why it cannot go ahead
+ * ('reason', the action is not ok), else the sim's warning or remark about it ('warning').
+ */
+export function pendingInfoOf(kind: Tool['kind'], p: Pick<PendingAction, 'ok' | 'risky' | 'note'> | null): PendingInfo | null {
+  if (!p) return null;
+  const note = p.note ?? null;
+  return { kind, ok: p.ok, risky: !!p.risky, note, noteKind: note === null ? null : p.ok ? 'warning' : 'reason' };
 }
 
 /** Bulldoze tool: clear everything in a rectangle, or only fence runs. */
@@ -212,6 +223,11 @@ export class ToolManager implements ToolInput {
   /** The question to ask before the pending action goes ahead, if it is that serious. */
   get pendingQuestion(): ConfirmQuestion | null {
     return this.pending?.ask ?? null;
+  }
+
+  /** The pending action as UI extensions see it (null when nothing waits on the confirm bar). */
+  get pendingInfo(): PendingInfo | null {
+    return pendingInfoOf(this.tool.kind, this.pending);
   }
 
   // ------------------------------------------------------------ tool selection

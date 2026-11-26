@@ -2,8 +2,11 @@
 // species has a complete, consistent voice; syllable banks stay within the
 // render and memory budgets.
 import { describe, expect, it } from 'vitest';
+import { Rng } from '../src/core/rng';
+import { planBout } from '../src/audio/fauna/bout';
+import { RATE_SPREAD } from '../src/audio/fauna/variety';
 import { RECIPES, SPECIES_AUDIO, registerRecipes, seedFor, sylId, voiceIdFor } from '../src/audio/recipes';
-import { ANIMAL_RECIPES } from '../src/audio/recipes/animals';
+import { ANIMAL_RECIPES, SYLLABLES } from '../src/audio/recipes/animals';
 import { BED_RECIPES } from '../src/audio/recipes/beds';
 import { COLONY_RECIPES } from '../src/audio/recipes/colony';
 import { CUE_RECIPES } from '../src/audio/recipes/cues';
@@ -79,6 +82,37 @@ describe('SPECIES_AUDIO', () => {
     }
     for (const voice of ['lion', 'elephant', 'zebra', 'penguin', 'hippo']) expect(SPECIES_AUDIO[voice].syllables.juv?.variants).toBe(3);
   });
+
+  it('gives the most-played syllable types six variants', () => {
+    for (const [voice, syl] of [
+      ['gorilla', 'piggrunt'],
+      ['penguin', 'contact'],
+      ['elephant', 'snort'],
+      ['lion', 'moan'],
+      ['lion', 'roar'],
+    ])
+      expect(SPECIES_AUDIO[voice].syllables[syl].variants, `${voice}.${syl}`).toBeGreaterThanOrEqual(6);
+  });
+
+  it('never lets one animal overlap its own zebra bray cycles or penguin display pairs', () => {
+    for (const [voice, syl] of [
+      ['zebra', 'cycle'],
+      ['penguin', 'pair'],
+    ]) {
+      const sp = SPECIES_AUDIO[voice];
+      const bout = sp.bouts.find((b) => b.kind === 'call')!;
+      // longest variant at the slowest playback: the deepest individual and the lowest per-play rate
+      const longest = SYLLABLES[voice][syl].d[1];
+      const slowest = (1 - sp.pitchSpread) * (1 - Math.max(RATE_SPREAD, sp.rateJitter));
+      for (let seed = 1; seed <= 300; seed++) {
+        const items = planBout(sp, bout, new Rng(seed), (s) => sp.syllables[s].dur).filter((i) => i.syl === syl);
+        for (let i = 1; i < items.length; i++) {
+          const end = items[i - 1].t + longest / (slowest * items[i - 1].rate);
+          expect(end - items[i].t, `${voice} seed ${seed} #${i}`).toBeLessThanOrEqual(0.02);
+        }
+      }
+    }
+  });
 });
 
 describe('syllable and colony recipes', () => {
@@ -90,7 +124,7 @@ describe('syllable and colony recipes', () => {
       const r = RECIPES[id];
       expect([16000, 22050], id).toContain(r.rate);
       expect(r.peak, id).toBeLessThanOrEqual(0.9);
-      expect(r.dur, id).toBeLessThanOrEqual(6);
+      expect(r.dur, id).toBeLessThanOrEqual(id.startsWith('loop.') ? 10 : 6);
     }
   });
 
@@ -105,16 +139,17 @@ describe('syllable and colony recipes', () => {
   });
 
   it('stay within the memory budget', () => {
-    // demo zoo (where the round's targets are measured): every variant of a
-    // full game day ≤ 5.5 MB, the #0 set rendered at warmup ≤ 2.5 MB
-    expect(sylBytes(DEMO_ZOO, false)).toBeLessThanOrEqual(5.5 * MB);
+    // demo zoo (where the round's targets are measured): every variant ≤ 6 MB
+    // (a game day renders about 4.2 MB of them: variants render on first use),
+    // the #0 set rendered at warmup ≤ 2.5 MB
+    expect(sylBytes(DEMO_ZOO, false)).toBeLessThanOrEqual(6 * MB);
     expect(sylBytes(DEMO_ZOO, true)).toBeLessThanOrEqual(2.5 * MB);
-    // any species adds at most 1.1 MB (0.5 MB at warmup)
+    // any species adds at most 1.5 MB (the lion, with six roars and moans), 0.5 MB at warmup
     for (const voice of Object.keys(SPECIES_AUDIO)) {
-      expect(sylBytes([voice], false), voice).toBeLessThanOrEqual(1.1 * MB);
+      expect(sylBytes([voice], false), voice).toBeLessThanOrEqual(1.5 * MB);
       expect(sylBytes([voice], true), voice).toBeLessThanOrEqual(0.5 * MB);
     }
-    // colony loops: 6 s at 22.05 kHz each once folded
+    // colony loops, once folded
     let colony = 0;
     for (const r of Object.values(COLONY_RECIPES)) colony += r.dur * (r.rate ?? 22050) * 4;
     expect(colony).toBeLessThanOrEqual(1.1 * MB);

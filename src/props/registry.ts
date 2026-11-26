@@ -25,7 +25,8 @@ import type { QualitySettings } from '../core/contracts';
  *      the occluder cut keeps a piece whose top stays below the camera → subject line
  *  - material.userData.occluderAnywhere = true → (boulders, ice) cut anywhere on the line in front of the subject,
  *      not only near the camera
- *  - material.userData.occluderShell = true  → (a den) cut whole while the followed subject stands inside it
+ *  - material.userData.occluderShell = true  → (a den) cut whole while the followed subject stands inside it, with
+ *      its shadow (layer.ts shadowGeometry, lod/fade.ts setShellShadow)
  * Mesh userData conventions:
  *  - mesh.userData.noShadow = true          → never cast shadows (tiny details, glass)
  */

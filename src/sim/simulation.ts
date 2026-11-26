@@ -60,6 +60,8 @@ import { SimRng } from './rng';
 import { StaffSystem } from './staff';
 import { serviceOf } from './queues';
 import { emptyStaffDay, type AnimalSim, type GuestSim, type HabitatRuntime, type ServiceTally, type StaffSim } from './state';
+import { VERSUS_MULTIPLIER, VERSUS_SPEED } from '../../shared/versus-rules';
+import { VersusMatch, type VersusSave } from './versus';
 
 /** Largest simulated step (scaled seconds). Larger frames are sub-stepped. */
 export const MAX_STEP = 0.1;
@@ -139,6 +141,10 @@ interface SimSaveData extends SimSave {
   messages?: SimMessage[];
   /** When each recent notification key was last shown (sim time), so an ongoing problem stays quiet after Continue (older saves: none). */
   notifyLast?: [string, number][];
+  /** Versus match state (only in a match's save; spec §5.2). SAVE_VERSION stays 1: older saves have none. */
+  versus?: VersusSave;
+  /** The tutorial's opaque progress (never in a versus save). */
+  tutorial?: Record<string, unknown>;
 }
 
 /** Notification throttles older than this (sim seconds, two game days) can no longer silence or demote a message, so saves leave them out. */
@@ -188,6 +194,10 @@ export class Simulation implements ISimulation {
    */
   starterObjectMaxId = 0;
   readonly starterPath = new Uint8Array(N_TILES);
+  /** The versus match this zoo plays (null outside a match): locked 4× clock, Zoo Points. */
+  versus: VersusMatch | null = null;
+  /** The tutorial's opaque progress, round-tripped in saves (newGame sets null; never set in a match). */
+  tutorial: Record<string, unknown> | null = null;
 
   // ---- subsystems
   readonly nav: PathNav;
@@ -270,9 +280,29 @@ export class Simulation implements ISimulation {
     return this.minuteOfDay < 6 * 60 || this.minuteOfDay >= 21 * 60;
   }
 
+  /** 4 during a versus match (the locked 4× clock), else 1: real-time spacing of toasts and the refund window scale by it. */
+  get paceScale(): number {
+    return this.versus ? VERSUS_MULTIPLIER : 1;
+  }
+
+  /** Ignored during a versus match: the clock stays at 4× (paused once the match has ended). */
   setSpeed(speed: SimSpeed): void {
+    if (this.versus) {
+      this.speed = this.versus.ended ? 0 : VERSUS_SPEED;
+      return;
+    }
     const s = Math.max(0, Math.min(3, Math.round(speed))) as SimSpeed;
     this.speed = s;
+  }
+
+  /** Let one guest party in now (the tutorial's first guests): see GuestSystem.welcomeParty. */
+  welcomeFirstGuests(): boolean {
+    return this.guestSys.welcomeParty();
+  }
+
+  /** Habitats whose fence was opened and not closed again: their id and the old habitat's tiles. */
+  openEnclosures(): ReadonlyArray<{ id: number; tiles: readonly number[] }> {
+    return this.enclosures.open.map((e) => ({ id: e.id, tiles: e.tiles.slice() }));
   }
 
   setAdmission(price: number): void {
@@ -281,16 +311,31 @@ export class Simulation implements ISimulation {
   }
 
   update(realDt: number): void {
+    const v = this.versus;
     if (realDt > 0 && Number.isFinite(realDt)) {
-      const mult = SPEED_MULTIPLIERS[this.speed] ?? 0;
+      // a versus match runs at the locked 4× whatever `speed` says, and never past its end
+      const mult = v ? (v.ended ? 0 : SPEED_MULTIPLIERS[VERSUS_SPEED]) : (SPEED_MULTIPLIERS[this.speed] ?? 0);
       let remaining = Math.min(realDt, 0.5) * mult;
+      if (v && !v.ended) remaining = Math.min(remaining, v.endTime - this.time);
       while (remaining > 1e-9) {
         const dt = remaining > MAX_STEP ? MAX_STEP : remaining;
         this.step(dt);
         remaining -= dt;
       }
+      if (v && !v.ended && v.endTime - this.time < 1e-6) this.finishVersus();
     }
     this.flushMoney();
+  }
+
+  /** The match clock reached its end: snap to day N+1 08:30 exactly, last samples, versusEnded, clock stopped. */
+  private finishVersus() {
+    const v = this.versus;
+    if (!v || v.ended) return;
+    this.time = v.endTime;
+    this.day = v.rules.days + 1;
+    this.minuteOfDay = v.rules.startMinute;
+    v.finish();
+    this.speed = 0;
   }
 
   private step(dt: number) {
@@ -316,6 +361,7 @@ export class Simulation implements ISimulation {
       this.slowAcc -= 0.5;
       this.slowTick();
     }
+    this.versus?.tick(this);
   }
 
   private slowTick() {
@@ -398,7 +444,11 @@ export class Simulation implements ISimulation {
     this.debtWarned = false;
     this.events.emit('dayChanged', { day: this.day });
     const summary = daySummary(done, turnedAway);
-    this.notify(null, summary.text, summary.kind, undefined, undefined, 'day');
+    if (this.versus) {
+      // a 2-minute day would toast every 2 minutes: the log keeps it, the HUD pops "Day 7: +142 points"
+      this.logMessage(summary.text, summary.kind);
+      this.versus.onDayClosed(done);
+    } else this.notify(null, summary.text, summary.kind, undefined, undefined, 'day');
     if (this.money < 0) {
       this.notify('debt', `You are ${fmtMoney(-this.money)} in debt! Building is blocked until you earn money — raise income or sell something.`, 'bad', undefined, 0);
     }
@@ -443,7 +493,8 @@ export class Simulation implements ISimulation {
   /** Whether a toast with this key would be shown now (not throttled by `cooldown`). */
   canNotify(key: string, cooldown = 90): boolean {
     const last = this.notifyLast.get(key);
-    return last === undefined || this.time - last >= cooldown;
+    // cooldowns are simulated seconds: × paceScale keeps a match's 4× clock at the 1× spacing in real time
+    return last === undefined || this.time - last >= cooldown * this.paceScale;
   }
 
   /**
@@ -464,7 +515,7 @@ export class Simulation implements ISimulation {
   remind(key: string, text: string, kind: NotifyKind, focus?: { x: number; z: number }, cooldown = 90, lasting = 2 * cooldown) {
     const last = this.notifyLast.get(key);
     if (!this.claimNotify(key, cooldown)) return;
-    this.emitNotify(key, text, kind, focus, last !== undefined && this.time - last < lasting);
+    this.emitNotify(key, text, kind, focus, last !== undefined && this.time - last < lasting * this.paceScale);
   }
 
   /** A toast the first time this zoo meets `key` (remembered in the save), log-only after that. */
@@ -1014,8 +1065,10 @@ export class Simulation implements ISimulation {
       starterPath: rleEncode(this.starterPath),
       serviceDay: Array.from(this.serviceDay),
       messages: this.messageLog,
-      notifyLast: Array.from(this.notifyLast).filter(([, t]) => this.time - t < NOTIFY_MEMORY),
+      notifyLast: Array.from(this.notifyLast).filter(([, t]) => this.time - t < NOTIFY_MEMORY * this.paceScale),
     };
+    if (this.versus) data.versus = this.versus.serialize();
+    else if (this.tutorial) data.tutorial = this.tutorial;
     // deep copy (so later simulation never mutates a save that is still being written),
     // with fractional numbers rounded to 1/1000 — positions to the millimetre — which
     // keeps the save small for localStorage.
@@ -1026,6 +1079,8 @@ export class Simulation implements ISimulation {
     if (!save || save.version !== SAVE_VERSION) throw new Error('Unsupported save version');
     const s = JSON.parse(JSON.stringify(save)) as SimSaveData;
     if (!s.world || !Array.isArray(s.world.terrain)) throw new Error('Corrupt save: missing world');
+    // a match block this version cannot play throws before anything is replaced
+    const versus = s.versus ? VersusMatch.load(s.versus, this) : null;
     if (s.worldGrids) {
       const g = s.worldGrids;
       s.world.terrain = rleDecode(g.terrain, MAP_W * MAP_H);
@@ -1049,7 +1104,11 @@ export class Simulation implements ISimulation {
     this.admissionPrice = s.admissionPrice;
     this.day = s.day;
     this.minuteOfDay = s.minuteOfDay;
-    this.speed = s.speed;
+    // a match's clock is locked: whatever the save says, 4× (or stopped once it has ended)
+    this.versus = versus;
+    this.speed = versus ? (versus.ended ? 0 : VERSUS_SPEED) : s.speed;
+    const tut = s.tutorial;
+    this.tutorial = !versus && tut && typeof tut === 'object' && !Array.isArray(tut) ? tut : null;
     this.rating = s.rating;
     this.objectives = mergeObjectives(s.objectives ?? []);
     const newGoals = this.objectives.filter((o) => !(s.objectives ?? []).some((so) => so.id === o.id)).map((o) => o.id);
@@ -1124,6 +1183,10 @@ export class Simulation implements ISimulation {
   newGame(seed?: number, opts: NewGameOptions = {}): void {
     const s = seed ?? this.pendingNewSeed ?? ((Math.random() * 0x7fffffff) | 0);
     this.pendingNewSeed = undefined;
+    // a New Zoo never inherits a match or tutorial progress; a match sets its own (before the
+    // world resets, so worldReset listeners already see it)
+    this.versus = opts.versus ? new VersusMatch(opts.versus, this) : null;
+    this.tutorial = null;
     this.animals.clear();
     this.guests.clear();
     this.staff.clear();
@@ -1141,11 +1204,11 @@ export class Simulation implements ISimulation {
       nextObjectId: 1,
       habitatNames: {},
     };
-    this.money = START_MONEY;
+    this.money = opts.versus ? opts.versus.startMoney : START_MONEY;
     this.admissionPrice = DEFAULT_ADMISSION;
     this.day = 1;
-    this.minuteOfDay = opts.startMinute ?? START_MINUTE;
-    this.speed = 1;
+    this.minuteOfDay = opts.startMinute ?? opts.versus?.startMinute ?? START_MINUTE;
+    this.speed = opts.versus ? VERSUS_SPEED : 1;
     this.objectives = createObjectives();
     this.ledger = [];
     this.today = emptyLedger(1);

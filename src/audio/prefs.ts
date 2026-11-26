@@ -16,7 +16,14 @@ export interface AudioPrefs {
   music: number;
 }
 
-export const DEFAULT_PREFS: Readonly<AudioPrefs> = { v: 1, master: 1, ambience: 0.9, world: 1, ui: 0.85, music: 0.75 };
+export const DEFAULT_PREFS: Readonly<AudioPrefs> = { v: 1, master: 1, ambience: 0.9, world: 1, ui: 1, music: 0.75 };
+/**
+ * Stored next to `v` (still 1, so older builds keep reading the prefs). Prefs saved
+ * without it come from 0.14.0, whose default UI volume (0.85) was too quiet over a
+ * busy day bed: that untouched default moves to the new one.
+ */
+const PREFS_REV = 2;
+const OLD_DEFAULT_UI = 0.85;
 
 const CHANNELS = ['master', 'ambience', 'world', 'ui', 'music'] as const satisfies readonly AudioChannel[];
 /** Channels the engine mixes today (music is stored only). */
@@ -39,13 +46,14 @@ export function parsePrefs(raw: string | null): AudioPrefs {
   const p: AudioPrefs = { ...DEFAULT_PREFS };
   if (!o || typeof o !== 'object' || (o as { v?: unknown }).v !== 1) return p;
   for (const ch of CHANNELS) p[ch] = level((o as Record<string, unknown>)[ch], DEFAULT_PREFS[ch]);
+  if ((o as { rev?: unknown }).rev === undefined && p.ui === OLD_DEFAULT_UI) p.ui = DEFAULT_PREFS.ui;
   return p;
 }
 
 export function serializePrefs(p: AudioPrefs): string {
   const out: AudioPrefs = { ...DEFAULT_PREFS };
   for (const ch of CHANNELS) out[ch] = level(p[ch], DEFAULT_PREFS[ch]);
-  return JSON.stringify(out);
+  return JSON.stringify({ ...out, rev: PREFS_REV });
 }
 
 /** Push the volumes to the audio engine (an IAudio without channel volumes is left alone). */

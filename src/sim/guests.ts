@@ -432,6 +432,21 @@ export class GuestSystem {
   private breakFrom = new Int32Array(N_TILES);
   private breakQueue: number[] = [];
 
+  /**
+   * The tutorial's first guests: one party walks in now, if the zoo is open (and not about to
+   * close for arrivals), the gate is open, the zoo is empty and not full. True when it did.
+   */
+  welcomeParty(): boolean {
+    const sim = this.sim;
+    if (sim.guests.size > 0) return false;
+    if (!sim.isOpen() || sim.minuteOfDay >= (CLOSE_HOUR - 1) * 60) return false;
+    this.updateCapacity();
+    if (this.gateState() !== 'open' || this.full()) return false;
+    if (!this.spawnParty()) return false;
+    sim.spawnAcc = 0;
+    return true;
+  }
+
   /** A party of 1–4 arrives at the gate: singles, couples, friends, families. */
   spawnParty(): GuestSim | null {
     const rng = this.sim.rng;
@@ -614,6 +629,7 @@ export class GuestSystem {
     if (g.qObj) this.queues.leave(g);
     sim.satisfaction += (g.happiness - sim.satisfaction) * 0.05;
     sim.progress.noteDeparture(g.happiness);
+    sim.versus?.onDeparture(g.happiness);
     g.seatObj = 0;
     sim.guests.delete(id);
     // companions of a leader that vanished carry on alone; a companion leaving drops out of the party

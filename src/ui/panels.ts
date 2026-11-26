@@ -123,9 +123,20 @@ export function dialogOpen(): boolean {
   return openDialogs.length > 0;
 }
 
+/** Classes of a dialog's two buttons: the primary one (OK unless `primary: 'cancel'`) is filled. */
+export function dialogButtonClasses(opts: { danger?: boolean; primary?: 'ok' | 'cancel' }): { ok: string; cancel: string } {
+  if (opts.primary === 'cancel') return { ok: opts.danger ? 'wh-btn-danger' : 'wh-btn-ghost', cancel: 'wh-btn-primary' };
+  return { ok: opts.danger ? 'wh-btn-danger' : 'wh-btn-primary', cancel: 'wh-btn-ghost' };
+}
+
+/**
+ * A confirm dialog; resolves true for OK. `primary: 'cancel'` makes Cancel the filled button
+ * (on the right, focused, and Enter's answer), e.g. "Keep learning" over "Skip". Android back,
+ * Esc and a tap outside always answer Cancel.
+ */
 export function showDialog(
   root: HTMLElement,
-  opts: { title: string; text: string; ok: string; cancel?: string; danger?: boolean },
+  opts: { title: string; text: string; ok: string; cancel?: string; danger?: boolean; primary?: 'ok' | 'cancel' },
 ): Promise<boolean> {
   return new Promise((resolve) => {
     const back = el('div', { class: 'wh-dialog-back', attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': opts.title } });
@@ -149,14 +160,18 @@ export function showDialog(
       } else if (e.code === 'Enter' || e.code === 'NumpadEnter') {
         e.stopPropagation();
         e.preventDefault();
-        finish(true);
+        finish(!cancelFirst);
       }
     };
-    const okBtn = button(opts.danger ? 'wh-btn-danger' : 'wh-btn-primary', null, opts.ok, () => finish(true));
+    const cancelFirst = opts.primary === 'cancel';
+    const cls = dialogButtonClasses(opts);
+    const okBtn = button(cls.ok, null, opts.ok, () => finish(true));
+    const cancelBtn = button(cls.cancel, null, opts.cancel ?? 'Cancel', () => finish(false));
     const box = el('div', 'wh-dialog wh-glass-2', [
       el('h3', { text: opts.title }),
       el('p', { text: opts.text }),
-      el('div', 'wh-dialog-btns', [button('wh-btn-ghost', null, opts.cancel ?? 'Cancel', () => finish(false)), okBtn]),
+      // the primary button on the right
+      el('div', 'wh-dialog-btns', cancelFirst ? [okBtn, cancelBtn] : [cancelBtn, okBtn]),
     ]);
     back.append(box);
     back.addEventListener('click', (ev) => {
@@ -167,7 +182,7 @@ export function showDialog(
     openDialogs.push(finish);
     root.append(back);
     cue('open');
-    okBtn.focus({ preventScroll: true });
+    (cancelFirst ? cancelBtn : okBtn).focus({ preventScroll: true });
   });
 }
 
@@ -183,9 +198,13 @@ export class Sheet {
   private foot = el('div', 'wh-sheet-foot');
   private badgeToken = 0;
 
+  /** The sheet's X button. */
+  readonly closeEl: HTMLButtonElement;
+
   constructor(cls: string, onClose: () => void) {
+    this.closeEl = button('wh-btn-ghost wh-btn-icon', 'close', null, onClose, 'Close');
     this.root = el('div', `wh-sheet wh-glass-2 hidden ${cls}`, [
-      el('div', 'wh-sheet-head', [this.badge, el('div', 'wh-sheet-titles', [this.title, this.sub]), button('wh-btn-ghost wh-btn-icon', 'close', null, onClose, 'Close')]),
+      el('div', 'wh-sheet-head', [this.badge, el('div', 'wh-sheet-titles', [this.title, this.sub]), this.closeEl]),
       this.body,
       this.foot,
     ]);
@@ -373,6 +392,7 @@ export class InfoPanel {
   private view: PanelView | null = null;
   private acc = 0;
   private followBtn: HTMLButtonElement | null = null;
+  private anchors: { happiness?: HTMLElement } = {};
 
   constructor(private host: PanelHost) {
     this.sheet = new Sheet('', () => host.select(null));
@@ -382,10 +402,21 @@ export class InfoPanel {
     return this.sel;
   }
 
+  /** What the sheet shows (null while it is closed). */
+  get selection(): SelectionRef | null {
+    return this.sel;
+  }
+
+  /** A part of the open view other UI points at: the animal view's happiness meter. */
+  anchor(name: 'happiness'): HTMLElement | null {
+    return this.sheet.open ? (this.anchors[name] ?? null) : null;
+  }
+
   show(sel: SelectionRef | null): void {
     this.sel = sel;
     this.view = null;
     this.followBtn = null;
+    this.anchors = {};
     if (!sel) {
       if (this.sheet.open) cue('close');
       this.sheet.hide();
@@ -460,6 +491,7 @@ export class InfoPanel {
     const health = meter('Health', 'health');
     happy.root.classList.add('big');
     health.root.classList.add('big');
+    this.anchors.happiness = happy.root;
     const needs = [
       ['Food', 'hunger', 'bowl'],
       ['Water', 'thirst', 'drop'],

@@ -46,7 +46,8 @@
 // ground in a close view. Still bark casts from the shared shadow-only
 // batches (props/layer.ts), whose depth material (casterDepthMaterial) makes
 // the same decision for every piece that carries crown data (the rest of
-// those batches carries zero crown data and never fades).
+// those batches carries zero crown data and never fades, except a den's
+// shell, setShellShadow).
 //
 // While the camera follows a subject (setFollowCut, driven from the view's
 // follow state) more cuts run, all off in free-camera play:
@@ -70,9 +71,10 @@
 //     (applyOccluderCut: an instance-wide decision); a fence post only once
 //     every panel it joins has gone. Boulders, ice blocks, ground-plant clumps
 //     and tree trunks (with their tree) on the line go anywhere in front of
-//     the subject, and a den the subject stands in goes whole;
+//     the subject, and a den the subject stands in goes whole, with its
+//     shadow (no den-shaped ring around the subject);
 //   - a big trunk (BIG_TRUNK_R, a baobab's) covering the subject takes its
-//     tree at every follow zoom, its shade staying.
+//     tree at every follow zoom, with its shadow.
 
 import * as THREE from 'three';
 import { TILE } from '../../core/constants';
@@ -130,10 +132,15 @@ const FOLLOW_GROW = 0.5;
 const FOLLOW_CLEAR = 0.5;
 /** Leaf cards within this distance (m) of the lens stay to the card cut (the lens sphere handles them). */
 const FOLLOW_LENS = 1.5;
-/** Camera → subject distance (m) at or below which the occluder cut switches on … */
-export const OCCLUDER_D = 11;
+/**
+ * Camera → subject distance (m) at or below which the occluder cut switches
+ * on: every follow zoom up to 10 m, which puts the camera 11.75 m from the
+ * subject on a 20:9 phone (12.05 m on 21:9), so a follow started there never
+ * leaves a shelter roof or fence in front of the subject …
+ */
+export const OCCLUDER_D = 12.5;
 /** … and at or above which it switches off again (hysteresis: no flicker while zooming around one distance). */
-export const OCCLUDER_OFF_D = 13;
+export const OCCLUDER_OFF_D = 14.5;
 /** Seconds the occluder cut takes to cross-fade on or off (time, not zoom: nothing rests half dissolved). */
 export const OCCLUDER_FADE_S = 0.3;
 /** Height (m) above the subject's feet of the point the cuts aim at (its body, not its feet). */
@@ -334,8 +341,11 @@ float propFadeAt( vec3 p, mat4 M ) {
 #endif
 #else
 #ifdef PROP_FADE_TREES_ONLY
-  // shared shadow casters: only pieces with crown data (tree bark) go
-  if ( aCrownR.y < 1.0 ) return 0.0;
+  // shared shadow casters: only pieces with crown data (tree bark) go, and a
+  // den's shell (aCrownR.z: minus its reach, cm; setShellShadow) with
+  // its den while the subject stands inside (the den shell rule of
+  // propOccluderAt), so no den-shaped shadow rings the subject
+  if ( aCrownR.y < 1.0 ) return step( aCrownR.z, -1.0 ) * step( length( o.xz - uFadeFocus.xz ), 0.2 - aCrownR.z * 0.01 ) * uFadeOccl;
 #endif
   float k = uFadeParams.w;
   // whole instance: the camera stands inside / right next to this plant
@@ -383,9 +393,10 @@ float propFadeAt( vec3 p, mat4 M ) {
   // subject goes with its tree, even the subject's own (the crown is above
   // the frame there); its shade stays on the subject
   fade = max( fade, propTreeFade( propOccluderAt( o, propOcclTop( o, M ), ${PLANT_FRONT.toFixed(1)}, true ) ) );
-  // … and a big trunk at every follow zoom
-  fade = max( fade, propTreeFade( propBigTrunk( o, M, cw.y ) * uFadeFollow ) );
 #endif
+  // … and a big trunk at every follow zoom, with its shadow (a baobab-sized
+  // shadow with no tree above it reads as a rendering bug)
+  fade = max( fade, propTreeFade( propBigTrunk( o, M, cw.y ) * uFadeFollow ) );
 #ifdef PROP_FADE_CARDS
   // following: the leaf cards right on the line go, card by card, also from
   // a kept tree: the leaves over the subject go, its trunk and the rest of
@@ -598,7 +609,9 @@ function occlKey(m: THREE.Material): string {
  * height (aOcclTop), so a piece below the line stays; `occluderAnywhere`
  * (boulders, ice) cuts it anywhere in front of the subject; `occluderShell`
  * (a den) cuts it whole while the subject stands inside it. Apply last. Its
- * shadow stays (the piece is still there, only not drawn).
+ * shadow stays (the piece is still there, only not drawn), except a den's
+ * whose shadow geometry carries setShellShadow: it goes with the den the
+ * subject stands in.
  */
 export function applyOccluderCut(m: THREE.Material): void {
   if (occluderData.has(m) || fadeData.has(m)) return;
@@ -636,8 +649,9 @@ let casterDepth: THREE.MeshDepthMaterial | null = null;
  * still bark casts with buildings, rocks and logs: pieces with crown data
  * (a tree's trunk and limbs) take the visible bark's per-tree decision, so a
  * tree removed near the camera leaves no trunk or limb shadow; pieces with
- * zero crown data never fade. Every geometry drawn with it needs aCrown /
- * aCrownR (zero-filled where there is no crown).
+ * zero crown data never fade, a den's shell (setShellShadow) goes with the
+ * den the followed subject stands in. Every geometry drawn with it needs
+ * aCrown / aCrownR (zero-filled where there is no crown).
  */
 export function casterDepthMaterial(): THREE.MeshDepthMaterial {
   if (!casterDepth) {
@@ -648,6 +662,30 @@ export function casterDepthMaterial(): THREE.MeshDepthMaterial {
     casterDepth = d;
   }
   return casterDepth;
+}
+
+/** Dissolve rank (0..255) of a den's shell shadow: it goes half way through the occluder cut's cross-fade, as the den does. */
+export const SHELL_SHADOW_RANK = 127;
+
+/**
+ * Crown data of a den's geometry in the shared shadow-only batches
+ * (props/layer.ts shadowGeometry; materials with userData.occluderShell): no
+ * crown, the den's reach (m) as aCrownR.z = −reach in cm and the middle rank,
+ * so casterDepthMaterial drops its shadow with the den the followed subject
+ * stands in (the den shell rule of applyOccluderCut). Sets aCrown / aCrownR.
+ */
+export function setShellShadow(g: THREE.BufferGeometry, reach: number): THREE.BufferGeometry {
+  const n = g.getAttribute('position').count;
+  const crown = new Int16Array(n * 4);
+  const crownR = new Int16Array(n * 3);
+  const r = -Math.max(1, Math.round(reach * 100));
+  for (let i = 0; i < n; i++) {
+    crown[i * 4 + 3] = SHELL_SHADOW_RANK;
+    crownR[i * 3 + 2] = r;
+  }
+  g.setAttribute('aCrown', new THREE.BufferAttribute(crown, 4));
+  g.setAttribute('aCrownR', new THREE.BufferAttribute(crownR, 3));
+  return g;
 }
 
 /** Program cache key suffix matching `fadeDepthPatch` ('' when it does not apply). */

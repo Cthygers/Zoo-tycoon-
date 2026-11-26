@@ -97,7 +97,12 @@ const CSS = /* css */ `
 .wh-top-left { grid-area: left; display: flex; gap: 8px; }
 .wh-top-mid { grid-area: mid; display: flex; gap: 8px; justify-self: center; }
 .wh-top-speed { grid-area: speed; }
-.wh-top-menu { grid-area: menu; }
+.wh-top-menu { grid-area: menu; display: flex; align-items: center; gap: 8px; }
+/* extension slots: 'speed' takes the speed group's place while it has something in it (the versus clock),
+   'badge' sits left of the menu button (the cloud badge) */
+.wh-top-slot { pointer-events: auto; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.wh-slot-speed { grid-area: speed; }
+.wh-top-slot:empty, .wh-top-slot.hidden, .wh-top-speed.hidden { display: none; }
 .wh-chip {
   pointer-events: auto; height: 44px; padding: 0 14px 0 11px; border-radius: 22px;
   display: inline-flex; align-items: center; gap: 8px; font-weight: 650; font-size: 15px; letter-spacing: .01em;
@@ -125,7 +130,16 @@ const CSS = /* css */ `
 .wh-stars-bg { color: rgba(255, 255, 255, 0.18); display: inline-flex; gap: 1px; }
 .wh-stars-fg { color: #f1c25c; display: inline-flex; gap: 1px; position: absolute; left: 0; top: 0; overflow: hidden; white-space: nowrap; transition: width .6s ease; }
 .wh-rating-num { font-size: 13px; color: var(--wh-muted); font-weight: 600; }
-.wh-seg { pointer-events: auto; display: inline-flex; padding: 3px; gap: 2px; border-radius: 24px; height: 46px; align-items: center; }
+.wh-seg { pointer-events: auto; display: inline-flex; padding: 3px; gap: 2px; border-radius: 24px; height: 46px; align-items: center; position: relative; }
+/* held by a UI extension (the tutorial while you build): dimmed with a lock, but still tappable so it can say why */
+.wh-seg.locked .wh-btn { opacity: .5; }
+.wh-seg.locked .wh-btn.on { opacity: .75; }
+.wh-seg-lock {
+  position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; border-radius: 10px; display: grid; place-items: center;
+  background: var(--wh-amber); color: #2e2108; pointer-events: none; box-shadow: 0 0 0 2px rgba(17, 23, 19, .85);
+}
+.wh-seg-lock .wh-ico { width: 12px; height: 12px; stroke-width: 2.4; }
+.wh-seg-lock.hidden { display: none; }
 .wh-seg .wh-btn { min-width: 40px; width: 40px; height: 38px; min-height: 38px; padding: 0; border-radius: 19px; color: var(--wh-muted); position: relative; }
 /* 44 px tall touch targets without changing the pill's look */
 .wh-seg .wh-btn::after { content: ""; position: absolute; inset: -4px -1px; }
@@ -154,7 +168,7 @@ const CSS = /* css */ `
   .wh-top-left { order: 1; flex: 1 1 calc(100% - 64px); min-width: 0; }
   .wh-top-menu { order: 2; }
   .wh-top-mid { order: 3; flex: 1 1 auto; justify-self: auto; }
-  .wh-top-speed { order: 4; }
+  .wh-top-speed, .wh-slot-speed { order: 4; }
   .wh-stars .wh-star-x { display: none; }
 }
 /* narrow landscape (≤ 860 px): one star + the number, like portrait (with "138/141" guests and
@@ -350,7 +364,7 @@ const CSS = /* css */ `
 .wh-ui.drawer-open .wh-tb-tip { display: none; }
 .wh-tb-tip .wh-ico { width: 14px; height: 14px; flex: none; }
 
-/* ------------------------------------------------------------ next-goal pill + first-run tour */
+/* ------------------------------------------------------------ next-goal pill (also the tutorial's step) */
 .wh-goal {
   position: absolute; top: calc(var(--wh-gt) + var(--wh-top-h) + 6px); left: var(--wh-gl); z-index: 8;
   pointer-events: auto; display: flex; align-items: center; gap: 9px; min-height: 42px; padding: 4px 12px 4px 10px; border-radius: 16px;
@@ -361,6 +375,8 @@ const CSS = /* css */ `
 /* hidden, and under the species card that opens in the same corner */
 /* also while a build drawer is open: the tool bar then sits where the pill is */
 .wh-goal.hidden, .wh-ui.card-open .wh-goal, .wh-ui.drawer-open .wh-goal { opacity: 0; visibility: hidden; pointer-events: none; }
+/* a UI extension can put the pill away (e.g. while the tutorial's bubble speaks for it) */
+.wh-ui.wh-pill-off .wh-goal { opacity: 0; visibility: hidden; pointer-events: none; }
 /* left: the trophy over "NEXT"; right: the goal, then its progress bar, "141 / 150" and the reward */
 .wh-goal-k { display: flex; flex-direction: column; align-items: center; gap: 1px; flex: none; color: var(--wh-sand); font-size: 10.5px; font-weight: 750; text-transform: uppercase; letter-spacing: .08em; line-height: 1.1; }
 .wh-goal-k .wh-ico { width: 16px; height: 16px; }
@@ -374,31 +390,10 @@ const CSS = /* css */ `
 .wh-goal-r:empty { display: none; }
 .wh-goal-p:empty + .wh-goal-r { margin-left: 0; } /* a one-step goal: just the reward, under the goal */
 .wh-goal.fresh { animation: wh-goal-glow 1.6s ease; }
+/* the tutorial's step: a leaf over "STEP", the chapter, "4 / 12" and its bar */
+.wh-goal.step { border-color: rgba(151, 196, 108, .55); }
+.wh-goal.step .wh-goal-k { color: var(--wh-leaf-2); }
 @keyframes wh-goal-glow { 25% { box-shadow: 0 0 0 3px rgba(151, 196, 108, .6), 0 10px 28px rgba(0, 0, 0, .28); } }
-.wh-coach {
-  position: absolute; left: 0; top: 0; z-index: 20; width: max-content; max-width: min(300px, calc(100vw - 16px));
-  padding: 7px 7px 8px 10px; border-radius: 14px; pointer-events: none;
-  background: linear-gradient(180deg, rgba(50, 68, 40, .97), rgba(31, 45, 27, .97)); border: 1px solid rgba(151, 196, 108, .55);
-  box-shadow: 0 10px 26px rgba(0, 0, 0, .4); transition: transform .22s cubic-bezier(.2, .9, .3, 1);
-  animation: wh-fade .3s ease both;
-}
-.wh-coach.hidden { display: none; }
-/* while a tool is in hand: compact in a top corner, under the cost label and money popups */
-.wh-coach.docked { z-index: 4; max-width: min(260px, 36vw); transition: transform .22s cubic-bezier(.2, .9, .3, 1), opacity .2s ease; }
-.wh-coach.docked .wh-coach-arrow { display: none; }
-/* (without the fade-in animation, whose end state would keep it fully opaque) */
-.wh-coach.faded { animation: none; opacity: .4; }
-.wh-coach-head { display: flex; align-items: center; gap: 7px; }
-.wh-coach-n { flex: none; padding: 1px 6px; border-radius: 8px; background: var(--wh-leaf); color: #16230f; font-size: 10.5px; font-weight: 800; }
-.wh-coach-title { flex: 1; font-size: 13px; font-weight: 700; white-space: nowrap; }
-.wh-coach-text { margin-top: 2px; padding-right: 4px; font-size: 12.5px; line-height: 1.3; color: rgba(243, 238, 226, .88); }
-.wh-coach-arrow {
-  position: absolute; bottom: -7px; width: 12px; height: 12px; margin-left: -6px; transform: rotate(45deg);
-  background: rgb(31, 45, 27); border-right: 1px solid rgba(151, 196, 108, .55); border-bottom: 1px solid rgba(151, 196, 108, .55);
-}
-.wh-coach-skip { position: relative; flex: none; width: 28px; min-width: 28px; height: 28px; min-height: 28px; padding: 0; margin: -3px -2px -3px 0; border-radius: 14px; }
-.wh-coach-skip::after { content: ""; position: absolute; inset: -8px; } /* 44 px touch target */
-.wh-coach-skip .wh-ico { width: 15px; height: 15px; }
 
 /* ------------------------------------------------------------ side sheets (info panels) */
 .wh-sheet {
@@ -735,6 +730,7 @@ const CSS = /* css */ `
   .wh-cf-ok, .wh-cf-no { height: 44px; }
   .wh-cf-no { width: 44px; }
 }
+.wh-avatar { display: block; flex: none; border-radius: 50%; }
 @media (prefers-reduced-motion: reduce) {
   .wh-ui *, .wh-screen * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
